@@ -67,7 +67,7 @@ fn handle_client(mut stream: TcpStream) {
         let len = buf.read_u16().unwrap();
         let extension = match typ {
            ExtensionType::ServerName => {
-
+                
             }, 
             _ => ClientExtension::Unknown,
         };
