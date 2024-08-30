@@ -3,10 +3,11 @@ mod macros;
 mod enums;
 mod structs;
 
+use std::str;
 use std::io::Cursor;
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::{BigEndian, ReadBytesExt, LittleEndian};
 use std::{net::{TcpListener, TcpStream}, io::Read, u8, u16};
-use crate::{structs::ClientHello, enums::{ExtensionType, ClientExtension}};
+use crate::{structs::ClientHello, enums::{ExtensionType, ClientExtension, ServerName, UnknownExtension}};
 
 
 fn handle_client(mut stream: TcpStream) {
@@ -50,7 +51,7 @@ fn handle_client(mut stream: TcpStream) {
     buf.read_exact(&mut ch.session_id).unwrap();
 
     let chiper_length = buf.read_u16::<BigEndian>().unwrap();
-    ch.chiper_suites = vec![0u16; chiper_length as usize];
+    ch.chiper_suites = vec![0u16; (chiper_length/2) as usize ];
     buf.read_u16_into::<BigEndian>(&mut ch.chiper_suites).unwrap();
 
     let comp_len = buf.read_u8().unwrap();
@@ -64,13 +65,34 @@ fn handle_client(mut stream: TcpStream) {
             Ok(t) => t, 
         };
         let typ = ExtensionType::from(t);
-        let len = buf.read_u16().unwrap();
-        let extension = match typ {
+        let len = buf.read_u16::<BigEndian>().unwrap();
+        let extension: ClientExtension = match typ {
            ExtensionType::ServerName => {
-                
+                let mut list_len = buf.read_u16::<BigEndian>().unwrap();
+                let mut sn: Vec<ServerName> = vec![];
+
+                while list_len > 0{
+                    let l = buf.read_u16::<BigEndian>().unwrap();
+                    let t = buf.read_u8().unwrap();
+                    let hn = vec![0u8; l as usize];
+                    sn.push(ServerName::new(t, String::from_utf8(hn).unwrap()));
+                    list_len-=3;
+                    list_len-=l;
+                };
+                ClientExtension::ServerName(sn)
             }, 
-            _ => ClientExtension::Unknown,
+            _ => {
+                
+                let mut ext_buf = vec![0u8; len as usize];
+                buf.read_exact(&mut ext_buf);
+
+                ClientExtension::Unknown(UnknownExtension{
+                typ: ExtensionType::from(t),
+                payload: ext_buf,
+            })},
         };
+        
+        ch.extetensions.push(extension);
     }
 
     println!("{:?}", ch)

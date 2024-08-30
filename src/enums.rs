@@ -53,7 +53,7 @@ pub enum ClientExtension {
     EcPointFormats(Vec<u8>),
     NamedGroups(Vec<u8>),
     SignatureAlgorithms(Vec<u8>),
-    ServerName(Vec<String>),
+    ServerName(Vec<ServerName>),
     SessionTicket(Vec<u8>),
     Protocols(Vec<u16>),
     SupportedVersions(Vec<u16>),
@@ -74,8 +74,27 @@ pub enum ClientExtension {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnknownExtension {
-    typ: ExtensionType,
-    payload: Vec<u8>,
+    pub typ: ExtensionType,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerName {
+    typ: u8,
+    name: String,
+}
+
+impl ServerName {
+    pub fn new(typ: u8, str: String) -> ServerName {
+        ServerName {
+            typ: typ,
+            name: str,
+        }
+    }
+
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
 }
 
 impl ClientExtension {
