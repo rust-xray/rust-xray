@@ -2,10 +2,11 @@
 mod macros;
 mod enums;
 mod structs;
+mod errors;
+mod codec;
 
-use std::str;
 use std::io::Cursor;
-use byteorder::{BigEndian, ReadBytesExt, LittleEndian};
+use byteorder::{BigEndian, ReadBytesExt};
 use std::{net::{TcpListener, TcpStream}, io::Read, u8, u16};
 use crate::{structs::ClientHello, enums::{ExtensionType, ClientExtension, ServerName, UnknownExtension}};
 
@@ -59,6 +60,8 @@ fn handle_client(mut stream: TcpStream) {
     ch.compression_method = vec![0u8; comp_len as usize];
     buf.read_exact(&mut ch.compression_method).unwrap();
 
+    let _ = buf.read_u16::<BigEndian>().unwrap();
+
     loop{
         let t = match buf.read_u16::<BigEndian>() {
             Err(_) => break,
@@ -72,9 +75,10 @@ fn handle_client(mut stream: TcpStream) {
                 let mut sn: Vec<ServerName> = vec![];
 
                 while list_len > 0{
-                    let l = buf.read_u16::<BigEndian>().unwrap();
                     let t = buf.read_u8().unwrap();
-                    let hn = vec![0u8; l as usize];
+                    let l = buf.read_u16::<BigEndian>().unwrap();
+                    let mut hn = vec![0u8; l as usize];
+                    buf.read_exact(&mut hn).unwrap();
                     sn.push(ServerName::new(t, String::from_utf8(hn).unwrap()));
                     list_len-=3;
                     list_len-=l;
@@ -84,12 +88,13 @@ fn handle_client(mut stream: TcpStream) {
             _ => {
                 
                 let mut ext_buf = vec![0u8; len as usize];
-                buf.read_exact(&mut ext_buf);
+                let _ = buf.read_exact(&mut ext_buf);
 
                 ClientExtension::Unknown(UnknownExtension{
-                typ: ExtensionType::from(t),
-                payload: ext_buf,
-            })},
+                    typ: ExtensionType::from(t),
+                    payload: ext_buf,
+                })
+            },
         };
         
         ch.extetensions.push(extension);
