@@ -4,11 +4,18 @@ mod enums;
 mod structs;
 mod errors;
 mod codec;
+mod base;
+mod rand;
+
+/// Re-exports the contents of the [rustls-pki-types](https://docs.rs/rustls-pki-types) crate for easy access
+pub mod pki_types {
+    pub use rustls_pki_types::*;
+}
 
 use std::io::Cursor;
 use byteorder::{BigEndian, ReadBytesExt};
 use std::{net::{TcpListener, TcpStream}, io::Read, u8, u16};
-use crate::{structs::ClientHello, enums::{ExtensionType, ClientExtension, ServerName, UnknownExtension}};
+use crate::{structs::{ClientHello, ClientExtension, ServerName, UnknownExtension}, enums::ExtensionType};
 
 
 fn handle_client(mut stream: TcpStream) {
@@ -62,43 +69,43 @@ fn handle_client(mut stream: TcpStream) {
 
     let _ = buf.read_u16::<BigEndian>().unwrap();
 
-    loop{
-        let t = match buf.read_u16::<BigEndian>() {
-            Err(_) => break,
-            Ok(t) => t, 
-        };
-        let typ = ExtensionType::from(t);
-        let len = buf.read_u16::<BigEndian>().unwrap();
-        let extension: ClientExtension = match typ {
-           ExtensionType::ServerName => {
-                let mut list_len = buf.read_u16::<BigEndian>().unwrap();
-                let mut sn: Vec<ServerName> = vec![];
-
-                while list_len > 0{
-                    let t = buf.read_u8().unwrap();
-                    let l = buf.read_u16::<BigEndian>().unwrap();
-                    let mut hn = vec![0u8; l as usize];
-                    buf.read_exact(&mut hn).unwrap();
-                    sn.push(ServerName::new(t, String::from_utf8(hn).unwrap()));
-                    list_len-=3;
-                    list_len-=l;
-                };
-                ClientExtension::ServerName(sn)
-            }, 
-            _ => {
-                
-                let mut ext_buf = vec![0u8; len as usize];
-                let _ = buf.read_exact(&mut ext_buf);
-
-                ClientExtension::Unknown(UnknownExtension{
-                    typ: ExtensionType::from(t),
-                    payload: ext_buf,
-                })
-            },
-        };
-        
-        ch.extetensions.push(extension);
-    }
+    // loop{
+    //     let t = match buf.read_u16::<BigEndian>() {
+    //         Err(_) => break,
+    //         Ok(t) => t, 
+    //     };
+    //     let typ = ExtensionType::from(t);
+    //     let len = buf.read_u16::<BigEndian>().unwrap();
+    //     let extension: ClientExtension = match typ {
+    //        // ExtensionType::ServerName => {
+    //        //      let mut list_len = buf.read_u16::<BigEndian>().unwrap();
+    //        //      let mut sn: Vec<ServerName> = vec![];
+    //        //
+    //        //      while list_len > 0{
+    //        //          let t = buf.read_u8().unwrap();
+    //        //          let l = buf.read_u16::<BigEndian>().unwrap();
+    //        //          let mut hn = vec![0u8; l as usize];
+    //        //          buf.read_exact(&mut hn).unwrap();
+    //        //          sn.push(ServerName::new(t, String::from_utf8(hn).unwrap()));
+    //        //          list_len-=3;
+    //        //          list_len-=l;
+    //        //      };
+    //        //      ClientExtension::ServerName(sn)
+    //        //  }, 
+    //         _ => {
+    //             
+    //             let mut ext_buf = vec![0u8; len as usize];
+    //             let _ = buf.read_exact(&mut ext_buf);
+    //
+    //             ClientExtension::Unknown(UnknownExtension{
+    //                 typ: ExtensionType::from(t),
+    //                 payload: ext_buf,
+    //             })
+    //         },
+    //     };
+    //     
+    //     ch.extetensions.push(extension);
+    // }
 
     println!("{:?}", ch)
 }

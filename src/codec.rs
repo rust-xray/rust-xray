@@ -87,7 +87,7 @@ impl<'a> Reader<'a> {
 
 /// Trait for implementing encoding and decoding functionality
 /// on something.
-pub trait Codec<'a>: Debug + Sized {
+pub trait Codec<'a>: Debug + Sized + Debug {
     /// Function for encoding itself by appending itself to
     /// the provided vec of bytes.
     fn encode(&self, bytes: &mut Vec<u8>);
