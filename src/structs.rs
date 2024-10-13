@@ -1001,15 +1001,6 @@ impl ClientHelloPayload {
         }
     }
 
-    #[cfg(feature = "tls12")]
-    pub(crate) fn ecpoints_extension(&self) -> Option<&[ECPointFormat]> {
-        let ext = self.find_extension(ExtensionType::ECPointFormats)?;
-        match *ext {
-            ClientExtension::EcPointFormats(ref req) => Some(req),
-            _ => None,
-        }
-    }
-
     pub(crate) fn alpn_extension(&self) -> Option<&Vec<ProtocolName>> {
         let ext = self.find_extension(ExtensionType::ALProtocolNegotiation)?;
         match *ext {
@@ -1027,11 +1018,6 @@ impl ClientHelloPayload {
             | ClientExtension::TransportParametersDraft(ref bytes) => Some(bytes.to_vec()),
             _ => None,
         }
-    }
-
-    #[cfg(feature = "tls12")]
-    pub(crate) fn ticket_extension(&self) -> Option<&ClientExtension> {
-        self.find_extension(ExtensionType::SessionTicket)
     }
 
     pub(crate) fn versions_extension(&self) -> Option<&[ProtocolVersion]> {
@@ -1096,12 +1082,6 @@ impl ClientHelloPayload {
             offer.binders[0] = PresharedKeyBinder::from(binder.into());
         }
     }
-
-    // #[cfg(feature = "tls12")]
-    // pub(crate) fn ems_support_offered(&self) -> bool {
-    //     self.find_extension(ExtensionType::ExtendedMasterSecret)
-    //         .is_some()
-    // }
 
     pub(crate) fn early_data_extension_offered(&self) -> bool {
         self.find_extension(ExtensionType::EarlyData)
