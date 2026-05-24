@@ -9,6 +9,7 @@ use crate::tls::{
 };
 
 use super::decision::RealityAccepted;
+use super::tls13::RealityTls13ServerState;
 
 const DEST_HANDSHAKE_READ_CAP: usize = 64 * 1024;
 const DEST_HANDSHAKE_READ_CHUNK: usize = 4 * 1024;
@@ -223,6 +224,29 @@ pub async fn fetch_dest_handshake(
     })
 }
 
+/// - Read client Finished
+/// - Hand off decrypted stream to VLESS
+pub fn prepare_reality_tls13_state(
+    dest_handshake: RealityDestHandshake,
+    accepted: RealityAccepted,
+) -> std::io::Result<RealityTls13ServerState> {
+    let observed = extract_observed_server_hello(&dest_handshake)?;
+    let state = RealityTls13ServerState::new(accepted, observed)?;
+
+    info!(
+        cipher_suite = state.suite.name,
+        cipher_suite_id = format!("0x{:04x}", state.suite.id),
+        sni = ?state.accepted.sni,
+        "observed valid destination TLS 1.3 ServerHello for REALITY"
+    );
+    info!(
+        cipher_suite = state.suite.name,
+        "selected REALITY TLS 1.3 cipher suite"
+    );
+
+    Ok(state)
+}
+
 /// Validates the observed destination ServerHello for REALITY camouflage input.
 ///
 /// This does **not** patch or relay destination bytes to the client. A full REALITY
@@ -242,23 +266,9 @@ pub async fn fetch_dest_handshake(
 /// - Hand off decrypted stream to VLESS
 pub fn patch_reality_server_hello(
     dest_handshake: RealityDestHandshake,
-    _accepted: &RealityAccepted,
+    accepted: RealityAccepted,
 ) -> std::io::Result<PatchedRealityHandshake> {
-    let observed = extract_observed_server_hello(&dest_handshake)?;
-    let key_share = parse_server_hello_key_share(
-        observed
-            .server_hello
-            .get_extension(EXTENSION_KEY_SHARE)
-            .expect("extract_observed_server_hello validates key_share"),
-    )?;
-
-    info!(
-        cipher_suite = format!("0x{:04x}", observed.server_hello.cipher_suite),
-        key_share_group = format!("0x{:04x}", key_share.group),
-        key_share_len = key_share.key_exchange.len(),
-        "observed valid destination TLS 1.3 ServerHello for REALITY"
-    );
-
+    let _state = prepare_reality_tls13_state(dest_handshake, accepted)?;
     Err(unsupported(TLS13_SERVER_HANDSHAKE_NOT_IMPLEMENTED_MSG))
 }
 
@@ -268,16 +278,24 @@ mod tests {
     use crate::reality::auth::RealityAuthResult;
     use crate::reality::decision::RealityAccepted;
     use crate::reality::session::RealityClientAuth;
+    use crate::reality::tls13::{Tls13HashAlgorithm, TLS_AES_128_GCM_SHA256};
     use crate::tls::TlsRecordContentType;
     use std::io::ErrorKind;
 
     fn build_server_hello_handshake_message(extensions: &[(u16, &[u8])]) -> Vec<u8> {
+        build_server_hello_handshake_message_with_cipher(extensions, TLS_AES_128_GCM_SHA256)
+    }
+
+    fn build_server_hello_handshake_message_with_cipher(
+        extensions: &[(u16, &[u8])],
+        cipher_suite: u16,
+    ) -> Vec<u8> {
         let random = [0x11; 32];
         let mut body = Vec::new();
         body.extend_from_slice(&TLS_RECORD_LEGACY_VERSION);
         body.extend_from_slice(&random);
         body.push(0); // session_id_echo length
-        body.extend_from_slice(&0x1301u16.to_be_bytes()); // cipher_suite
+        body.extend_from_slice(&cipher_suite.to_be_bytes());
         body.push(0); // compression_method
 
         let mut extension_bytes = Vec::new();
@@ -505,11 +523,56 @@ mod tests {
     }
 
     #[test]
+    fn prepare_reality_tls13_state_creates_state_for_valid_observed_server_hello() {
+        let dest_handshake =
+            dest_handshake_from_server_hello_message(&valid_tls13_x25519_server_hello_message());
+        let state = prepare_reality_tls13_state(dest_handshake, sample_accepted())
+            .expect("valid TLS 1.3 state");
+
+        assert_eq!(state.suite.id, TLS_AES_128_GCM_SHA256);
+        assert_eq!(state.suite.name, "TLS_AES_128_GCM_SHA256");
+        assert_eq!(state.transcript.algorithm(), Tls13HashAlgorithm::Sha256);
+        assert_eq!(state.accepted.sni, Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn prepare_reality_tls13_state_rejects_invalid_server_hello() {
+        let message =
+            build_server_hello_handshake_message(&[(EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION)]);
+        let dest_handshake = dest_handshake_from_server_hello_message(&message);
+
+        let err = prepare_reality_tls13_state(dest_handshake, sample_accepted()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(err.to_string().contains("key_share"));
+    }
+
+    #[test]
+    fn prepare_reality_tls13_state_rejects_unknown_cipher_suite() {
+        let message = build_server_hello_handshake_message_with_cipher(
+            &[
+                (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
+                (
+                    EXTENSION_KEY_SHARE,
+                    &x25519_key_share_bytes(&[0x22; X25519_KEY_EXCHANGE_LEN]),
+                ),
+            ],
+            0x1304,
+        );
+        let dest_handshake = dest_handshake_from_server_hello_message(&message);
+
+        let err = prepare_reality_tls13_state(dest_handshake, sample_accepted()).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert!(err.to_string().contains("0x1304"));
+    }
+
+    #[test]
     fn patch_reality_server_hello_returns_unsupported_for_valid_observed_server_hello() {
         let dest_handshake =
             dest_handshake_from_server_hello_message(&valid_tls13_x25519_server_hello_message());
 
-        let err = patch_reality_server_hello(dest_handshake, &sample_accepted()).unwrap_err();
+        let err = patch_reality_server_hello(dest_handshake, sample_accepted()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert!(err.to_string().contains("TLS 1.3 server handshake"));
@@ -522,7 +585,7 @@ mod tests {
             build_server_hello_handshake_message(&[(EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION)]);
         let dest_handshake = dest_handshake_from_server_hello_message(&message);
 
-        let err = patch_reality_server_hello(dest_handshake, &sample_accepted()).unwrap_err();
+        let err = patch_reality_server_hello(dest_handshake, sample_accepted()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         assert!(err.to_string().contains("key_share"));
@@ -541,7 +604,7 @@ mod tests {
         ]);
         let dest_handshake = dest_handshake_from_server_hello_message(&message);
 
-        let err = patch_reality_server_hello(dest_handshake, &sample_accepted()).unwrap_err();
+        let err = patch_reality_server_hello(dest_handshake, sample_accepted()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert!(err.to_string().contains("X25519"));

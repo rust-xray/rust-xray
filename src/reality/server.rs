@@ -8,7 +8,7 @@ use crate::tls::TlsClientHelloRecord;
 use crate::vless::VlessClient;
 
 use super::decision::RealityAccepted;
-use super::handshake::{fetch_dest_handshake, patch_reality_server_hello};
+use super::handshake::{fetch_dest_handshake, prepare_reality_tls13_state};
 use super::session::short_id_prefix_len;
 
 const ACCEPTED_DEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -64,16 +64,20 @@ pub async fn handle_accepted_reality_client(
         "REALITY accepted path dest ServerHello observed"
     );
 
-    match patch_reality_server_hello(dest_handshake, &accepted) {
-        Ok(_) => Ok(()),
-        Err(err) => {
-            if err.to_string().contains("TLS 1.3 server handshake") {
-                warn!(
-                    %dest_addr,
-                    "REALITY accepted path stopping because TLS server handshake is not implemented"
-                );
-            }
-            Err(err)
-        }
-    }
+    let state = prepare_reality_tls13_state(dest_handshake, accepted)?;
+
+    info!(
+        %dest_addr,
+        cipher_suite = state.suite.name,
+        sni = ?state.accepted.sni,
+        "REALITY observed destination ServerHello OK"
+    );
+
+    warn!(
+        %dest_addr,
+        cipher_suite = state.suite.name,
+        "REALITY accepted path stopping before TLS 1.3 server handshake"
+    );
+
+    Err(state.handshake_not_implemented())
 }

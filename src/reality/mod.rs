@@ -14,7 +14,8 @@ pub use decision::{
 };
 pub use handshake::{
     extract_observed_server_hello, fetch_dest_handshake, patch_reality_server_hello,
-    PatchedRealityHandshake, RealityDestHandshake, RealityObservedServerHello,
+    prepare_reality_tls13_state, PatchedRealityHandshake, RealityDestHandshake,
+    RealityObservedServerHello,
 };
 pub use server::handle_accepted_reality_client;
 pub use session::{
