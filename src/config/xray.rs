@@ -6,6 +6,7 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct XrayConfig {
+    #[serde(default)]
     pub inbounds: Vec<InboundObject>,
 
     #[serde(flatten)]
@@ -80,6 +81,21 @@ pub struct RealitySettingsObject {
 
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RealityInboundRuntime {
+    pub tag: Option<String>,
+    pub protocol: Option<String>,
+    pub listen_addr: String,
+    pub dest_addr: String,
+    pub private_key: String,
+
+    // TODO: used after REALITY session_id AEAD decrypt is implemented.
+    pub server_names: Vec<String>,
+    pub short_ids: Vec<Vec<u8>>,
+    pub max_time_diff: u64,
+    pub show: bool,
 }
 
 pub fn load_xray_config_from_file(path: impl AsRef<Path>) -> std::io::Result<XrayConfig> {
@@ -182,6 +198,37 @@ pub fn reality_short_ids(settings: &RealitySettingsObject) -> std::io::Result<Ve
         .collect()
 }
 
+pub fn first_reality_inbound_runtime(
+    config: &XrayConfig,
+) -> std::io::Result<RealityInboundRuntime> {
+    let inbounds = find_reality_inbounds(config);
+    let inbound = inbounds.first().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no inbound with streamSettings.security == \"reality\" found",
+        )
+    })?;
+
+    let settings = get_inbound_reality_settings(inbound).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "reality inbound is missing realitySettings",
+        )
+    })?;
+
+    Ok(RealityInboundRuntime {
+        tag: inbound.tag.clone(),
+        protocol: inbound.protocol.clone(),
+        listen_addr: inbound_listen_addr(inbound)?,
+        dest_addr: reality_dest_addr(settings)?,
+        private_key: reality_private_key(settings)?.to_owned(),
+        server_names: settings.server_names.clone(),
+        short_ids: reality_short_ids(settings)?,
+        max_time_diff: settings.max_time_diff,
+        show: settings.show,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +262,23 @@ mod tests {
     }"#;
 
     #[test]
+    fn parse_config_without_inbounds_defaults_to_empty() {
+        let json = r#"{"outbounds": [{"protocol": "freedom"}]}"#;
+
+        let config: XrayConfig = serde_json::from_str(json).expect("parse config");
+
+        assert!(config.inbounds.is_empty());
+        assert!(find_reality_inbounds(&config).is_empty());
+
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            "no inbound with streamSettings.security == \"reality\" found"
+        );
+    }
+
+    #[test]
     fn parse_minimal_vless_reality_inbound() {
         let config: XrayConfig = serde_json::from_str(MINIMAL_VLESS_REALITY).expect("parse config");
         let inbounds = find_reality_inbounds(&config);
@@ -230,6 +294,53 @@ mod tests {
             "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4"
         );
         assert_eq!(settings.server_names, vec!["www.example.com".to_string()]);
+    }
+
+    #[test]
+    fn builds_first_reality_inbound_runtime() {
+        let json = r#"{
+            "inbounds": [{
+                "tag": "reality-in",
+                "listen": "127.0.0.1",
+                "port": 443,
+                "protocol": "vless",
+                "settings": {
+                    "clients": [{"id": "00000000-0000-0000-0000-000000000001"}],
+                    "decryption": "none"
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "show": false,
+                        "dest": "www.example.com:443",
+                        "serverNames": ["www.example.com"],
+                        "privateKey": "test-private-key",
+                        "maxTimeDiff": 10000,
+                        "shortIds": ["", "0123456789abcdef"]
+                    }
+                }
+            }]
+        }"#;
+
+        let config: XrayConfig = serde_json::from_str(json).unwrap();
+        let runtime = first_reality_inbound_runtime(&config).unwrap();
+
+        assert_eq!(runtime.tag.as_deref(), Some("reality-in"));
+        assert_eq!(runtime.protocol.as_deref(), Some("vless"));
+        assert_eq!(runtime.listen_addr, "127.0.0.1:443");
+        assert_eq!(runtime.dest_addr, "www.example.com:443");
+        assert_eq!(runtime.server_names, vec!["www.example.com".to_string()]);
+        assert_eq!(
+            runtime.short_ids,
+            vec![
+                Vec::<u8>::new(),
+                vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]
+            ]
+        );
+        assert_eq!(runtime.max_time_diff, 10000);
+        assert!(!runtime.show);
+        assert_eq!(runtime.private_key, "test-private-key");
     }
 
     #[test]

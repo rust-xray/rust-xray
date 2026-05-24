@@ -7,27 +7,12 @@ use tracing::{debug, error, info, warn};
 
 use rust_xray::codec::{Codec, Reader};
 use rust_xray::config::{
-    find_reality_inbounds, get_inbound_reality_settings, inbound_listen_addr,
-    load_xray_config_from_file, reality_dest_addr, reality_private_key, reality_short_ids,
+    first_reality_inbound_runtime, load_xray_config_from_file, RealityInboundRuntime,
 };
 use rust_xray::protocol::structs::ClientHelloPayload;
 use rust_xray::proxy::relay_fallback;
 use rust_xray::reality::{inspect_reality_client_hello, RealityAuthResult, RealityDecision};
 use rust_xray::tls::{read_client_hello_record, TlsClientHelloRecord};
-
-#[derive(Clone)]
-struct RuntimeConfig {
-    dest_addr: String,
-    private_key: String,
-    #[allow(dead_code)]
-    server_names: Vec<String>,
-    #[allow(dead_code)]
-    short_ids: Vec<Vec<u8>>,
-    #[allow(dead_code)]
-    max_time_diff: u64,
-    #[allow(dead_code)]
-    show: bool,
-}
 
 async fn handle_valid_reality_client(
     _client: TcpStream,
@@ -54,7 +39,10 @@ async fn relay_fallback_with_log(
         })
 }
 
-async fn handle_client(mut stream: TcpStream, runtime: Arc<RuntimeConfig>) -> std::io::Result<()> {
+async fn handle_client(
+    mut stream: TcpStream,
+    runtime: Arc<RealityInboundRuntime>,
+) -> std::io::Result<()> {
     let peer = stream.peer_addr().ok();
 
     let record = read_client_hello_record(&mut stream).await.map_err(|e| {
@@ -119,62 +107,34 @@ fn config_path_from_args() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./config.json"))
 }
 
-fn load_runtime_config(path: &PathBuf) -> std::io::Result<(String, RuntimeConfig)> {
+fn load_runtime_config(path: &PathBuf) -> std::io::Result<RealityInboundRuntime> {
     let xray = load_xray_config_from_file(path)?;
-    let inbounds = find_reality_inbounds(&xray);
-    let inbound = inbounds.first().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "no inbound with streamSettings.security == \"reality\" found",
-        )
-    })?;
+    let runtime = first_reality_inbound_runtime(&xray)?;
 
-    if inbound.protocol.as_deref() == Some("vless") {
-        info!(tag = ?inbound.tag, "using VLESS REALITY inbound");
+    if runtime.protocol.as_deref() == Some("vless") {
+        info!(tag = ?runtime.tag, "using VLESS REALITY inbound");
     } else {
         warn!(
-            tag = ?inbound.tag,
-            protocol = ?inbound.protocol,
+            tag = ?runtime.tag,
+            protocol = ?runtime.protocol,
             "using REALITY inbound with non-vless protocol"
         );
     }
 
-    let settings = get_inbound_reality_settings(inbound).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "reality inbound is missing realitySettings",
-        )
-    })?;
-
-    let listen_addr = inbound_listen_addr(inbound)?;
-    let dest_addr = reality_dest_addr(settings)?;
-    let private_key = reality_private_key(settings)?.to_owned();
-    let short_ids = reality_short_ids(settings)?;
-
-    if settings.show {
+    if runtime.show {
         info!("REALITY show mode enabled in config");
     }
 
     info!(
-        listen = %listen_addr,
-        dest = %dest_addr,
-        server_names = ?settings.server_names,
-        short_id_count = short_ids.len(),
-        max_time_diff = settings.max_time_diff,
+        listen = %runtime.listen_addr,
+        dest = %runtime.dest_addr,
+        server_names = ?runtime.server_names,
+        short_id_count = runtime.short_ids.len(),
+        max_time_diff = runtime.max_time_diff,
         "loaded REALITY inbound settings"
     );
 
-    Ok((
-        listen_addr,
-        RuntimeConfig {
-            dest_addr,
-            private_key,
-            server_names: settings.server_names.clone(),
-            short_ids,
-            max_time_diff: settings.max_time_diff,
-            show: settings.show,
-        },
-    ))
+    Ok(runtime)
 }
 
 #[tokio::main]
@@ -193,7 +153,8 @@ async fn run() -> std::io::Result<()> {
     let config_path = config_path_from_args();
     info!(path = %config_path.display(), "loading Xray config");
 
-    let (listen_addr, runtime) = load_runtime_config(&config_path)?;
+    let runtime = load_runtime_config(&config_path)?;
+    let listen_addr = runtime.listen_addr.clone();
     let runtime = Arc::new(runtime);
 
     let listener = TcpListener::bind(&listen_addr).await?;

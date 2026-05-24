@@ -3,14 +3,30 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use tracing::debug;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroize;
 
 use crate::protocol::enums::{NamedGroup, ProtocolVersion};
 use crate::protocol::structs::{ClientHelloPayload, KeyShareEntry};
 
-#[derive(Debug)]
 pub struct RealityAuthResult {
-    pub auth_key: [u8; 42],
-    pub client_public_key: [u8; 32],
+    pub(crate) auth_key: [u8; 42],
+    #[allow(dead_code)] // populated for future REALITY handshake path
+    pub(crate) client_public_key: [u8; 32],
+}
+
+impl Drop for RealityAuthResult {
+    fn drop(&mut self) {
+        self.auth_key.zeroize();
+    }
+}
+
+impl std::fmt::Debug for RealityAuthResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealityAuthResult")
+            .field("auth_key", &"<redacted>")
+            .field("client_public_key", &"<redacted>")
+            .finish()
+    }
 }
 
 fn decode_reality_private_key(value: &str) -> std::io::Result<[u8; 32]> {
@@ -46,12 +62,12 @@ fn find_x25519_public_key(keyshares: &[KeyShareEntry]) -> Option<[u8; 32]> {
     None
 }
 
-pub fn extract_x25519_keyshare(hello: &ClientHelloPayload) -> Option<[u8; 32]> {
+pub(crate) fn extract_x25519_keyshare(hello: &ClientHelloPayload) -> Option<[u8; 32]> {
     let keyshares = hello.keyshare_extension()?;
     find_x25519_public_key(keyshares)
 }
 
-pub fn derive_reality_auth_key(
+pub(crate) fn derive_reality_auth_key(
     hello: &ClientHelloPayload,
     server_private_key_b64: &str,
 ) -> std::io::Result<Option<RealityAuthResult>> {
@@ -142,5 +158,21 @@ mod tests {
         let hello = hello_with_x25519_keyshare(payload);
 
         assert!(extract_x25519_keyshare(&hello).is_none());
+    }
+
+    #[test]
+    fn reality_auth_result_debug_redacts_sensitive_fields() {
+        let auth = RealityAuthResult {
+            auth_key: [7u8; 42],
+            client_public_key: [9u8; 32],
+        };
+
+        let debug = format!("{auth:?}");
+
+        assert!(debug.contains("auth_key"));
+        assert!(debug.contains("client_public_key"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("[7, 7, 7"));
+        assert!(!debug.contains("[9, 9, 9"));
     }
 }

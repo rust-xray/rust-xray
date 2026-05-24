@@ -14,6 +14,8 @@ pub struct TlsClientHelloRecord {
 }
 
 pub fn parse_client_hello_record_bytes(input: &[u8]) -> std::io::Result<TlsClientHelloRecord> {
+    // TODO: fragmented ClientHello across multiple TLS records is not supported yet.
+    // TODO: multiple handshake messages in one TLS record are not supported yet.
     if input.len() < RECORD_HEADER_LEN {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
@@ -102,7 +104,7 @@ fn parse_client_hello_body(header: &[u8], body: &[u8]) -> std::io::Result<TlsCli
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "ClientHello is fragmented or incomplete in this record: need {} bytes, have {}",
+                "fragmented ClientHello is not supported yet: need {} bytes, have {}",
                 handshake_end,
                 body.len()
             ),
@@ -113,7 +115,7 @@ fn parse_client_hello_body(header: &[u8], body: &[u8]) -> std::io::Result<TlsCli
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "ClientHello does not fill the TLS record: handshake is {} bytes, record body is {} bytes",
+                "multiple handshake messages in first TLS record are not supported yet: handshake is {} bytes, record body is {} bytes",
                 handshake_end,
                 body.len()
             ),
@@ -224,7 +226,27 @@ mod tests {
 
         let err = parse_client_hello_record_bytes(&input).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("fragmented or incomplete"));
+        assert!(err
+            .to_string()
+            .contains("fragmented ClientHello is not supported yet"));
+    }
+
+    #[test]
+    fn parse_rejects_extra_bytes_after_client_hello_in_record_body() {
+        let mut input = build_client_hello_record(&[0x01, 0x02]);
+        // Append extra handshake bytes after a valid ClientHello.
+        input.push(0x02); // ServerHello type
+        input.push(0x00);
+        input.push(0x00);
+        input.push(0x01);
+        input.push(0x00);
+        // Update record length in header to include trailing bytes.
+        let body_len = input.len() - RECORD_HEADER_LEN;
+        input[3..5].copy_from_slice(&(body_len as u16).to_be_bytes());
+
+        let err = parse_client_hello_record_bytes(&input).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("multiple handshake messages"));
     }
 
     #[test]

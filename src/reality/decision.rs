@@ -4,7 +4,7 @@ use crate::protocol::enums::ProtocolVersion;
 use crate::protocol::structs::{ClientHelloPayload, ServerNamePayload};
 
 use super::auth::{derive_reality_auth_key, extract_x25519_keyshare, RealityAuthResult};
-use super::session::open_reality_session_id;
+use super::session::{open_reality_session_id, RealitySessionOpenResult};
 
 pub enum RealityDecision {
     Accepted(RealityAuthResult),
@@ -59,13 +59,66 @@ pub fn inspect_reality_client_hello(
     };
 
     match open_reality_session_id(hello, raw_client_hello_payload, &auth.auth_key)? {
-        Some(_client_auth) => {
+        RealitySessionOpenResult::Opened(_client_auth) => {
             debug!("REALITY session_id open ok");
             Ok(RealityDecision::Accepted(auth))
         }
-        None => {
-            warn!("REALITY session_id open failed or not implemented");
+        RealitySessionOpenResult::AuthFailed => {
+            debug!("REALITY session_id auth failed");
             Ok(RealityDecision::Fallback)
+        }
+        RealitySessionOpenResult::NotImplemented => {
+            warn!("REALITY session_id open not implemented");
+            Ok(RealityDecision::Fallback)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::enums::{NamedGroup, ProtocolVersion};
+    use crate::protocol::structs::{
+        ClientExtension, ClientHelloPayload, KeyShareEntry, Random, SessionId,
+    };
+
+    struct FixedRandom;
+
+    impl crate::protocol::rand::SecureRandom for FixedRandom {
+        fn fill(&self, buf: &mut [u8]) -> Result<(), crate::protocol::rand::GetRandomFailed> {
+            for (i, byte) in buf.iter_mut().enumerate() {
+                *byte = i as u8;
+            }
+            Ok(())
+        }
+    }
+
+    fn reality_candidate_hello() -> ClientHelloPayload {
+        ClientHelloPayload {
+            client_version: ProtocolVersion::TLSv1_2,
+            random: Random([0u8; 32]),
+            session_id: SessionId::random(&FixedRandom).unwrap(),
+            cipher_suites: Vec::new(),
+            compression_methods: Vec::new(),
+            extensions: vec![
+                ClientExtension::SupportedVersions(vec![ProtocolVersion::TLSv1_3]),
+                ClientExtension::KeyShare(vec![KeyShareEntry::new(NamedGroup::X25519, [1u8; 32])]),
+            ],
+        }
+    }
+
+    #[test]
+    fn inspect_reality_client_hello_fallbacks_while_session_open_is_not_implemented() {
+        let hello = reality_candidate_hello();
+        let private_key = "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4";
+
+        let result = inspect_reality_client_hello(&hello, &[], private_key).unwrap();
+
+        match result {
+            RealityDecision::Fallback => {}
+            RealityDecision::Accepted(_) => {
+                panic!("REALITY candidate must fallback until session_id AEAD open is implemented")
+            }
         }
     }
 }
