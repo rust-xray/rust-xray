@@ -85,6 +85,7 @@ async fn handle_client(mut stream: TcpStream, config: Arc<RuntimeConfig>) -> std
             if let Err(err) = handle_accepted_reality_client(
                 stream,
                 record,
+                ch,
                 accepted,
                 &config.reality.dest_addr,
                 &config.vless_clients,

@@ -7,6 +7,20 @@ pub const HANDSHAKE_TYPE_CERTIFICATE_VERIFY: u8 = 0x0f;
 pub const HANDSHAKE_TYPE_FINISHED: u8 = 0x14;
 
 const MAX_HANDSHAKE_BODY_LEN: usize = 0x00ff_ffff;
+const MAX_SESSION_ID_ECHO_LEN: usize = 32;
+
+pub const EXT_SUPPORTED_VERSIONS: u16 = 43;
+pub const EXT_KEY_SHARE: u16 = 51;
+pub const TLS_VERSION_1_2_LEGACY: [u8; 2] = [0x03, 0x03];
+pub const TLS_VERSION_1_3: [u8; 2] = [0x03, 0x04];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tls13ServerHelloParams {
+    pub random: [u8; 32],
+    pub session_id_echo: Vec<u8>,
+    pub cipher_suite: u16,
+    pub key_share_extension_body: Vec<u8>,
+}
 
 /// Placeholder plan for generating the server-facing ServerHello message.
 ///
@@ -58,6 +72,78 @@ pub fn build_handshake_message(handshake_type: u8, body: &[u8]) -> Result<Vec<u8
     Ok(message)
 }
 
+fn invalid_input(message: impl Into<String>) -> Error {
+    Error::new(ErrorKind::InvalidInput, message.into())
+}
+
+fn encode_extension(extension_type: u16, data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() > u16::MAX as usize {
+        return Err(invalid_input(format!(
+            "TLS 1.3 extension data too long: {} bytes (max {})",
+            data.len(),
+            u16::MAX
+        )));
+    }
+
+    let data_len =
+        u16::try_from(data.len()).expect("extension data length fits in u16 after validation");
+
+    let mut extension = Vec::with_capacity(4 + data.len());
+    extension.extend_from_slice(&extension_type.to_be_bytes());
+    extension.extend_from_slice(&data_len.to_be_bytes());
+    extension.extend_from_slice(data);
+    Ok(extension)
+}
+
+pub fn build_tls13_server_hello(params: &Tls13ServerHelloParams) -> Result<Vec<u8>> {
+    if params.session_id_echo.len() > MAX_SESSION_ID_ECHO_LEN {
+        return Err(invalid_input(format!(
+            "TLS 1.3 ServerHello session_id_echo too long: {} bytes (max {MAX_SESSION_ID_ECHO_LEN})",
+            params.session_id_echo.len()
+        )));
+    }
+
+    let supported_versions = encode_extension(EXT_SUPPORTED_VERSIONS, &TLS_VERSION_1_3)?;
+    let key_share = encode_extension(EXT_KEY_SHARE, &params.key_share_extension_body)?;
+
+    let extensions_len = supported_versions
+        .len()
+        .checked_add(key_share.len())
+        .ok_or_else(|| invalid_input("TLS 1.3 ServerHello extensions length overflow"))?;
+
+    if extensions_len > u16::MAX as usize {
+        return Err(invalid_input(format!(
+            "TLS 1.3 ServerHello extensions too long: {extensions_len} bytes (max {})",
+            u16::MAX
+        )));
+    }
+
+    let session_id_len = u8::try_from(params.session_id_echo.len())
+        .expect("session_id_echo length fits in u8 after max check");
+
+    let mut body = Vec::with_capacity(
+        TLS_VERSION_1_2_LEGACY.len()
+            + params.random.len()
+            + 1
+            + params.session_id_echo.len()
+            + 2
+            + 1
+            + 2
+            + extensions_len,
+    );
+    body.extend_from_slice(&TLS_VERSION_1_2_LEGACY);
+    body.extend_from_slice(&params.random);
+    body.push(session_id_len);
+    body.extend_from_slice(&params.session_id_echo);
+    body.extend_from_slice(&params.cipher_suite.to_be_bytes());
+    body.push(0);
+    body.extend_from_slice(&(extensions_len as u16).to_be_bytes());
+    body.extend_from_slice(&supported_versions);
+    body.extend_from_slice(&key_share);
+
+    build_handshake_message(HANDSHAKE_TYPE_SERVER_HELLO, &body)
+}
+
 pub fn build_encrypted_extensions_empty() -> Result<Vec<u8>> {
     build_handshake_message(HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS, &[0x00, 0x00])
 }
@@ -83,6 +169,69 @@ pub fn build_certificate_verify_placeholder() -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reality::tls13::key_share::{
+        encode_key_share_extension_body, Tls13ServerKeyShare, NAMED_GROUP_X25519, X25519_KEY_LEN,
+    };
+    use crate::reality::tls13::TLS_AES_128_GCM_SHA256;
+    use crate::tls::parse_tls_server_hello_handshake;
+
+    fn sample_server_hello_params(session_id_echo: Vec<u8>) -> Tls13ServerHelloParams {
+        let key_share = Tls13ServerKeyShare {
+            group: NAMED_GROUP_X25519,
+            public_key: [0x55; X25519_KEY_LEN],
+            shared_secret: [0x66; X25519_KEY_LEN],
+        };
+
+        Tls13ServerHelloParams {
+            random: [0x11; 32],
+            session_id_echo,
+            cipher_suite: TLS_AES_128_GCM_SHA256,
+            key_share_extension_body: encode_key_share_extension_body(&key_share)
+                .expect("valid key_share extension body"),
+        }
+    }
+
+    #[test]
+    fn build_tls13_server_hello_encodes_handshake_message() {
+        let params = sample_server_hello_params(vec![0x22; 8]);
+        let message = build_tls13_server_hello(&params).expect("valid ServerHello");
+
+        assert_eq!(message[0], HANDSHAKE_TYPE_SERVER_HELLO);
+        let declared_len = u32::from_be_bytes([0, message[1], message[2], message[3]]) as usize;
+        assert_eq!(declared_len, message.len() - 4);
+    }
+
+    #[test]
+    fn build_tls13_server_hello_preserves_body_fields_and_extensions() {
+        let params = sample_server_hello_params(vec![0x22; 8]);
+        let message = build_tls13_server_hello(&params).expect("valid ServerHello");
+        let body = &message[4..];
+        let parsed = parse_tls_server_hello_handshake(&message).expect("parsable ServerHello");
+
+        assert_eq!(&body[..2], &TLS_VERSION_1_2_LEGACY);
+        assert_eq!(parsed.legacy_version, TLS_VERSION_1_2_LEGACY);
+        assert_eq!(parsed.random, params.random);
+        assert_eq!(parsed.session_id_echo, params.session_id_echo);
+        assert_eq!(parsed.cipher_suite, params.cipher_suite);
+        assert_eq!(parsed.compression_method, 0);
+        assert_eq!(
+            parsed.get_extension(EXT_SUPPORTED_VERSIONS),
+            Some(TLS_VERSION_1_3.as_slice())
+        );
+        assert_eq!(
+            parsed.get_extension(EXT_KEY_SHARE),
+            Some(params.key_share_extension_body.as_slice())
+        );
+    }
+
+    #[test]
+    fn build_tls13_server_hello_rejects_session_id_echo_longer_than_32() {
+        let params = sample_server_hello_params(vec![0x33; 33]);
+        let err = build_tls13_server_hello(&params).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("session_id_echo too long"));
+    }
 
     #[test]
     fn build_handshake_message_encodes_length_correctly() {

@@ -6,7 +6,9 @@
 
 mod cipher_suite;
 mod key_schedule;
+pub mod key_share;
 mod messages;
+mod record_crypto;
 mod state;
 mod transcript;
 
@@ -16,16 +18,24 @@ pub use cipher_suite::{
 };
 
 pub use key_schedule::{
-    derive_finished_key, derive_secret_sha256, derive_secret_sha384, derive_traffic_key, hash_len,
+    compute_finished_verify_data, derive_finished_key, derive_handshake_traffic_secrets,
+    derive_secret_sha256, derive_secret_sha384, derive_traffic_key, empty_hash, hash_len,
     hkdf_expand_label_sha256, hkdf_expand_label_sha384, hkdf_extract_sha256, hkdf_extract_sha384,
-    Tls13KeySchedule, Tls13TrafficKeys,
+    Tls13HandshakeSecrets, Tls13KeySchedule, Tls13TrafficKeys,
+};
+pub use key_share::{
+    encode_key_share_extension_body, extract_client_x25519_key_share,
+    generate_x25519_server_key_share, Tls13ServerKeyShare, NAMED_GROUP_X25519, X25519_KEY_LEN,
 };
 pub use messages::{
     build_certificate_placeholder, build_certificate_verify_placeholder,
     build_encrypted_extensions_empty, build_finished, build_handshake_message,
-    RealityCertificatePlan, RealityEncryptedExtensionsPlan, RealityFinishedPlan,
-    RealityServerHelloPlan, HANDSHAKE_TYPE_CERTIFICATE, HANDSHAKE_TYPE_CERTIFICATE_VERIFY,
+    build_tls13_server_hello, RealityCertificatePlan, RealityEncryptedExtensionsPlan,
+    RealityFinishedPlan, RealityServerHelloPlan, Tls13ServerHelloParams, EXT_KEY_SHARE,
+    EXT_SUPPORTED_VERSIONS, HANDSHAKE_TYPE_CERTIFICATE, HANDSHAKE_TYPE_CERTIFICATE_VERIFY,
     HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS, HANDSHAKE_TYPE_FINISHED, HANDSHAKE_TYPE_SERVER_HELLO,
+    TLS_VERSION_1_2_LEGACY, TLS_VERSION_1_3,
 };
+pub use record_crypto::{tls13_record_nonce, Tls13RecordEncryptor};
 pub use state::RealityTls13ServerState;
 pub use transcript::{Tls13HashAlgorithm, TranscriptHash};

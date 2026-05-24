@@ -1,11 +1,27 @@
 use std::fmt;
 use std::io::{Error, ErrorKind};
 
+use crate::protocol::structs::ClientHelloPayload;
 use crate::reality::handshake::RealityObservedServerHello;
 use crate::reality::RealityAccepted;
 
 use super::cipher_suite::{tls13_cipher_suite, Tls13CipherSuite};
+use super::key_schedule::{
+    compute_finished_verify_data, derive_finished_key, derive_handshake_traffic_secrets,
+    derive_traffic_key, Tls13HandshakeSecrets,
+};
+use super::key_share::{
+    encode_key_share_extension_body, extract_client_x25519_key_share,
+    generate_x25519_server_key_share, Tls13ServerKeyShare,
+};
+use super::messages::{
+    build_encrypted_extensions_empty, build_finished, build_tls13_server_hello,
+    Tls13ServerHelloParams, HANDSHAKE_TYPE_SERVER_HELLO,
+};
+use super::record_crypto::Tls13RecordEncryptor;
 use super::transcript::TranscriptHash;
+
+const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 0x01;
 
 const HANDSHAKE_NOT_IMPLEMENTED_MSG: &str =
     "REALITY TLS 1.3 server state machine is not implemented yet";
@@ -18,6 +34,9 @@ pub struct RealityTls13ServerState {
     pub observed_server_hello: RealityObservedServerHello,
     pub suite: Tls13CipherSuite,
     pub transcript: TranscriptHash,
+    pub server_key_share: Option<Tls13ServerKeyShare>,
+    pub server_hello_message: Option<Vec<u8>>,
+    pub handshake_secrets: Option<Tls13HandshakeSecrets>,
 }
 
 struct ObservedServerHelloDebug<'a>(&'a RealityObservedServerHello);
@@ -48,6 +67,18 @@ impl fmt::Debug for RealityTls13ServerState {
                 "observed_server_hello",
                 &ObservedServerHelloDebug(&self.observed_server_hello),
             )
+            .field("server_key_share", &self.server_key_share)
+            .field(
+                "server_hello_message_len",
+                &self
+                    .server_hello_message
+                    .as_ref()
+                    .map(|message| message.len()),
+            )
+            .field(
+                "handshake_secrets",
+                &self.handshake_secrets.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -74,7 +105,135 @@ impl RealityTls13ServerState {
             observed_server_hello,
             suite,
             transcript,
+            server_key_share: None,
+            server_hello_message: None,
+            handshake_secrets: None,
         })
+    }
+
+    pub fn prepare_server_hello(
+        &mut self,
+        client_hello: &ClientHelloPayload,
+    ) -> std::io::Result<&[u8]> {
+        let client_public_key =
+            extract_client_x25519_key_share(client_hello)?.ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unsupported,
+                    "TLS 1.3 accepted ServerHello requires client X25519 key_share",
+                )
+            })?;
+
+        let server_key_share = generate_x25519_server_key_share(client_public_key)?;
+        let key_share_extension_body = encode_key_share_extension_body(&server_key_share)?;
+
+        // TODO: transcript must include full ClientHello handshake message and generated
+        // ServerHello handshake message in exact order. Do not update transcript here until
+        // raw ClientHello message bytes are available in state.
+
+        let params = Tls13ServerHelloParams {
+            // TODO: verify exact upstream REALITY random/camouflage behavior
+            random: self.observed_server_hello.server_hello.random,
+            session_id_echo: client_hello.session_id.as_bytes().to_vec(),
+            cipher_suite: self.suite.id,
+            key_share_extension_body,
+        };
+
+        let message = build_tls13_server_hello(&params)?;
+
+        self.server_key_share = Some(server_key_share);
+        self.server_hello_message = Some(message);
+
+        Ok(self.server_hello_message.as_deref().unwrap())
+    }
+
+    pub fn update_transcript_client_server_hello(
+        &mut self,
+        client_hello_message: &[u8],
+    ) -> std::io::Result<Vec<u8>> {
+        if client_hello_message.first() != Some(&HANDSHAKE_TYPE_CLIENT_HELLO) {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "TLS 1.3 transcript ClientHello message must start with handshake type 0x01",
+            ));
+        }
+
+        let server_hello_message = self.server_hello_message.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "TLS 1.3 transcript update requires generated ServerHello message",
+            )
+        })?;
+
+        if server_hello_message.first() != Some(&HANDSHAKE_TYPE_SERVER_HELLO) {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "TLS 1.3 transcript ServerHello message must start with handshake type 0x02",
+            ));
+        }
+
+        self.transcript.update(client_hello_message);
+        self.transcript.update(server_hello_message);
+
+        Ok(self.transcript.digest())
+    }
+
+    pub fn derive_handshake_secrets(&mut self, transcript_hash: &[u8]) -> std::io::Result<()> {
+        let server_key_share = self.server_key_share.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "TLS 1.3 handshake secret derivation requires server ECDHE key share",
+            )
+        })?;
+
+        let secrets = derive_handshake_traffic_secrets(
+            self.suite,
+            &server_key_share.shared_secret,
+            transcript_hash,
+        )?;
+        self.handshake_secrets = Some(secrets);
+        Ok(())
+    }
+
+    /// Builds encrypted EncryptedExtensions and Finished TLS records for the server.
+    ///
+    /// Transcript is updated with plaintext handshake messages, not encrypted records.
+    pub fn build_encrypted_server_handshake_records(&mut self) -> std::io::Result<Vec<u8>> {
+        let server_handshake_traffic_secret = self
+            .handshake_secrets
+            .as_ref()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "TLS 1.3 encrypted handshake records require derived handshake secrets",
+                )
+            })?
+            .server_handshake_traffic_secret
+            .clone();
+
+        // TODO: Certificate and CertificateVerify must be inserted before Finished for
+        // real server-authenticated TLS.
+
+        let traffic_keys = derive_traffic_key(self.suite, &server_handshake_traffic_secret)?;
+        let mut encryptor = Tls13RecordEncryptor::new(self.suite, traffic_keys)?;
+
+        let encrypted_extensions = build_encrypted_extensions_empty()?;
+        self.transcript.update(&encrypted_extensions);
+
+        let finished_key = derive_finished_key(self.suite, &server_handshake_traffic_secret)?;
+        let transcript_hash = self.transcript.digest();
+        let verify_data =
+            compute_finished_verify_data(self.suite, &finished_key, &transcript_hash)?;
+        let finished = build_finished(&verify_data)?;
+
+        let encrypted_extensions_record =
+            encryptor.encrypt_handshake_message(&encrypted_extensions)?;
+        let finished_record = encryptor.encrypt_handshake_message(&finished)?;
+
+        self.transcript.update(&finished);
+
+        let mut records = encrypted_extensions_record;
+        records.extend_from_slice(&finished_record);
+        Ok(records)
     }
 
     pub fn handshake_not_implemented(&self) -> Error {
@@ -85,16 +244,23 @@ impl RealityTls13ServerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::enums::{NamedGroup, ProtocolVersion};
+    use crate::protocol::structs::{
+        ClientExtension, ClientHelloPayload, KeyShareEntry, Random, SessionId,
+    };
     use crate::reality::auth::RealityAuthResult;
     use crate::reality::handshake::{
         extract_observed_server_hello, RealityDestHandshake, RealityObservedServerHello,
     };
     use crate::reality::session::RealityClientAuth;
     use crate::reality::tls13::cipher_suite::TLS_AES_128_GCM_SHA256;
+    use crate::reality::tls13::hash_len;
+    use crate::reality::tls13::messages::build_encrypted_extensions_empty;
     use crate::reality::tls13::transcript::Tls13HashAlgorithm;
+    use crate::tls::records::{parse_tls_records, TLS_RECORD_APPLICATION_DATA};
     use crate::tls::{
-        TlsRecord, TlsRecordContentType, EXTENSION_KEY_SHARE, EXTENSION_SUPPORTED_VERSIONS,
-        NAMED_GROUP_X25519,
+        parse_tls_server_hello_handshake, TlsRecord, TlsRecordContentType, EXTENSION_KEY_SHARE,
+        EXTENSION_SUPPORTED_VERSIONS, NAMED_GROUP_X25519,
     };
 
     const TLS_RECORD_LEGACY_VERSION: [u8; 2] = [0x03, 0x03];
@@ -182,6 +348,34 @@ mod tests {
         }
     }
 
+    fn client_hello_with_x25519_keyshare(
+        payload: Vec<u8>,
+        session_id: SessionId,
+    ) -> ClientHelloPayload {
+        ClientHelloPayload {
+            client_version: ProtocolVersion::TLSv1_2,
+            random: Random([0x33; 32]),
+            session_id,
+            cipher_suites: Vec::new(),
+            compression_methods: Vec::new(),
+            extensions: vec![ClientExtension::KeyShare(vec![KeyShareEntry::new(
+                NamedGroup::X25519,
+                payload,
+            )])],
+        }
+    }
+
+    fn client_hello_without_keyshare() -> ClientHelloPayload {
+        ClientHelloPayload {
+            client_version: ProtocolVersion::TLSv1_2,
+            random: Random([0x33; 32]),
+            session_id: SessionId::empty(),
+            cipher_suites: Vec::new(),
+            compression_methods: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
     #[test]
     fn new_works_with_observed_server_hello_cipher_suite_0x1301() {
         let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
@@ -191,6 +385,9 @@ mod tests {
         assert_eq!(state.suite.name, "TLS_AES_128_GCM_SHA256");
         assert_eq!(state.transcript.algorithm(), Tls13HashAlgorithm::Sha256);
         assert_eq!(state.accepted.sni, Some("example.com".to_string()));
+        assert!(state.server_key_share.is_none());
+        assert!(state.server_hello_message.is_none());
+        assert!(state.handshake_secrets.is_none());
     }
 
     #[test]
@@ -225,5 +422,257 @@ mod tests {
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert_eq!(err.to_string(), HANDSHAKE_NOT_IMPLEMENTED_MSG);
+    }
+
+    #[test]
+    fn prepare_server_hello_builds_handshake_message_and_stores_state() {
+        let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
+        let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+        let client_key: [u8; 32] = core::array::from_fn(|i| 0x44 + i as u8);
+        let client_hello =
+            client_hello_with_x25519_keyshare(client_key.to_vec(), SessionId::empty());
+
+        let message = state
+            .prepare_server_hello(&client_hello)
+            .expect("valid ServerHello plan")
+            .to_vec();
+
+        assert_eq!(message[0], HANDSHAKE_TYPE_SERVER_HELLO);
+        assert!(state.server_key_share.is_some());
+        assert_eq!(
+            state.server_hello_message.as_deref(),
+            Some(message.as_slice())
+        );
+    }
+
+    #[test]
+    fn prepare_server_hello_requires_client_x25519_key_share() {
+        let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
+        let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+
+        let err = state
+            .prepare_server_hello(&client_hello_without_keyshare())
+            .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert!(err.to_string().contains("X25519 key_share"));
+        assert!(state.server_key_share.is_none());
+        assert!(state.server_hello_message.is_none());
+    }
+
+    #[test]
+    fn prepare_server_hello_message_parses_as_tls13_server_hello() {
+        let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
+        let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+        let client_key: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let client_hello =
+            client_hello_with_x25519_keyshare(client_key.to_vec(), SessionId::empty());
+
+        let message = state
+            .prepare_server_hello(&client_hello)
+            .expect("valid ServerHello plan")
+            .to_vec();
+        let parsed = parse_tls_server_hello_handshake(&message).expect("parsable ServerHello");
+
+        assert_eq!(parsed.cipher_suite, TLS_AES_128_GCM_SHA256);
+        assert_eq!(parsed.random, [0x11; 32]);
+        assert_eq!(parsed.session_id_echo, client_hello.session_id.as_bytes());
+        assert!(parsed.get_extension(EXTENSION_SUPPORTED_VERSIONS).is_some());
+        assert!(parsed.get_extension(EXTENSION_KEY_SHARE).is_some());
+    }
+
+    fn sample_client_hello_handshake_message() -> Vec<u8> {
+        vec![0x01, 0x00, 0x00, 0x04, 0x03, 0x03, 0x00, 0x00]
+    }
+
+    fn state_with_prepared_server_hello() -> RealityTls13ServerState {
+        let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
+        let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+        let client_key: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let client_hello =
+            client_hello_with_x25519_keyshare(client_key.to_vec(), SessionId::empty());
+        state
+            .prepare_server_hello(&client_hello)
+            .expect("valid ServerHello plan");
+        state
+    }
+
+    fn state_with_fixed_server_hello_message(
+        server_hello_message: Vec<u8>,
+    ) -> RealityTls13ServerState {
+        let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
+        let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+        state.server_hello_message = Some(server_hello_message);
+        state
+    }
+
+    #[test]
+    fn update_transcript_client_server_hello_changes_digest() {
+        let mut state = state_with_prepared_server_hello();
+        let empty_digest = state.transcript.digest();
+        let client_hello_message = sample_client_hello_handshake_message();
+
+        let digest = state
+            .update_transcript_client_server_hello(&client_hello_message)
+            .expect("valid transcript update");
+
+        assert_ne!(digest, empty_digest);
+        assert_eq!(digest.len(), 32);
+        assert_eq!(
+            state.transcript.len(),
+            client_hello_message.len()
+                + state
+                    .server_hello_message
+                    .as_ref()
+                    .expect("server hello stored")
+                    .len()
+        );
+    }
+
+    #[test]
+    fn update_transcript_client_server_hello_is_deterministic() {
+        let client_hello_message = sample_client_hello_handshake_message();
+        let server_hello_message = vec![0x02, 0x00, 0x00, 0x04, 0x03, 0x03, 0x00, 0x00];
+
+        let mut first = state_with_fixed_server_hello_message(server_hello_message.clone());
+        let first_digest = first
+            .update_transcript_client_server_hello(&client_hello_message)
+            .expect("valid transcript update");
+
+        let mut second = state_with_fixed_server_hello_message(server_hello_message);
+        let second_digest = second
+            .update_transcript_client_server_hello(&client_hello_message)
+            .expect("valid transcript update");
+
+        assert_eq!(first_digest, second_digest);
+    }
+
+    #[test]
+    fn update_transcript_client_server_hello_rejects_wrong_client_handshake_type() {
+        let mut state = state_with_prepared_server_hello();
+        let err = state
+            .update_transcript_client_server_hello(&[0x02, 0x00, 0x00, 0x01, 0x00])
+            .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(err.to_string().contains("0x01"));
+    }
+
+    #[test]
+    fn update_transcript_client_server_hello_requires_server_hello_message() {
+        let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
+        let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+
+        let err = state
+            .update_transcript_client_server_hello(&sample_client_hello_handshake_message())
+            .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("ServerHello message"));
+    }
+
+    #[test]
+    fn derive_handshake_secrets_stores_traffic_secrets() {
+        let mut state = state_with_prepared_server_hello();
+        let transcript_hash = state
+            .update_transcript_client_server_hello(&sample_client_hello_handshake_message())
+            .expect("valid transcript update");
+
+        state
+            .derive_handshake_secrets(&transcript_hash)
+            .expect("valid handshake secret derivation");
+
+        let secrets = state
+            .handshake_secrets
+            .as_ref()
+            .expect("handshake secrets stored");
+        assert_eq!(secrets.handshake_secret.len(), 32);
+        assert_eq!(secrets.client_handshake_traffic_secret.len(), 32);
+        assert_eq!(secrets.server_handshake_traffic_secret.len(), 32);
+        assert_ne!(
+            secrets.client_handshake_traffic_secret,
+            secrets.server_handshake_traffic_secret
+        );
+    }
+
+    #[test]
+    fn derive_handshake_secrets_requires_server_key_share() {
+        let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
+        let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+
+        let err = state.derive_handshake_secrets(&[0x01; 32]).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("ECDHE key share"));
+        assert!(state.handshake_secrets.is_none());
+    }
+
+    fn state_with_handshake_secrets() -> RealityTls13ServerState {
+        let mut state = state_with_prepared_server_hello();
+        let transcript_hash = state
+            .update_transcript_client_server_hello(&sample_client_hello_handshake_message())
+            .expect("valid transcript update");
+        state
+            .derive_handshake_secrets(&transcript_hash)
+            .expect("valid handshake secret derivation");
+        state
+    }
+
+    #[test]
+    fn build_encrypted_server_handshake_records_non_empty() {
+        let mut state = state_with_handshake_secrets();
+        let records = state
+            .build_encrypted_server_handshake_records()
+            .expect("valid encrypted handshake records");
+
+        assert!(!records.is_empty());
+    }
+
+    #[test]
+    fn build_encrypted_server_handshake_records_first_record_is_application_data() {
+        let mut state = state_with_handshake_secrets();
+        let records = state
+            .build_encrypted_server_handshake_records()
+            .expect("valid encrypted handshake records");
+
+        assert_eq!(records[0], TLS_RECORD_APPLICATION_DATA);
+        let parsed = parse_tls_records(&records).expect("parsable encrypted records");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed[0].content_type,
+            TlsRecordContentType::ApplicationData
+        );
+    }
+
+    #[test]
+    fn build_encrypted_server_handshake_records_updates_transcript_with_plaintext_messages() {
+        let mut state = state_with_handshake_secrets();
+        let transcript_len_before = state.transcript.len();
+        let encrypted_extensions = build_encrypted_extensions_empty().expect("valid EE");
+        let expected_finished_len = 4 + hash_len(state.suite.hash);
+
+        state
+            .build_encrypted_server_handshake_records()
+            .expect("valid encrypted handshake records");
+
+        assert_eq!(
+            state.transcript.len(),
+            transcript_len_before + encrypted_extensions.len() + expected_finished_len
+        );
+    }
+
+    #[test]
+    fn build_encrypted_server_handshake_records_requires_handshake_secrets() {
+        let mut state = state_with_prepared_server_hello();
+        state
+            .update_transcript_client_server_hello(&sample_client_hello_handshake_message())
+            .expect("valid transcript update");
+
+        let err = state
+            .build_encrypted_server_handshake_records()
+            .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("handshake secrets"));
     }
 }

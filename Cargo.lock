@@ -521,6 +521,7 @@ dependencies = [
  "base64",
  "bytes",
  "hkdf",
+ "hmac",
  "rustls-pki-types",
  "serde",
  "serde_json",

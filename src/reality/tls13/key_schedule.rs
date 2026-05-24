@@ -1,7 +1,8 @@
 use std::io::{Error, ErrorKind};
 
 use hkdf::Hkdf;
-use sha2::{Sha256, Sha384};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256, Sha384};
 
 use super::cipher_suite::Tls13CipherSuite;
 use super::transcript::Tls13HashAlgorithm;
@@ -9,6 +10,14 @@ use super::transcript::Tls13HashAlgorithm;
 const TLS13_LABEL_PREFIX: &[u8] = b"tls13 ";
 const SHA256_OUTPUT_LEN: usize = 32;
 const SHA384_OUTPUT_LEN: usize = 48;
+
+/// Derived TLS 1.3 handshake traffic secrets after ClientHello + ServerHello.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tls13HandshakeSecrets {
+    pub handshake_secret: Vec<u8>,
+    pub client_handshake_traffic_secret: Vec<u8>,
+    pub server_handshake_traffic_secret: Vec<u8>,
+}
 
 /// Derived TLS 1.3 traffic encryption material.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +182,70 @@ pub fn hash_len(algorithm: Tls13HashAlgorithm) -> usize {
     }
 }
 
+/// TLS 1.3 `Hash("")` for the selected hash algorithm.
+pub fn empty_hash(algorithm: Tls13HashAlgorithm) -> Vec<u8> {
+    match algorithm {
+        Tls13HashAlgorithm::Sha256 => Sha256::digest([]).to_vec(),
+        Tls13HashAlgorithm::Sha384 => Sha384::digest([]).to_vec(),
+    }
+}
+
+fn hkdf_extract_for_hash(algorithm: Tls13HashAlgorithm, salt: &[u8], ikm: &[u8]) -> Vec<u8> {
+    match algorithm {
+        Tls13HashAlgorithm::Sha256 => hkdf_extract_sha256(salt, ikm),
+        Tls13HashAlgorithm::Sha384 => hkdf_extract_sha384(salt, ikm),
+    }
+}
+
+fn derive_secret_for_hash(
+    algorithm: Tls13HashAlgorithm,
+    secret: &[u8],
+    label: &[u8],
+    transcript_hash: &[u8],
+) -> Result<Vec<u8>, Error> {
+    match algorithm {
+        Tls13HashAlgorithm::Sha256 => derive_secret_sha256(secret, label, transcript_hash),
+        Tls13HashAlgorithm::Sha384 => derive_secret_sha384(secret, label, transcript_hash),
+    }
+}
+
+/// Derives TLS 1.3 handshake traffic secrets from ECDHE shared secret and transcript hash.
+pub fn derive_handshake_traffic_secrets(
+    suite: Tls13CipherSuite,
+    ecdhe_shared_secret: &[u8],
+    transcript_hash: &[u8],
+) -> std::io::Result<Tls13HandshakeSecrets> {
+    let output_len = hash_len(suite.hash);
+    let zero = vec![0u8; output_len];
+
+    let early_secret = hkdf_extract_for_hash(suite.hash, &zero, &zero);
+    let derived_secret = derive_secret_for_hash(
+        suite.hash,
+        &early_secret,
+        b"derived",
+        &empty_hash(suite.hash),
+    )?;
+    let handshake_secret = hkdf_extract_for_hash(suite.hash, &derived_secret, ecdhe_shared_secret);
+    let client_handshake_traffic_secret = derive_secret_for_hash(
+        suite.hash,
+        &handshake_secret,
+        b"c hs traffic",
+        transcript_hash,
+    )?;
+    let server_handshake_traffic_secret = derive_secret_for_hash(
+        suite.hash,
+        &handshake_secret,
+        b"s hs traffic",
+        transcript_hash,
+    )?;
+
+    Ok(Tls13HandshakeSecrets {
+        handshake_secret,
+        client_handshake_traffic_secret,
+        server_handshake_traffic_secret,
+    })
+}
+
 fn hkdf_expand_label_for_hash(
     hash: Tls13HashAlgorithm,
     secret: &[u8],
@@ -200,6 +273,36 @@ pub fn derive_finished_key(suite: Tls13CipherSuite, base_key: &[u8]) -> Result<V
     hkdf_expand_label_for_hash(suite.hash, base_key, b"finished", b"", output_len)
 }
 
+/// TLS 1.3 Finished verify_data: `HMAC(finished_key, transcript_hash)`.
+pub fn compute_finished_verify_data(
+    suite: Tls13CipherSuite,
+    finished_key: &[u8],
+    transcript_hash: &[u8],
+) -> std::io::Result<Vec<u8>> {
+    match suite.hash {
+        Tls13HashAlgorithm::Sha256 => {
+            let mut mac = Hmac::<Sha256>::new_from_slice(finished_key).map_err(|e| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("TLS 1.3 Finished HMAC-SHA256 key invalid: {e}"),
+                )
+            })?;
+            mac.update(transcript_hash);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        Tls13HashAlgorithm::Sha384 => {
+            let mut mac = Hmac::<Sha384>::new_from_slice(finished_key).map_err(|e| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("TLS 1.3 Finished HMAC-SHA384 key invalid: {e}"),
+                )
+            })?;
+            mac.update(transcript_hash);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+    }
+}
+
 pub fn hkdf_extract_sha384(salt: &[u8], ikm: &[u8]) -> Vec<u8> {
     let salt = if salt.is_empty() { None } else { Some(salt) };
     let (prk, _) = Hkdf::<Sha384>::extract(salt, ikm);
@@ -209,7 +312,7 @@ pub fn hkdf_extract_sha384(salt: &[u8], ikm: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reality::tls13::cipher_suite::{
+    use crate::reality::tls13::{
         tls13_cipher_suite, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
     };
 
@@ -326,6 +429,162 @@ mod tests {
 
         let first = derive_traffic_key(suite, &traffic_secret).expect("valid traffic key");
         let second = derive_traffic_key(suite, &traffic_secret).expect("valid traffic key");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn empty_hash_sha256_matches_known_digest() {
+        assert_eq!(
+            empty_hash(Tls13HashAlgorithm::Sha256),
+            Sha256::digest([]).as_slice()
+        );
+    }
+
+    #[test]
+    fn empty_hash_sha384_matches_known_digest() {
+        assert_eq!(
+            empty_hash(Tls13HashAlgorithm::Sha384),
+            Sha384::digest([]).as_slice()
+        );
+    }
+
+    #[test]
+    fn derive_handshake_traffic_secrets_output_lengths_match_hash_len_sha256() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let ecdhe = [0x10u8; 32];
+        let transcript = [0x20u8; SHA256_OUTPUT_LEN];
+
+        let secrets = derive_handshake_traffic_secrets(suite, &ecdhe, &transcript)
+            .expect("valid handshake secrets");
+
+        assert_eq!(secrets.handshake_secret.len(), SHA256_OUTPUT_LEN);
+        assert_eq!(
+            secrets.client_handshake_traffic_secret.len(),
+            SHA256_OUTPUT_LEN
+        );
+        assert_eq!(
+            secrets.server_handshake_traffic_secret.len(),
+            SHA256_OUTPUT_LEN
+        );
+    }
+
+    #[test]
+    fn derive_handshake_traffic_secrets_output_lengths_match_hash_len_sha384() {
+        let suite = tls13_cipher_suite(TLS_AES_256_GCM_SHA384).expect("known suite");
+        let ecdhe = [0x10u8; 32];
+        let transcript = [0x20u8; SHA384_OUTPUT_LEN];
+
+        let secrets = derive_handshake_traffic_secrets(suite, &ecdhe, &transcript)
+            .expect("valid handshake secrets");
+
+        assert_eq!(secrets.handshake_secret.len(), SHA384_OUTPUT_LEN);
+        assert_eq!(
+            secrets.client_handshake_traffic_secret.len(),
+            SHA384_OUTPUT_LEN
+        );
+        assert_eq!(
+            secrets.server_handshake_traffic_secret.len(),
+            SHA384_OUTPUT_LEN
+        );
+    }
+
+    #[test]
+    fn derive_handshake_traffic_secrets_is_deterministic() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let ecdhe = [0x55u8; 32];
+        let transcript = [0x66u8; SHA256_OUTPUT_LEN];
+
+        let first = derive_handshake_traffic_secrets(suite, &ecdhe, &transcript)
+            .expect("valid handshake secrets");
+        let second = derive_handshake_traffic_secrets(suite, &ecdhe, &transcript)
+            .expect("valid handshake secrets");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn derive_handshake_traffic_secrets_different_transcript_changes_traffic_secrets() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let ecdhe = [0x77u8; 32];
+        let transcript_a = [0x01u8; SHA256_OUTPUT_LEN];
+        let transcript_b = [0x02u8; SHA256_OUTPUT_LEN];
+
+        let secrets_a = derive_handshake_traffic_secrets(suite, &ecdhe, &transcript_a)
+            .expect("valid handshake secrets");
+        let secrets_b = derive_handshake_traffic_secrets(suite, &ecdhe, &transcript_b)
+            .expect("valid handshake secrets");
+
+        assert_eq!(secrets_a.handshake_secret, secrets_b.handshake_secret);
+        assert_ne!(
+            secrets_a.client_handshake_traffic_secret,
+            secrets_b.client_handshake_traffic_secret
+        );
+        assert_ne!(
+            secrets_a.server_handshake_traffic_secret,
+            secrets_b.server_handshake_traffic_secret
+        );
+    }
+
+    #[test]
+    fn derive_handshake_traffic_secrets_different_ecdhe_changes_handshake_secret() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let ecdhe_a = [0x88u8; 32];
+        let ecdhe_b = [0x99u8; 32];
+        let transcript = [0xAAu8; SHA256_OUTPUT_LEN];
+
+        let secrets_a = derive_handshake_traffic_secrets(suite, &ecdhe_a, &transcript)
+            .expect("valid handshake secrets");
+        let secrets_b = derive_handshake_traffic_secrets(suite, &ecdhe_b, &transcript)
+            .expect("valid handshake secrets");
+
+        assert_ne!(secrets_a.handshake_secret, secrets_b.handshake_secret);
+        assert_ne!(
+            secrets_a.client_handshake_traffic_secret,
+            secrets_b.client_handshake_traffic_secret
+        );
+        assert_ne!(
+            secrets_a.server_handshake_traffic_secret,
+            secrets_b.server_handshake_traffic_secret
+        );
+    }
+
+    #[test]
+    fn compute_finished_verify_data_output_length_matches_hash_len_sha256() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let finished_key = [0x77u8; SHA256_OUTPUT_LEN];
+        let transcript_hash = [0x88u8; SHA256_OUTPUT_LEN];
+
+        let verify_data = compute_finished_verify_data(suite, &finished_key, &transcript_hash)
+            .expect("valid finished verify_data");
+
+        assert_eq!(verify_data.len(), hash_len(suite.hash));
+        assert_eq!(verify_data.len(), SHA256_OUTPUT_LEN);
+    }
+
+    #[test]
+    fn compute_finished_verify_data_output_length_matches_hash_len_sha384() {
+        let suite = tls13_cipher_suite(TLS_AES_256_GCM_SHA384).expect("known suite");
+        let finished_key = [0x99u8; SHA384_OUTPUT_LEN];
+        let transcript_hash = [0xAAu8; SHA384_OUTPUT_LEN];
+
+        let verify_data = compute_finished_verify_data(suite, &finished_key, &transcript_hash)
+            .expect("valid finished verify_data");
+
+        assert_eq!(verify_data.len(), hash_len(suite.hash));
+        assert_eq!(verify_data.len(), SHA384_OUTPUT_LEN);
+    }
+
+    #[test]
+    fn compute_finished_verify_data_is_deterministic() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let finished_key = [0xBBu8; SHA256_OUTPUT_LEN];
+        let transcript_hash = [0xCCu8; SHA256_OUTPUT_LEN];
+
+        let first = compute_finished_verify_data(suite, &finished_key, &transcript_hash)
+            .expect("valid finished verify_data");
+        let second = compute_finished_verify_data(suite, &finished_key, &transcript_hash)
+            .expect("valid finished verify_data");
 
         assert_eq!(first, second);
     }

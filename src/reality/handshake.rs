@@ -2,6 +2,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::info;
 
+use crate::protocol::structs::ClientHelloPayload;
+use crate::tls::records::build_handshake_record;
 use crate::tls::{
     parse_complete_tls_records_prefix, parse_server_hello_key_share,
     parse_tls_server_hello_handshake, TlsRecord, TlsRecordContentType, TlsServerHello,
@@ -36,6 +38,30 @@ pub struct RealityObservedServerHello {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatchedRealityHandshake {
     pub raw_client_bytes: Vec<u8>,
+}
+
+/// Generated partial TLS 1.3 server handshake bytes (ServerHello + encrypted EE/Finished).
+///
+/// This is **not** a complete or interoperable REALITY/TLS handshake: Certificate,
+/// CertificateVerify, client Finished verification, and application-data keys are
+/// missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialTls13Handshake {
+    pub server_hello_record: Vec<u8>,
+    pub encrypted_handshake_records: Vec<u8>,
+}
+
+impl PartialTls13Handshake {
+    pub fn total_len(&self) -> usize {
+        self.server_hello_record.len() + self.encrypted_handshake_records.len()
+    }
+
+    pub fn concat(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.total_len());
+        bytes.extend_from_slice(&self.server_hello_record);
+        bytes.extend_from_slice(&self.encrypted_handshake_records);
+        bytes
+    }
 }
 
 fn invalid_data(message: impl Into<String>) -> std::io::Error {
@@ -245,6 +271,33 @@ pub fn prepare_reality_tls13_state(
     );
 
     Ok(state)
+}
+
+/// Builds partial TLS 1.3 server handshake records after dest ServerHello observation.
+///
+/// Updates transcript with plaintext handshake messages. Does not send bytes to the
+/// client and does not complete the REALITY/TLS protocol.
+pub fn generate_partial_tls13_handshake(
+    state: &mut RealityTls13ServerState,
+    client_hello_payload: &ClientHelloPayload,
+    client_handshake_message: &[u8],
+) -> std::io::Result<PartialTls13Handshake> {
+    state.prepare_server_hello(client_hello_payload)?;
+    let server_hello_message = state
+        .server_hello_message
+        .as_ref()
+        .ok_or_else(|| invalid_data("TLS 1.3 ServerHello message missing after prepare"))?
+        .clone();
+    let server_hello_record = build_handshake_record(&server_hello_message)?;
+
+    let transcript_hash = state.update_transcript_client_server_hello(client_handshake_message)?;
+    state.derive_handshake_secrets(&transcript_hash)?;
+    let encrypted_handshake_records = state.build_encrypted_server_handshake_records()?;
+
+    Ok(PartialTls13Handshake {
+        server_hello_record,
+        encrypted_handshake_records,
+    })
 }
 
 /// Validates the observed destination ServerHello for REALITY camouflage input.
@@ -609,5 +662,48 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert!(err.to_string().contains("X25519"));
         assert_ne!(err.to_string(), TLS13_SERVER_HANDSHAKE_NOT_IMPLEMENTED_MSG);
+    }
+
+    fn client_hello_with_x25519_keyshare() -> ClientHelloPayload {
+        use crate::protocol::enums::{NamedGroup, ProtocolVersion};
+        use crate::protocol::structs::{ClientExtension, KeyShareEntry, Random, SessionId};
+
+        ClientHelloPayload {
+            client_version: ProtocolVersion::TLSv1_2,
+            random: Random([0x33; 32]),
+            session_id: SessionId::empty(),
+            cipher_suites: Vec::new(),
+            compression_methods: Vec::new(),
+            extensions: vec![ClientExtension::KeyShare(vec![KeyShareEntry::new(
+                NamedGroup::X25519,
+                (0u8..32).collect::<Vec<u8>>(),
+            )])],
+        }
+    }
+
+    fn sample_client_handshake_message() -> Vec<u8> {
+        vec![0x01, 0x00, 0x00, 0x04, 0x03, 0x03, 0x00, 0x00]
+    }
+
+    #[test]
+    fn generate_partial_tls13_handshake_returns_non_empty_records() {
+        let dest_handshake =
+            dest_handshake_from_server_hello_message(&valid_tls13_x25519_server_hello_message());
+        let mut state = prepare_reality_tls13_state(dest_handshake, sample_accepted())
+            .expect("valid TLS 1.3 state");
+
+        let partial = generate_partial_tls13_handshake(
+            &mut state,
+            &client_hello_with_x25519_keyshare(),
+            &sample_client_handshake_message(),
+        )
+        .expect("valid partial TLS 1.3 handshake");
+
+        assert!(!partial.server_hello_record.is_empty());
+        assert!(!partial.encrypted_handshake_records.is_empty());
+        assert_eq!(partial.server_hello_record[0], 0x16);
+        assert_eq!(partial.encrypted_handshake_records[0], 0x17);
+        assert!(partial.total_len() > partial.server_hello_record.len());
+        assert_eq!(partial.concat().len(), partial.total_len());
     }
 }
