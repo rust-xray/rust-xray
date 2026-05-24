@@ -346,6 +346,42 @@ mod tests {
     }
 
     #[test]
+    fn builds_first_reality_inbound_runtime_with_policy_fields() {
+        let json = r#"{
+            "inbounds": [{
+                "tag": "reality-in",
+                "listen": "127.0.0.1",
+                "port": 443,
+                "protocol": "vless",
+                "streamSettings": {
+                    "security": "reality",
+                    "realitySettings": {
+                        "show": true,
+                        "dest": "www.example.com:443",
+                        "serverNames": ["Example.COM"],
+                        "privateKey": "test-private-key",
+                        "minClientVer": "1.8.0",
+                        "maxClientVer": "24.9.30",
+                        "maxTimeDiff": 5000,
+                        "shortIds": [""]
+                    }
+                }
+            }]
+        }"#;
+
+        let config: XrayConfig = serde_json::from_str(json).unwrap();
+        let runtime = first_reality_inbound_runtime(&config).unwrap();
+
+        assert_eq!(runtime.tag.as_deref(), Some("reality-in"));
+        assert_eq!(runtime.protocol.as_deref(), Some("vless"));
+        assert_eq!(runtime.server_names, vec!["Example.COM".to_string()]);
+        assert_eq!(runtime.min_client_ver.as_deref(), Some("1.8.0"));
+        assert_eq!(runtime.max_client_ver.as_deref(), Some("24.9.30"));
+        assert_eq!(runtime.max_time_diff, 5000);
+        assert!(runtime.show);
+    }
+
+    #[test]
     fn parse_reality_settings_supports_target_alias() {
         let json = r#"{
             "inbounds": [{

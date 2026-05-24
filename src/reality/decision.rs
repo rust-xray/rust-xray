@@ -19,6 +19,7 @@ pub struct RealityAccepted {
     pub sni: Option<String>,
 }
 
+#[derive(Debug)]
 pub enum RealityDecision {
     Accepted(RealityAccepted),
     Fallback,
@@ -50,13 +51,12 @@ fn log_client_hello_diagnostics(hello: &ClientHelloPayload) {
     }
 }
 
-fn now_unix_ms(cfg: &RealityInspectConfig<'_>) -> u64 {
-    cfg.now_unix_ms.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    })
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 pub fn inspect_reality_client_hello(
@@ -64,17 +64,20 @@ pub fn inspect_reality_client_hello(
     raw_client_hello_message: &[u8],
     cfg: RealityInspectConfig<'_>,
 ) -> std::io::Result<RealityDecision> {
-    let Some(sni) = extract_sni_hostname(hello) else {
-        debug!("SNI missing");
-        return Ok(RealityDecision::Fallback);
+    let sni = match extract_sni_hostname(hello) {
+        Some(sni) => sni,
+        None => {
+            debug!("REALITY fallback: SNI missing");
+            return Ok(RealityDecision::Fallback);
+        }
     };
 
     if !server_name_allowed(&sni, cfg.server_names) {
-        debug!(%sni, "SNI not allowed");
+        debug!(%sni, "REALITY fallback: SNI not allowed");
         return Ok(RealityDecision::Fallback);
     }
 
-    debug!(%sni, "SNI allowed");
+    debug!(%sni, "REALITY SNI allowed");
 
     log_client_hello_diagnostics(hello);
 
@@ -90,24 +93,29 @@ pub fn inspect_reality_client_hello(
                 "REALITY session_id open ok"
             );
 
-            let validation_cfg = RealityValidationConfig {
-                server_names: cfg.server_names,
-                short_ids: cfg.short_ids,
-                max_time_diff_ms: cfg.max_time_diff_ms,
-                min_client_ver: cfg.min_client_ver,
-                max_client_ver: cfg.max_client_ver,
-            };
+            let now_unix_ms = cfg.now_unix_ms.unwrap_or_else(current_unix_ms);
 
-            if validate_reality_client_auth(&client_auth, validation_cfg, now_unix_ms(&cfg))? {
-                debug!("REALITY client accepted after AEAD + policy validation");
-                Ok(RealityDecision::Accepted(RealityAccepted {
-                    auth,
-                    client: client_auth,
-                    sni: Some(sni),
-                }))
-            } else {
-                Ok(RealityDecision::Fallback)
+            let policy_ok = validate_reality_client_auth(
+                &client_auth,
+                RealityValidationConfig {
+                    short_ids: cfg.short_ids,
+                    max_time_diff_ms: cfg.max_time_diff_ms,
+                    min_client_ver: cfg.min_client_ver,
+                    max_client_ver: cfg.max_client_ver,
+                },
+                now_unix_ms,
+            )?;
+
+            if !policy_ok {
+                debug!("REALITY policy validation failed");
+                return Ok(RealityDecision::Fallback);
             }
+
+            Ok(RealityDecision::Accepted(RealityAccepted {
+                auth,
+                client: client_auth,
+                sni: Some(sni),
+            }))
         }
         RealitySessionOpenResult::AuthFailed => {
             debug!("REALITY session_id auth failed");
@@ -271,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn inspect_reality_client_hello_fallbacks_for_invalid_session_id() {
+    fn inspect_reality_client_hello_allowed_sni_reaches_crypto_path() {
         let mut random = [0u8; 32];
         random[20..32].copy_from_slice(&[0xAA; 12]);
         let mut hello = reality_candidate_hello(Random(random));
@@ -503,5 +511,85 @@ mod tests {
         .unwrap();
 
         assert!(matches!(result, RealityDecision::Accepted(_)));
+    }
+
+    #[test]
+    fn inspect_reality_client_hello_accepts_when_min_client_ver_passes() {
+        let server_names = vec!["example.com".to_string()];
+        let short_ids = vec![vec![0xAB, 0xCD]];
+        let (hello, handshake_message) = build_valid_reality_client(1_700_000_000, &[0xAB, 0xCD]);
+
+        let result = inspect_reality_client_hello(
+            &hello,
+            &handshake_message,
+            inspect_cfg_with_versions(&server_names, &short_ids, 0, Some("1.8.0"), None, None),
+        )
+        .unwrap();
+
+        assert!(matches!(result, RealityDecision::Accepted(_)));
+    }
+
+    #[test]
+    fn inspect_reality_client_hello_fallbacks_when_min_client_ver_fails() {
+        let server_names = vec!["example.com".to_string()];
+        let short_ids = vec![vec![0xAB, 0xCD]];
+        let (hello, handshake_message) = build_valid_reality_client(1_700_000_000, &[0xAB, 0xCD]);
+
+        let result = inspect_reality_client_hello(
+            &hello,
+            &handshake_message,
+            inspect_cfg_with_versions(&server_names, &short_ids, 0, Some("1.9.0"), None, None),
+        )
+        .unwrap();
+
+        assert!(matches!(result, RealityDecision::Fallback));
+    }
+
+    #[test]
+    fn inspect_reality_client_hello_accepts_when_max_client_ver_passes() {
+        let server_names = vec!["example.com".to_string()];
+        let short_ids = vec![vec![0xAB, 0xCD]];
+        let (hello, handshake_message) = build_valid_reality_client(1_700_000_000, &[0xAB, 0xCD]);
+
+        let result = inspect_reality_client_hello(
+            &hello,
+            &handshake_message,
+            inspect_cfg_with_versions(&server_names, &short_ids, 0, None, Some("1.8.0"), None),
+        )
+        .unwrap();
+
+        assert!(matches!(result, RealityDecision::Accepted(_)));
+    }
+
+    #[test]
+    fn inspect_reality_client_hello_fallbacks_when_max_client_ver_fails() {
+        let server_names = vec!["example.com".to_string()];
+        let short_ids = vec![vec![0xAB, 0xCD]];
+        let (hello, handshake_message) = build_valid_reality_client(1_700_000_000, &[0xAB, 0xCD]);
+
+        let result = inspect_reality_client_hello(
+            &hello,
+            &handshake_message,
+            inspect_cfg_with_versions(&server_names, &short_ids, 0, None, Some("1.7.0"), None),
+        )
+        .unwrap();
+
+        assert!(matches!(result, RealityDecision::Fallback));
+    }
+
+    #[test]
+    fn inspect_reality_client_hello_invalid_min_client_ver_returns_invalid_input() {
+        let server_names = vec!["example.com".to_string()];
+        let short_ids = vec![vec![0xAB, 0xCD]];
+        let (hello, handshake_message) = build_valid_reality_client(1_700_000_000, &[0xAB, 0xCD]);
+
+        let err = inspect_reality_client_hello(
+            &hello,
+            &handshake_message,
+            inspect_cfg_with_versions(&server_names, &short_ids, 0, Some("1.300.0"), None, None),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

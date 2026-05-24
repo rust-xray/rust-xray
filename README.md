@@ -10,66 +10,61 @@ stub для валидного REALITY-клиента.
 
 **Non-REALITY clients are relayed to `dest`.**
 
-**AEAD session_id decrypt is implemented.** Full accepted path (ServerHello patching,
-VLESS/Vision handoff) is still not implemented. **This is not a drop-in replacement
-for Xray-core yet.**
+**This is not a drop-in replacement for Xray-core.** Accepted path (ServerHello
+patching, VLESS/Vision handoff) ещё не реализован.
 
 ## Реализовано
 
-### REALITY AEAD и auth
-
-- X25519 keyshare extraction из `key_share` extension.
-- HKDF-SHA256 REALITY auth key derivation, 32 bytes (salt = `random[0..20]`,
-  info = `"REALITY"`).
-- AES-256-GCM `session_id` decrypt.
-- Nonce = `ClientHello.random[20..32]` (12 bytes).
-- AAD = full ClientHello handshake message с обнулёнными `session_id` bytes
-  (offset 39..71 в handshake message).
-- Plaintext layout (16 bytes после decrypt):
-  - `client_version[0..4]`
-  - `unix_time` u32 BE
-  - `short_id[8]`
-
-### Policy validation (подключено к decision flow)
-
-- `shortId` — prefix match против `shortIds` (0..8 байт; пустой configured
-  shortId совпадает с любым prefix длины 0).
-- `maxTimeDiff` — сравнение `unix_time` из plaintext с текущим временем
-  (`maxTimeDiff == 0` отключает проверку).
-- `minClientVer` / `maxClientVer` — опционально, если заданы в конфиге.
-- SNI / `serverNames` — ранняя проверка до crypto (case-insensitive exact
-  match).
+- **AEAD `session_id` decrypt** — X25519 keyshare, HKDF-SHA256 auth key,
+  AES-256-GCM open, nonce = `random[20..32]`, AAD с обнулённым `session_id`.
+- **`shortId` validation** — prefix match против `shortIds` (0..8 байт; пустой
+  configured shortId = prefix длины 0).
+- **`maxTimeDiff` validation** — `unix_time` из plaintext vs wall clock;
+  `maxTimeDiff == 0` отключает проверку.
+- **`minClientVer` / `maxClientVer` validation** — опционально, если заданы в
+  конфиге; invalid version string → `InvalidInput` (не silent fallback).
+- **`serverNames` / SNI validation** — ранняя проверка до crypto (exact match,
+  case-insensitive).
 
 ### Инфраструктура
 
-- Xray-compatible config parsing для REALITY inbound (`inbounds`,
-  `streamSettings.realitySettings`, `dest` / `target`, `privateKey`, `shortIds`,
-  `serverNames`, `maxTimeDiff`, `minClientVer`, `maxClientVer`).
-- TLS ClientHello parsing (первый TLS record, без фрагментации).
-- Fallback relay для обычных и невалидных клиентов
-  (`tokio::io::copy_bidirectional`).
-- Accepted-path scaffold: `RealityAccepted` с auth metadata, SNI и client auth;
-  интерфейс `fetch_dest_handshake` / `patch_reality_server_hello` (patching —
-  placeholder).
-- Unit-тесты для config, TLS record, REALITY auth, AEAD, validation, SNI и
-  decision flow.
+- Xray-compatible config parsing (`RealityInboundRuntime`).
+- TLS ClientHello parsing (первый TLS record).
+- Fallback relay для обычных и невалидных клиентов.
+- Accepted-path scaffold: `RealityAccepted`, `fetch_dest_handshake` /
+  `patch_reality_server_hello` (placeholder).
+- Unit-тесты для config, TLS, AEAD, policy, SNI и decision flow.
+
+## Policy validation matrix
+
+| Check | When | Pass | Fail |
+|-------|------|------|------|
+| SNI present | Before crypto | Continue | `Fallback` |
+| SNI in `serverNames` | Before crypto | Continue | `Fallback` |
+| `serverNames` non-empty | Before crypto | Continue | `Fallback` |
+| X25519 + HKDF | Crypto | Continue | `Fallback` |
+| AEAD `session_id` open | Crypto | `Opened` | `Fallback` |
+| `shortId` prefix match | After AEAD | Continue | `Fallback` |
+| `minClientVer` | After AEAD | Continue | `Fallback` |
+| `maxClientVer` | After AEAD | Continue | `Fallback` |
+| Invalid version string | After AEAD | — | `Err(InvalidInput)` |
+| `maxTimeDiff` window | After AEAD | `Accepted` | `Fallback` |
+| All checks pass | After AEAD | `Accepted` | — |
+
+`Accepted` содержит `RealityAuthResult`, `RealityClientAuth`, `sni: Some(String)`.
+
+Секреты (`privateKey`, `auth_key`, shared secret, plaintext `session_id`) в логи
+не выводятся.
 
 ## Осталось TODO
 
-- ServerHello patching (REALITY crypto/session modification).
-- Full accepted path: connect → forward ClientHello → read dest handshake →
-  patch → reply to client.
-- VLESS/Vision stream handoff после успешного REALITY handshake.
-- `mldsa65Seed` / post-quantum REALITY extensions.
-- Fallback bandwidth limits (`limitFallbackUpload` / `limitFallbackDownload`).
+- **Accepted path** — connect → forward ClientHello → read dest handshake →
+  reply to client.
+- **ServerHello patching** — REALITY crypto/session modification.
+- **VLESS/Vision** — stream handoff после REALITY handshake.
+- **`mldsa65`** — post-quantum REALITY extensions (`mldsa65Seed`).
+- **Fallback limits** — `limitFallbackUpload` / `limitFallbackDownload`.
 - Фрагментированный `ClientHello` across multiple TLS records.
-- Полная совместимость со всеми edge cases Xray-core.
-
-## Не реализовано (кратко)
-
-Accepted path и downstream VLESS/Vision — см. список TODO выше. Валидный
-REALITY-клиент попадает в stub и получает `Unsupported`; в fallback **не**
-отправляется.
 
 ## Требования
 
@@ -83,7 +78,7 @@ REALITY-клиент попадает в stub и получает `Unsupported`;
 cargo fmt
 cargo build
 cargo test
-cargo clippy
+cargo clippy --all-targets
 ```
 
 Release-сборка:
@@ -130,7 +125,7 @@ cargo run -- ./config.json
           "shortIds": ["", "0123456789abcdef"],
           "maxTimeDiff": 60000,
           "minClientVer": "1.8.0",
-          "maxClientVer": ""
+          "maxClientVer": "24.9.30"
         }
       }
     }
@@ -143,7 +138,7 @@ cargo run -- ./config.json
 }
 ```
 
-Поддерживаемые и используемые поля `realitySettings`:
+Поддерживаемые поля `realitySettings`:
 
 | Поле | Поведение |
 |------|-----------|
@@ -173,25 +168,22 @@ RUST_LOG=debug cargo run -- ./config.json
 2. Чтение первого TLS `ClientHello` record.
 3. SNI check против `serverNames` → иначе **Fallback**.
 4. X25519 + HKDF + AES-GCM open `session_id` → иначе **Fallback**.
-5. Policy validation (`shortId`, time, client version) → иначе **Fallback**.
-6. **Accepted** → `handle_accepted_reality_client` → `Unsupported`, соединение
-   закрывается (без fallback relay).
+5. Policy validation (`shortId`, client version, time) → иначе **Fallback**.
+6. **Accepted** → `handle_accepted_reality_client` → `Unsupported` (без fallback relay).
 7. **Fallback** → TCP relay на `dest`/`target` с уже прочитанными байтами.
 
 ## Troubleshooting
 
 | Симптом / лог | Возможная причина |
 |---------------|-------------------|
-| `REALITY session_id auth failed` / AEAD open failed | Неверный `privateKey`, `session_id`, AAD или nonce; клиент не REALITY; повреждённый ClientHello |
-| `SNI missing` / `SNI not allowed` | Клиент без SNI или hostname не в `serverNames` |
-| `shortId validation failed` | Decrypted shortId не совпадает ни с одним configured prefix |
-| `maxTimeDiff validation failed` | `unix_time` клиента вне окна `maxTimeDiff` |
-| `minClientVer validation failed` / `maxClientVer validation failed` | Версия REALITY-клиента вне заданного диапазона |
-| `REALITY accepted path reached but not implemented` | Клиент прошёл все проверки, но ServerHello patching / VLESS ещё не реализованы — это ожидаемое поведение |
-| `fallback relay failed` | `dest`/`target` недоступен или timeout connect |
-
-Секреты (`privateKey`, `auth_key`, shared secret, полный decrypted session
-payload) в логи не выводятся.
+| `REALITY fallback: SNI missing` | Клиент без SNI extension |
+| `REALITY fallback: SNI not allowed` | Hostname не в `serverNames` |
+| `REALITY session_id auth failed` | Неверный REALITY ciphertext / ключ |
+| `shortId validation failed` | Decrypted shortId не совпадает с configured prefix |
+| `client version below min` / `above max` | Версия REALITY-клиента вне диапазона |
+| `maxTimeDiff validation failed` | `unix_time` клиента вне окна |
+| `REALITY accepted path reached but not implemented` | Клиент прошёл все проверки; accepted path — stub |
+| `fallback relay failed` | `dest`/`target` недоступен |
 
 ## Структура проекта
 
@@ -206,7 +198,7 @@ src/
 │   ├── session.rs       # AEAD session_id decrypt, policy validation
 │   ├── decision.rs      # inspect_reality_client_hello, RealityDecision
 │   ├── sni.rs           # SNI extraction, serverNames check
-│   ├── client_version.rs
+│   ├── version.rs       # minClientVer / maxClientVer parse & compare
 │   ├── short_id.rs
 │   ├── handshake.rs     # fetch_dest_handshake, patch placeholder
 │   └── server.rs        # accepted-path entry (stub)
@@ -216,7 +208,4 @@ src/
 ## Ограничения
 
 - Первый TLS record должен содержать полный `ClientHello` без trailing data.
-- Проект не использует Xray как зависимость и не гарантирует идентичное
-  поведение Xray-core до реализации accepted path.
-- Валидный REALITY-клиент **не** отправляется в fallback — это намеренно, чтобы
-  не маскировать ошибки accepted path.
+- Валидный REALITY-клиент **не** отправляется в fallback — это намеренно.

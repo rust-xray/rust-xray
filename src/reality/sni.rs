@@ -11,7 +11,7 @@ pub fn extract_sni_hostname(hello: &ClientHelloPayload) -> Option<String> {
     None
 }
 
-pub(crate) fn server_name_allowed(sni: &str, allowed: &[String]) -> bool {
+pub fn server_name_allowed(sni: &str, allowed: &[String]) -> bool {
     if allowed.is_empty() {
         return false;
     }
@@ -19,7 +19,7 @@ pub(crate) fn server_name_allowed(sni: &str, allowed: &[String]) -> bool {
     let sni_lower = sni.to_ascii_lowercase();
     allowed
         .iter()
-        .any(|name| name.eq_ignore_ascii_case(&sni_lower))
+        .any(|name| name.to_ascii_lowercase() == sni_lower)
 }
 
 #[cfg(test)]
@@ -71,6 +71,12 @@ mod tests {
     fn server_name_allowed_case_insensitive_match() {
         let allowed = vec!["www.example.com".to_string()];
         assert!(server_name_allowed("WWW.EXAMPLE.COM", &allowed));
+    }
+
+    #[test]
+    fn server_name_allowed_matches_when_allowed_entry_is_uppercase() {
+        let allowed = vec!["WWW.EXAMPLE.COM".to_string()];
+        assert!(server_name_allowed("www.example.com", &allowed));
     }
 
     #[test]

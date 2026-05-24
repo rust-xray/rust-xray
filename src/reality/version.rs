@@ -1,8 +1,9 @@
 /// Parses an Xray REALITY client version string into four byte components.
 ///
-/// Supported forms: `"1.8.0"`, `"1.8.0.0"`, `"24.9.30"`.
+/// Supported forms: `"1"`, `"1.8.0"`, `"1.8.0.0"`, `"24.9.30"`.
 /// Missing components are zero-filled; each component must be 0..=255.
 pub fn parse_reality_client_version(value: &str) -> std::io::Result<[u8; 4]> {
+    let value = value.trim();
     if value.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -50,17 +51,22 @@ pub fn parse_reality_client_version(value: &str) -> std::io::Result<[u8; 4]> {
     Ok(version)
 }
 
-pub(crate) fn version_ge(a: [u8; 4], b: [u8; 4]) -> bool {
-    a >= b
+pub fn version_ge(actual: [u8; 4], min: [u8; 4]) -> bool {
+    actual >= min
 }
 
-pub(crate) fn version_le(a: [u8; 4], b: [u8; 4]) -> bool {
-    a <= b
+pub fn version_le(actual: [u8; 4], max: [u8; 4]) -> bool {
+    actual <= max
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_reality_client_version_parses_single_component() {
+        assert_eq!(parse_reality_client_version("1").unwrap(), [1, 0, 0, 0]);
+    }
 
     #[test]
     fn parse_reality_client_version_parses_three_components() {
@@ -84,8 +90,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_reality_client_version_rejects_component_above_255() {
-        let err = parse_reality_client_version("1.300.0").unwrap_err();
+    fn parse_reality_client_version_trims_whitespace() {
+        assert_eq!(
+            parse_reality_client_version("  1.8.0  ").unwrap(),
+            [1, 8, 0, 0]
+        );
+    }
+
+    #[test]
+    fn parse_reality_client_version_rejects_empty_string() {
+        let err = parse_reality_client_version("").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn parse_reality_client_version_rejects_whitespace_only() {
+        let err = parse_reality_client_version("   ").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
@@ -96,8 +116,44 @@ mod tests {
     }
 
     #[test]
-    fn parse_reality_client_version_rejects_empty_string() {
-        let err = parse_reality_client_version("").unwrap_err();
+    fn parse_reality_client_version_rejects_component_above_255() {
+        let err = parse_reality_client_version("1.300.0").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn parse_reality_client_version_rejects_empty_component() {
+        let err = parse_reality_client_version("1..0").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn version_ge_passes_when_actual_is_greater() {
+        assert!(version_ge([1, 8, 1, 0], [1, 8, 0, 9]));
+    }
+
+    #[test]
+    fn version_ge_passes_when_equal() {
+        assert!(version_ge([1, 8, 0, 0], [1, 8, 0, 0]));
+    }
+
+    #[test]
+    fn version_ge_fails_when_actual_is_less() {
+        assert!(!version_ge([1, 8, 0, 9], [1, 8, 1, 0]));
+    }
+
+    #[test]
+    fn version_le_passes_when_actual_is_less() {
+        assert!(version_le([1, 8, 0, 9], [1, 8, 1, 0]));
+    }
+
+    #[test]
+    fn version_le_passes_when_equal() {
+        assert!(version_le([1, 8, 0, 0], [1, 8, 0, 0]));
+    }
+
+    #[test]
+    fn version_le_fails_when_actual_is_greater() {
+        assert!(!version_le([1, 8, 1, 0], [1, 8, 0, 9]));
     }
 }

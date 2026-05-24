@@ -6,7 +6,7 @@ use tracing::debug;
 
 use crate::protocol::structs::ClientHelloPayload;
 
-use super::client_version::{parse_reality_client_version, version_ge, version_le};
+use super::version::{parse_reality_client_version, version_ge, version_le};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RealityClientAuth {
@@ -118,7 +118,6 @@ pub(crate) fn open_reality_session_id(
 }
 
 pub struct RealityValidationConfig<'a> {
-    pub server_names: &'a [String],
     pub short_ids: &'a [Vec<u8>],
     pub max_time_diff_ms: u64,
     pub min_client_ver: Option<&'a str>,
@@ -131,25 +130,14 @@ fn short_id_matches(decrypted: &[u8; 8], configured: &[u8]) -> bool {
 
 /// Validates REALITY client auth metadata after AEAD session_id decrypt.
 ///
+/// Checks `shortId` prefix match, optional client version bounds, and optional
+/// `maxTimeDiff` window.
 /// Returns `Ok(true)` when all configured checks pass, `Ok(false)` otherwise.
-///
-/// TODO: Validate `server_names` once SNI policy is wired into auth checks.
 pub fn validate_reality_client_auth(
     auth: &RealityClientAuth,
     cfg: RealityValidationConfig<'_>,
     now_unix_ms: u64,
 ) -> std::io::Result<bool> {
-    let _ = cfg.server_names;
-
-    let min_version = cfg
-        .min_client_ver
-        .map(parse_reality_client_version)
-        .transpose()?;
-    let max_version = cfg
-        .max_client_ver
-        .map(parse_reality_client_version)
-        .transpose()?;
-
     if cfg.short_ids.is_empty() {
         debug!("shortId validation failed: no configured shortIds");
         return Ok(false);
@@ -164,29 +152,37 @@ pub fn validate_reality_client_auth(
         return Ok(false);
     }
 
-    if let Some(min) = min_version {
+    if let Some(min) = cfg.min_client_ver {
+        let min = parse_reality_client_version(min)?;
         if !version_ge(auth.client_version, min) {
             debug!(
                 client_version = ?auth.client_version,
-                min_client_ver = ?cfg.min_client_ver,
-                "minClientVer validation failed"
+                min_client_ver = ?min,
+                "client version below min"
             );
             return Ok(false);
         }
     }
 
-    if let Some(max) = max_version {
+    if let Some(max) = cfg.max_client_ver {
+        let max = parse_reality_client_version(max)?;
         if !version_le(auth.client_version, max) {
             debug!(
                 client_version = ?auth.client_version,
-                max_client_ver = ?cfg.max_client_ver,
-                "maxClientVer validation failed"
+                max_client_ver = ?max,
+                "client version above max"
             );
             return Ok(false);
         }
     }
 
+    debug!(
+        client_version = ?auth.client_version,
+        "client version ok"
+    );
+
     if cfg.max_time_diff_ms == 0 {
+        debug!("REALITY policy validation ok");
         return Ok(true);
     }
 
@@ -202,6 +198,7 @@ pub fn validate_reality_client_auth(
         return Ok(false);
     }
 
+    debug!("REALITY policy validation ok");
     Ok(true)
 }
 
@@ -357,22 +354,19 @@ mod tests {
     }
 
     fn validation_cfg<'a>(
-        server_names: &'a [String],
         short_ids: &'a [Vec<u8>],
         max_time_diff_ms: u64,
     ) -> RealityValidationConfig<'a> {
-        validation_cfg_with_versions(server_names, short_ids, max_time_diff_ms, None, None)
+        validation_cfg_with_versions(short_ids, max_time_diff_ms, None, None)
     }
 
     fn validation_cfg_with_versions<'a>(
-        server_names: &'a [String],
         short_ids: &'a [Vec<u8>],
         max_time_diff_ms: u64,
         min_client_ver: Option<&'a str>,
         max_client_ver: Option<&'a str>,
     ) -> RealityValidationConfig<'a> {
         RealityValidationConfig {
-            server_names,
             short_ids,
             max_time_diff_ms,
             min_client_ver,
@@ -395,9 +389,8 @@ mod tests {
 
     #[test]
     fn validate_short_id_exact_eight_byte_match() {
-        let server_names = vec!["example.com".to_string()];
         let short_ids = vec![vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]];
-        let cfg = validation_cfg(&server_names, &short_ids, 0);
+        let cfg = validation_cfg(&short_ids, 0);
         let auth = RealityClientAuth {
             client_version: [0; 4],
             unix_time: 1_700_000_000,
@@ -409,9 +402,8 @@ mod tests {
 
     #[test]
     fn validate_short_id_prefix_match() {
-        let server_names = vec!["example.com".to_string()];
         let short_ids = vec![vec![0x01, 0x23]];
-        let cfg = validation_cfg(&server_names, &short_ids, 0);
+        let cfg = validation_cfg(&short_ids, 0);
         let auth = RealityClientAuth {
             client_version: [0; 4],
             unix_time: 1_700_000_000,
@@ -423,9 +415,8 @@ mod tests {
 
     #[test]
     fn validate_empty_configured_short_id_matches_any_decrypted() {
-        let server_names = vec!["example.com".to_string()];
         let short_ids = vec![Vec::new()];
-        let cfg = validation_cfg(&server_names, &short_ids, 0);
+        let cfg = validation_cfg(&short_ids, 0);
         let auth = RealityClientAuth {
             client_version: [0; 4],
             unix_time: 1_700_000_000,
@@ -437,9 +428,8 @@ mod tests {
 
     #[test]
     fn validate_short_id_mismatch_returns_false() {
-        let server_names = vec!["example.com".to_string()];
         let short_ids = vec![vec![0x01, 0x23]];
-        let cfg = validation_cfg(&server_names, &short_ids, 0);
+        let cfg = validation_cfg(&short_ids, 0);
         let auth = RealityClientAuth {
             client_version: [0; 4],
             unix_time: 1_700_000_000,
@@ -451,9 +441,8 @@ mod tests {
 
     #[test]
     fn validate_empty_short_ids_list_returns_false() {
-        let server_names = vec!["example.com".to_string()];
         let short_ids: Vec<Vec<u8>> = vec![];
-        let cfg = validation_cfg(&server_names, &short_ids, 0);
+        let cfg = validation_cfg(&short_ids, 0);
         let auth = RealityClientAuth {
             client_version: [0; 4],
             unix_time: 1_700_000_000,
@@ -465,9 +454,8 @@ mod tests {
 
     #[test]
     fn validate_max_time_diff_disabled_when_zero() {
-        let server_names = vec!["example.com".to_string()];
         let short_ids = vec![vec![0x01]];
-        let cfg = validation_cfg(&server_names, &short_ids, 0);
+        let cfg = validation_cfg(&short_ids, 0);
         let auth = RealityClientAuth {
             client_version: [0; 4],
             unix_time: 1,
@@ -483,9 +471,8 @@ mod tests {
 
     #[test]
     fn validate_max_time_diff_inside_window() {
-        let server_names = vec!["example.com".to_string()];
         let short_ids = vec![vec![0x01]];
-        let cfg = validation_cfg(&server_names, &short_ids, 5_000);
+        let cfg = validation_cfg(&short_ids, 5_000);
         let auth = RealityClientAuth {
             client_version: [0; 4],
             unix_time: 1_700_000_000,
@@ -503,9 +490,8 @@ mod tests {
 
     #[test]
     fn validate_max_time_diff_outside_window() {
-        let server_names = vec!["example.com".to_string()];
         let short_ids = vec![vec![0x01]];
-        let cfg = validation_cfg(&server_names, &short_ids, 1_000);
+        let cfg = validation_cfg(&short_ids, 1_000);
         let auth = RealityClientAuth {
             client_version: [0; 4],
             unix_time: 1_700_000_000,
@@ -521,88 +507,78 @@ mod tests {
         assert!(!validate_reality_client_auth(&auth, cfg, now_unix_ms).unwrap());
     }
 
-    #[test]
-    fn validate_reality_client_auth_min_client_ver_pass() {
-        let server_names = vec!["example.com".to_string()];
-        let short_ids = vec![vec![0x01]];
-        let cfg = validation_cfg_with_versions(&server_names, &short_ids, 0, Some("1.8.0"), None);
-        let auth = RealityClientAuth {
-            client_version: [1, 8, 0, 0],
+    fn auth_with_version(client_version: [u8; 4]) -> RealityClientAuth {
+        RealityClientAuth {
+            client_version,
             unix_time: 1_700_000_000,
             short_id: {
                 let mut short_id = [0u8; 8];
                 short_id[0] = 0x01;
                 short_id
             },
-        };
+        }
+    }
+
+    #[test]
+    fn validate_client_version_no_min_max_passes() {
+        let short_ids = vec![vec![0x01]];
+        let cfg = validation_cfg(&short_ids, 0);
+        let auth = auth_with_version([1, 8, 0, 0]);
 
         assert!(validate_reality_client_auth(&auth, cfg, 0).unwrap());
     }
 
     #[test]
-    fn validate_reality_client_auth_min_client_ver_fail() {
-        let server_names = vec!["example.com".to_string()];
+    fn validate_client_version_min_passes() {
         let short_ids = vec![vec![0x01]];
-        let cfg = validation_cfg_with_versions(&server_names, &short_ids, 0, Some("1.9.0"), None);
-        let auth = RealityClientAuth {
-            client_version: [1, 8, 0, 0],
-            unix_time: 1_700_000_000,
-            short_id: {
-                let mut short_id = [0u8; 8];
-                short_id[0] = 0x01;
-                short_id
-            },
-        };
-
-        assert!(!validate_reality_client_auth(&auth, cfg, 0).unwrap());
-    }
-
-    #[test]
-    fn validate_reality_client_auth_max_client_ver_pass() {
-        let server_names = vec!["example.com".to_string()];
-        let short_ids = vec![vec![0x01]];
-        let cfg = validation_cfg_with_versions(&server_names, &short_ids, 0, None, Some("1.8.0"));
-        let auth = RealityClientAuth {
-            client_version: [1, 8, 0, 0],
-            unix_time: 1_700_000_000,
-            short_id: {
-                let mut short_id = [0u8; 8];
-                short_id[0] = 0x01;
-                short_id
-            },
-        };
+        let cfg = validation_cfg_with_versions(&short_ids, 0, Some("1.8.0"), None);
+        let auth = auth_with_version([1, 8, 0, 0]);
 
         assert!(validate_reality_client_auth(&auth, cfg, 0).unwrap());
     }
 
     #[test]
-    fn validate_reality_client_auth_max_client_ver_fail() {
-        let server_names = vec!["example.com".to_string()];
+    fn validate_client_version_min_fails() {
         let short_ids = vec![vec![0x01]];
-        let cfg = validation_cfg_with_versions(&server_names, &short_ids, 0, None, Some("1.7.0"));
-        let auth = RealityClientAuth {
-            client_version: [1, 8, 0, 0],
-            unix_time: 1_700_000_000,
-            short_id: {
-                let mut short_id = [0u8; 8];
-                short_id[0] = 0x01;
-                short_id
-            },
-        };
+        let cfg = validation_cfg_with_versions(&short_ids, 0, Some("1.9.0"), None);
+        let auth = auth_with_version([1, 8, 0, 0]);
 
         assert!(!validate_reality_client_auth(&auth, cfg, 0).unwrap());
     }
 
     #[test]
-    fn validate_reality_client_auth_invalid_min_client_ver_returns_error() {
-        let server_names = vec!["example.com".to_string()];
+    fn validate_client_version_max_passes() {
         let short_ids = vec![vec![0x01]];
-        let cfg = validation_cfg_with_versions(&server_names, &short_ids, 0, Some("1.300.0"), None);
-        let auth = RealityClientAuth {
-            client_version: [1, 8, 0, 0],
-            unix_time: 1_700_000_000,
-            short_id: [0x01; 8],
-        };
+        let cfg = validation_cfg_with_versions(&short_ids, 0, None, Some("1.8.0"));
+        let auth = auth_with_version([1, 8, 0, 0]);
+
+        assert!(validate_reality_client_auth(&auth, cfg, 0).unwrap());
+    }
+
+    #[test]
+    fn validate_client_version_max_fails() {
+        let short_ids = vec![vec![0x01]];
+        let cfg = validation_cfg_with_versions(&short_ids, 0, None, Some("1.7.0"));
+        let auth = auth_with_version([1, 8, 0, 0]);
+
+        assert!(!validate_reality_client_auth(&auth, cfg, 0).unwrap());
+    }
+
+    #[test]
+    fn validate_client_version_invalid_min_returns_invalid_input() {
+        let short_ids = vec![vec![0x01]];
+        let cfg = validation_cfg_with_versions(&short_ids, 0, Some("1.300.0"), None);
+        let auth = auth_with_version([1, 8, 0, 0]);
+
+        let err = validate_reality_client_auth(&auth, cfg, 0).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn validate_client_version_invalid_max_returns_invalid_input() {
+        let short_ids = vec![vec![0x01]];
+        let cfg = validation_cfg_with_versions(&short_ids, 0, None, Some("1.300.0"));
+        let auth = auth_with_version([1, 8, 0, 0]);
 
         let err = validate_reality_client_auth(&auth, cfg, 0).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
