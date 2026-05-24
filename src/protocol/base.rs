@@ -6,7 +6,7 @@ use zeroize::Zeroize;
 
 use crate::codec;
 use crate::codec::{Codec, Reader};
-use crate::errors::InvalidMessage;
+use crate::error::InvalidMessage;
 
 /// An externally length'd payload
 #[derive(Clone, Eq, PartialEq)]

@@ -1,13 +1,13 @@
-use crate::base::{Payload, PayloadU16, PayloadU8};
 use crate::codec::{Codec, LengthPrefixedBuffer, ListLength, Reader, TlsListElement};
-use crate::enums::{
+use crate::error::InvalidMessage;
+use crate::pki_types::DnsName;
+use crate::protocol::base::{Payload, PayloadU16, PayloadU8};
+use crate::protocol::enums::{
     CertificateCompressionAlgorithm, CertificateStatusType, CipherSuite, Compression,
     ECPointFormat, EchClientHelloType, ExtensionType, HpkeAead, HpkeKdf, NamedGroup,
     PSKKeyExchangeMode, ProtocolVersion, ServerNameType, SignatureScheme,
 };
-use crate::errors::InvalidMessage;
-use crate::pki_types::DnsName;
-use crate::rand::{self, SecureRandom};
+use crate::protocol::rand::{self, SecureRandom};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -106,7 +106,7 @@ impl Codec<'_> for Random {
 impl Random {
     pub(crate) fn new(
         secure_random: &dyn SecureRandom,
-    ) -> Result<Self, crate::rand::GetRandomFailed> {
+    ) -> Result<Self, crate::protocol::rand::GetRandomFailed> {
         let mut data = [0u8; 32];
         secure_random.fill(&mut data)?;
         Ok(Self(data))

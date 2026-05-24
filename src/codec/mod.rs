@@ -1,7 +1,7 @@
 use core::fmt::Debug;
 use std::vec::Vec;
 
-use crate::errors::InvalidMessage;
+use crate::error::InvalidMessage;
 
 /// Wrapper over a slice of bytes that allows reading chunks from
 /// with the current position state held using a cursor.

@@ -1,7 +1,7 @@
 #![allow(non_camel_case_types)]
 #![allow(missing_docs)]
 use crate::codec::{Codec, Reader};
-use crate::structs::KeyExchangeAlgorithm;
+use crate::protocol::structs::KeyExchangeAlgorithm;
 
 enum_builder! {
     /// The `HashAlgorithm` TLS protocol enum.  Values in this enum are taken

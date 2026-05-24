@@ -1,21 +1,3 @@
-#[macro_use]
-mod macros;
-mod base;
-mod codec;
-mod config;
-mod enums;
-mod errors;
-mod fallback;
-mod rand;
-mod reality;
-mod structs;
-mod tls_record;
-
-/// Re-exports the contents of the [rustls-pki-types](https://docs.rs/rustls-pki-types) crate for easy access
-pub mod pki_types {
-    pub use rustls_pki_types::*;
-}
-
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,23 +5,27 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
-use crate::codec::{Codec, Reader};
-use crate::config::{
+use rust_xray::codec::{Codec, Reader};
+use rust_xray::config::{
     find_reality_inbounds, get_inbound_reality_settings, inbound_listen_addr,
     load_xray_config_from_file, reality_dest_addr, reality_private_key, reality_short_ids,
 };
-use crate::fallback::relay_fallback;
-use crate::reality::{inspect_reality_client_hello, RealityAuthResult, RealityDecision};
-use crate::structs::ClientHelloPayload;
-use crate::tls_record::{read_client_hello_record, TlsClientHelloRecord};
+use rust_xray::protocol::structs::ClientHelloPayload;
+use rust_xray::proxy::relay_fallback;
+use rust_xray::reality::{inspect_reality_client_hello, RealityAuthResult, RealityDecision};
+use rust_xray::tls::{read_client_hello_record, TlsClientHelloRecord};
 
 #[derive(Clone)]
 struct RuntimeConfig {
     dest_addr: String,
     private_key: String,
+    #[allow(dead_code)]
     server_names: Vec<String>,
+    #[allow(dead_code)]
     short_ids: Vec<Vec<u8>>,
+    #[allow(dead_code)]
     max_time_diff: u64,
+    #[allow(dead_code)]
     show: bool,
 }
 

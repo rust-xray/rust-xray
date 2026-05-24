@@ -1,5 +1,5 @@
-use crate::enums::{AlertDescription, HandshakeType};
-use crate::structs::KeyExchangeAlgorithm;
+use crate::protocol::enums::{AlertDescription, HandshakeType};
+use crate::protocol::structs::KeyExchangeAlgorithm;
 
 /// rustls reports protocol errors using this type.
 #[non_exhaustive]

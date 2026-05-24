@@ -44,10 +44,10 @@ macro_rules! enum_builder {
                 <$uint>::from(*self).encode(bytes);
             }
 
-            fn read(r: &mut Reader<'_>) -> Result<Self, crate::errors::InvalidMessage> {
+            fn read(r: &mut Reader<'_>) -> Result<Self, crate::error::InvalidMessage> {
                 match <$uint>::read(r) {
                     Ok(x) => Ok($enum_name::from(x)),
-                    Err(_) => Err(crate::errors::InvalidMessage::MissingData(stringify!($enum_name))),
+                    Err(_) => Err(crate::error::InvalidMessage::MissingData(stringify!($enum_name))),
                 }
             }
         }
