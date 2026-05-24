@@ -169,6 +169,24 @@ pub(crate) fn tls13_inner_plaintext_body(inner: &[u8]) -> Option<Vec<u8>> {
         .map(|(content, _)| content)
 }
 
+/// Returns TLS 1.3 inner plaintext body, trailing content type, and zero padding length.
+pub(crate) fn tls13_inner_plaintext_metadata(
+    inner: &[u8],
+) -> std::io::Result<(Vec<u8>, u8, usize)> {
+    let (body, content_type) = tls13_inner_plaintext_parts(inner)?;
+    let padding_len = inner.len().saturating_sub(body.len() + 1);
+    Ok((body, content_type, padding_len))
+}
+
+pub(crate) fn tls13_record_aad_bytes(legacy_version: [u8; 2], payload_len: u16) -> [u8; 5] {
+    build_record_aad(legacy_version, payload_len)
+}
+
+pub(crate) fn tls13_record_nonce_hex(iv: &[u8], sequence: u64) -> std::io::Result<String> {
+    let nonce = tls13_record_nonce(iv, sequence)?;
+    Ok(nonce.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 pub(crate) fn parse_tls13_handshake_inner_plaintext(inner: &[u8]) -> std::io::Result<Vec<u8>> {
     parse_tls13_inner_plaintext(
         inner,
@@ -1215,6 +1233,87 @@ mod tests {
             .expect("decrypt second appdata");
         assert_eq!(decrypted_second, second_plaintext);
         assert_eq!(decryptor.sequence, 1);
+    }
+
+    #[test]
+    fn tls13_inner_plaintext_application_data_without_padding() {
+        let inner = vec![0x48, 0x69, TLS_RECORD_APPLICATION_DATA];
+        let (body, content_type, padding_len) =
+            tls13_inner_plaintext_metadata(&inner).expect("valid inner plaintext");
+        assert_eq!(body, b"Hi");
+        assert_eq!(content_type, TLS_RECORD_APPLICATION_DATA);
+        assert_eq!(padding_len, 0);
+    }
+
+    #[test]
+    fn tls13_inner_plaintext_application_data_with_zero_padding() {
+        let inner = vec![0x48, 0x69, TLS_RECORD_APPLICATION_DATA, 0, 0, 0];
+        let (body, content_type, padding_len) =
+            tls13_inner_plaintext_metadata(&inner).expect("valid inner plaintext");
+        assert_eq!(body, b"Hi");
+        assert_eq!(content_type, TLS_RECORD_APPLICATION_DATA);
+        assert_eq!(padding_len, 3);
+    }
+
+    #[test]
+    fn tls13_inner_plaintext_handshake_key_update() {
+        let key_update = build_key_update_message(KEY_UPDATE_NOT_REQUESTED).expect("key update");
+        let mut inner = key_update.clone();
+        inner.push(TLS_RECORD_HANDSHAKE);
+
+        let (body, content_type, padding_len) =
+            tls13_inner_plaintext_metadata(&inner).expect("valid inner plaintext");
+        assert_eq!(body, key_update);
+        assert_eq!(content_type, TLS_RECORD_HANDSHAKE);
+        assert_eq!(padding_len, 0);
+        assert_eq!(body[0], 0x18);
+    }
+
+    #[test]
+    fn tls13_inner_plaintext_all_zeros_invalid() {
+        let err = tls13_inner_plaintext_metadata(&[0, 0, 0]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(err.to_string().contains("no content type"));
+    }
+
+    #[test]
+    fn decrypt_sequence_increments_once_on_success() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let keys = aes128_keys();
+        let mut encryptor =
+            Tls13RecordEncryptor::new(suite, keys.clone()).expect("valid encryptor");
+        let record_bytes = encryptor
+            .encrypt_application_data(b"sequence-check")
+            .expect("valid encrypted record");
+
+        let mut decryptor = Tls13RecordDecryptor::new(suite, keys).expect("valid decryptor");
+        assert_eq!(decryptor.sequence, 0);
+        let record = parse_encrypted_application_record(&record_bytes);
+        decryptor
+            .decrypt_application_data_record(&record)
+            .expect("valid decrypted application data");
+        assert_eq!(decryptor.sequence, 1);
+    }
+
+    #[test]
+    fn failed_decrypt_does_not_increment_sequence() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let mut encryptor =
+            Tls13RecordEncryptor::new(suite, aes128_keys()).expect("valid encryptor");
+        let record_bytes = encryptor
+            .encrypt_application_data(b"sequence-check")
+            .expect("valid encrypted record");
+
+        let mut wrong_keys = aes128_keys();
+        wrong_keys.key[0] ^= 0x01;
+        let mut decryptor = Tls13RecordDecryptor::new(suite, wrong_keys).expect("valid decryptor");
+        assert_eq!(decryptor.sequence, 0);
+        let record = parse_encrypted_application_record(&record_bytes);
+        let err = decryptor
+            .decrypt_application_data_record(&record)
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert_eq!(decryptor.sequence, 0);
     }
 
     #[test]

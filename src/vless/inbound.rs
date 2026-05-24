@@ -16,7 +16,10 @@ use crate::vless::relay_debug::{
     log_outbound_stream_first_write, log_outbound_to_client_first_write,
     log_vless_request_diagnostics, log_vless_response_header_prefix,
 };
-use crate::vless::vision::{is_vision_client_flow, VisionUnpadState};
+use crate::vless::vision::{
+    is_vision_client_flow, unsupported_vision_relay_error, vision_direct_copy_relay_supported,
+    VisionUnpadState,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::info;
 
@@ -332,17 +335,16 @@ where
         .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
     let destination = format_vless_destination(&inbound.request.destination);
 
+    if is_vision_client_flow(auth.flow.as_deref()) && !vision_direct_copy_relay_supported() {
+        return Err(stage_error(
+            RealityAcceptedStage::Vless,
+            unsupported_vision_relay_error(),
+        ));
+    }
+
     let raw_initial_payload = inbound.initial_payload;
-    let mut initial_payload = raw_initial_payload.clone();
-    let vision_state = if is_vision_client_flow(auth.flow.as_deref()) {
-        let mut state = VisionUnpadState::new(*inbound.request.user_id.as_bytes());
-        initial_payload = state
-            .unpad(&initial_payload)
-            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
-        Some(state)
-    } else {
-        None
-    };
+    let initial_payload = raw_initial_payload.clone();
+    let vision_state = None;
 
     log_vless_request_diagnostics(
         inbound.request.version,
@@ -881,7 +883,7 @@ mod handle_vless_tcp_inbound_tests {
     }
 
     #[test]
-    fn handle_vless_tcp_inbound_unpads_vision_initial_payload_before_outbound() {
+    fn handle_vless_tcp_inbound_rejects_vision_flow_before_relay() {
         use crate::vless::vision::wrap_vision_uplink_block;
 
         block_on(async {
@@ -889,24 +891,8 @@ mod handle_vless_tcp_inbound_tests {
             let tls_client_hello = [0x16, 0x03, 0x01, 0x00, 0x10, 0x01, 0x02];
             let vision_payload = wrap_vision_uplink_block(&user_id, &tls_client_hello);
 
-            let listener = TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("bind outbound listener");
-            let outbound_port = listener.local_addr().expect("local addr").port();
-            let (outbound_ready_tx, outbound_ready_rx) = tokio::sync::oneshot::channel();
-
-            tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.expect("accept outbound");
-                let mut buf = [0u8; 512];
-                let n = socket.read(&mut buf).await.expect("read initial payload");
-                let captured = buf[..n].to_vec();
-                outbound_ready_tx
-                    .send(captured)
-                    .expect("send outbound capture");
-            });
-
-            let (mut client_io, mut server_io) = duplex(8192);
-            let mut request = build_vless_request_bytes(&user_id, 0x01, outbound_port);
+            let (mut client_io, server_io) = duplex(8192);
+            let mut request = build_vless_request_bytes(&user_id, 0x01, 443);
             request.extend_from_slice(&vision_payload);
             client_io
                 .write_all(&request)
@@ -919,16 +905,11 @@ mod handle_vless_tcp_inbound_tests {
                 flow: Some("xtls-rprx-vision".to_string()),
             }];
 
-            let handle =
-                tokio::spawn(async move { handle_vless_tcp_inbound(server_io, &clients).await });
-
-            let _ = client_io.read(&mut [0u8; 8]).await;
-
-            let received = outbound_ready_rx.await.expect("outbound capture");
-            assert!(received.starts_with(&[0x16, 0x03, 0x01]));
-            assert_ne!(&received[..16.min(received.len())], user_id);
-
-            handle.abort();
+            let err = handle_vless_tcp_inbound(server_io, &clients)
+                .await
+                .expect_err("vision flow should be rejected before relay");
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert!(err.to_string().contains("xtls-rprx-vision not implemented"));
         });
     }
 

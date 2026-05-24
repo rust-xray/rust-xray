@@ -35,7 +35,8 @@ use super::messages::{
     parse_key_update_handshake, HANDSHAKE_TYPE_KEY_UPDATE, KEY_UPDATE_REQUESTED,
 };
 use super::record_crypto::{
-    tls13_inner_plaintext_parts, Tls13RecordDecryptor, Tls13RecordEncryptor,
+    tls13_inner_plaintext_metadata, tls13_inner_plaintext_parts, tls13_record_aad_bytes,
+    tls13_record_nonce_hex, Tls13RecordDecryptor, Tls13RecordEncryptor,
 };
 
 const TLS_RECORD_HEADER_LEN: usize = 5;
@@ -178,6 +179,102 @@ fn log_application_stream_writer_shutdown(
         pending_ciphertext_len,
         transport_shutdown_called,
         "TLS application-stream writer shutdown"
+    );
+}
+
+fn tls_inner_content_type_name(content_type: u8) -> &'static str {
+    match content_type {
+        TLS_RECORD_CHANGE_CIPHER_SPEC => "change_cipher_spec",
+        TLS_RECORD_ALERT => "alert",
+        TLS_RECORD_HANDSHAKE => "handshake",
+        TLS_RECORD_APPLICATION_DATA => "application_data",
+        other => {
+            if other == 0 {
+                "invalid_zero"
+            } else {
+                "unknown"
+            }
+        }
+    }
+}
+
+fn log_application_stream_decrypt_attempt(
+    meta: &ApplicationStreamRecordMeta,
+    cipher_suite: &str,
+    decryptor: &Tls13RecordDecryptor,
+    record: &TlsRecord,
+) {
+    let payload_len = u16::try_from(record.payload.len()).unwrap_or(u16::MAX);
+    let aad = tls13_record_aad_bytes(record.legacy_version, payload_len);
+    let aad_hex = hex_encode(&aad);
+
+    if debug_tls_record_prefix_enabled() {
+        let nonce_hex = tls13_record_nonce_hex(&decryptor.keys.iv, decryptor.sequence)
+            .unwrap_or_else(|_| "invalid".to_string());
+        info!(
+            stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
+            direction = TLS13_APPLICATION_STREAM_DIRECTION,
+            decrypt_sequence_before = meta.decrypt_sequence,
+            record_header_hex = tls_record_header_hex(&record.raw),
+            aad_hex,
+            nonce_hex,
+            legacy_version_hex = meta.legacy_version_hex(),
+            record_payload_len = meta.record_payload_len,
+            record_total_len = meta.record_total_len,
+            cipher_suite,
+            debug_tls_record_prefix_enabled = true,
+            "attempting client application-data TLS record decrypt"
+        );
+    } else {
+        info!(
+            stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
+            direction = TLS13_APPLICATION_STREAM_DIRECTION,
+            decrypt_sequence_before = meta.decrypt_sequence,
+            aad_hex,
+            legacy_version_hex = meta.legacy_version_hex(),
+            record_payload_len = meta.record_payload_len,
+            record_total_len = meta.record_total_len,
+            cipher_suite,
+            "attempting client application-data TLS record decrypt"
+        );
+    }
+}
+
+fn log_application_stream_inner_plaintext(
+    decrypt_sequence: u64,
+    read_sequence_after: u64,
+    inner_plaintext: &[u8],
+    cipher_suite: &str,
+) {
+    let (body, content_type, padding_len) = match tls13_inner_plaintext_metadata(inner_plaintext) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            warn!(
+                stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
+                direction = TLS13_APPLICATION_STREAM_DIRECTION,
+                decrypt_sequence,
+                read_sequence_after,
+                inner_plaintext_len = inner_plaintext.len(),
+                cipher_suite,
+                error = %err,
+                "failed to parse TLSInnerPlaintext after AEAD decrypt"
+            );
+            return;
+        }
+    };
+
+    info!(
+        stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
+        direction = TLS13_APPLICATION_STREAM_DIRECTION,
+        decrypt_sequence,
+        read_sequence_after,
+        inner_plaintext_len = inner_plaintext.len(),
+        inner_content_type = tls_inner_content_type_name(content_type),
+        inner_content_type_byte = content_type,
+        inner_content_len = body.len(),
+        inner_padding_len = padding_len,
+        cipher_suite,
+        "parsed TLSInnerPlaintext after AEAD decrypt"
     );
 }
 
@@ -661,10 +758,12 @@ impl Tls13ClientReadState {
             legacy_version_hex = meta.legacy_version_hex(),
             record_payload_len = meta.record_payload_len,
             record_total_len = meta.record_total_len,
-            decrypt_sequence = meta.decrypt_sequence,
+            decrypt_sequence_before = meta.decrypt_sequence,
             cipher_suite,
             "decrypting client application-data TLS record"
         );
+
+        log_application_stream_decrypt_attempt(&meta, cipher_suite, &self.read_decryptor, record);
 
         let inner_plaintext =
             self.read_decryptor
@@ -673,6 +772,14 @@ impl Tls13ClientReadState {
                     log_application_stream_record_decrypt_failure(record, &meta);
                     application_stream_decrypt_error(err, &meta, cipher_suite)
                 })?;
+
+        let read_sequence_after = self.read_decryptor.sequence;
+        log_application_stream_inner_plaintext(
+            meta.decrypt_sequence,
+            read_sequence_after,
+            &inner_plaintext,
+            cipher_suite,
+        );
 
         let result = handle_application_stream_inner_plaintext(
             &mut self.read_decryptor,
@@ -845,6 +952,8 @@ fn log_application_stream_split(read_sequence: u64, write_sequence: u64, split_c
     info!(
         stage = stages::TLS13_APPLICATION_STREAM_SPLIT,
         direction = TLS13_APPLICATION_STREAM_DIRECTION,
+        read_sequence_preserved = read_sequence,
+        write_sequence_preserved = write_sequence,
         read_sequence_current = read_sequence,
         write_sequence_current = write_sequence,
         split_count,

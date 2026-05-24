@@ -24,9 +24,11 @@ The private key is intentionally public for deterministic CI/fixture testing.
 
 | File | Purpose |
 |------|---------|
-| `rust-xray-server.fixture.json` | REALITY + VLESS inbound for `rust-xray` on `127.0.0.1:24443` |
+| `rust-xray-server.fixture.json` | REALITY + plain VLESS inbound (empty flow) on `127.0.0.1:24443` |
+| `rust-xray-server.vision.fixture.json` | Same server config with `xtls-rprx-vision` (expected to fail before relay) |
 | `xray-client.template.json` | Xray client template with `__TEST_PUBLIC_KEY__` placeholder |
-| `xray-client-smoke.fixture.json` | Pre-filled client config for the committed test key pair |
+| `xray-client-smoke.fixture.json` | Pre-filled plain VLESS client config for the committed test key pair |
+| `xray-client-smoke.vision.fixture.json` | Vision client config for testing explicit unsupported flow handling |
 | `run-smoke.sh` | Helper: checks tools, writes client config, prints 3-terminal commands |
 
 Quick start:
@@ -81,8 +83,8 @@ curl -x socks5h://127.0.0.1:10808 https://example.com/ -m 10 -v
 ## Expectations
 
 - REALITY pre-auth should accept the Xray client (`Accepted` path).
-- Full end-to-end success depends on experimental TLS 1.3 / VLESS / Vision support
-  in `rust-xray` (not Xray-core compatible today).
+- Default smoke fixtures use **plain VLESS** (`flow: ""`) over REALITY application traffic.
+- `xtls-rprx-vision` is **not implemented** on the server relay path (Vision direct-copy uplink passthrough). Use the `*.vision.fixture.json` pair only to verify the server returns an explicit `Unsupported` error instead of AEAD decrypt failure.
 - Failures after REALITY accept may still be useful smoke signal — check server logs.
 
 ## Notes

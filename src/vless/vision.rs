@@ -6,6 +6,7 @@ const COMMAND_PADDING_DIRECT: u8 = 2;
 
 /// Tracks XTLS Vision uplink unpadding state for one VLESS connection.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct VisionUnpadState {
     user_uuid: [u8; 16],
     remaining_command: i32,
@@ -15,6 +16,7 @@ pub struct VisionUnpadState {
     within_padding: bool,
 }
 
+#[allow(dead_code)]
 impl VisionUnpadState {
     pub fn new(user_uuid: [u8; 16]) -> Self {
         Self {
@@ -137,6 +139,18 @@ impl VisionUnpadState {
 
 pub fn is_vision_client_flow(flow: Option<&str>) -> bool {
     matches!(flow, Some("xtls-rprx-vision"))
+}
+
+/// Vision direct-copy uplink passthrough is not implemented on the REALITY server path.
+pub fn vision_direct_copy_relay_supported() -> bool {
+    false
+}
+
+pub fn unsupported_vision_relay_error() -> Error {
+    Error::new(
+        ErrorKind::Unsupported,
+        "xtls-rprx-vision not implemented: Vision direct-copy uplink passthrough is required after inner TLS 1.3 detection; use plain VLESS (empty flow) for REALITY smoke tests",
+    )
 }
 
 fn vision_unexpected_eof(context: &str) -> Error {
