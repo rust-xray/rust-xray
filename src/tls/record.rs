@@ -7,16 +7,47 @@ const TLS_HANDSHAKE_CLIENT_HELLO: u8 = 0x01;
 const RECORD_HEADER_LEN: usize = 5;
 const HANDSHAKE_HEADER_LEN: usize = 4;
 
+pub(crate) const ERR_FRAGMENTED_CLIENT_HELLO: &str = "fragmented ClientHello is not supported yet";
+pub(crate) const ERR_MULTIPLE_HANDSHAKE_MESSAGES: &str =
+    "multiple handshake messages in first TLS record are not supported yet";
+
+/// Parsed first TLS record containing a single ClientHello handshake message.
+///
+/// # Current limitations
+///
+/// - Accepts **exactly one** TLS record containing **exactly one** ClientHello.
+/// - A ClientHello split across multiple TLS records is rejected (`InvalidData`).
+/// - Extra handshake messages after ClientHello in the same record are rejected
+///   (`InvalidData`).
+/// - Trailing bytes after the first TLS record are rejected (`InvalidData`).
+///
+/// # Fallback relay
+///
+/// When inspection falls back, callers must relay `raw_record` (TLS record header +
+/// body) so bytes already read from the client are preserved.
+///
+/// # Future work
+///
+/// - Buffer multiple TLS records until a complete ClientHello is available.
+/// - Support fragmented ClientHello across records without changing fallback
+///   byte preservation semantics.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TlsClientHelloRecord {
+    /// Full first TLS record: 5-byte record header + record body.
     pub raw_record: Vec<u8>,
+    /// ClientHello handshake message: 4-byte handshake header + ClientHello payload.
     pub handshake_message: Vec<u8>,
+    /// ClientHello payload only (no handshake header); used for TLS struct parsing.
     pub handshake_payload: Vec<u8>,
 }
 
+/// Parses a single in-memory TLS record buffer into a ClientHello view.
+///
+/// See [`TlsClientHelloRecord`] for supported input shape and rejection rules.
 pub fn parse_client_hello_record_bytes(input: &[u8]) -> std::io::Result<TlsClientHelloRecord> {
-    // TODO: fragmented ClientHello across multiple TLS records is not supported yet.
-    // TODO: multiple handshake messages in one TLS record are not supported yet.
+    // TODO: read and buffer multiple TLS records until ClientHello is complete.
+    // TODO: support ClientHello fragmented across TLS records.
+    // TODO: support multiple handshake messages in one TLS record (unlikely for ClientHello path).
     if input.len() < RECORD_HEADER_LEN {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
@@ -105,7 +136,7 @@ fn parse_client_hello_body(header: &[u8], body: &[u8]) -> std::io::Result<TlsCli
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "fragmented ClientHello is not supported yet: need {} bytes, have {}",
+                "{ERR_FRAGMENTED_CLIENT_HELLO}: need {} bytes, have {}",
                 handshake_end,
                 body.len()
             ),
@@ -116,7 +147,7 @@ fn parse_client_hello_body(header: &[u8], body: &[u8]) -> std::io::Result<TlsCli
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "multiple handshake messages in first TLS record are not supported yet: handshake is {} bytes, record body is {} bytes",
+                "{ERR_MULTIPLE_HANDSHAKE_MESSAGES}: handshake is {} bytes, record body is {} bytes",
                 handshake_end,
                 body.len()
             ),
@@ -140,6 +171,7 @@ fn parse_client_hello_body(header: &[u8], body: &[u8]) -> std::io::Result<TlsCli
 pub async fn read_client_hello_record(
     stream: &mut TcpStream,
 ) -> std::io::Result<TlsClientHelloRecord> {
+    // TODO: loop over TLS records until a complete ClientHello is buffered.
     let mut header = [0u8; RECORD_HEADER_LEN];
     stream.read_exact(&mut header).await?;
 
@@ -244,9 +276,19 @@ mod tests {
 
         let err = parse_client_hello_record_bytes(&input).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(err
-            .to_string()
-            .contains("fragmented ClientHello is not supported yet"));
+        assert!(err.to_string().contains(ERR_FRAGMENTED_CLIENT_HELLO));
+    }
+
+    #[test]
+    fn parse_rejects_incomplete_client_hello_in_single_record_as_invalid_data() {
+        let mut input = build_client_hello_record(&[0x01, 0x02, 0x03]);
+        input[RECORD_HEADER_LEN + 1] = 0x00;
+        input[RECORD_HEADER_LEN + 2] = 0x01;
+        input[RECORD_HEADER_LEN + 3] = 0x00;
+
+        let err = parse_client_hello_record_bytes(&input).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains(ERR_FRAGMENTED_CLIENT_HELLO));
     }
 
     #[test]
@@ -264,7 +306,22 @@ mod tests {
 
         let err = parse_client_hello_record_bytes(&input).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("multiple handshake messages"));
+        assert!(err.to_string().contains(ERR_MULTIPLE_HANDSHAKE_MESSAGES));
+    }
+
+    #[test]
+    fn parse_rejects_trailing_bytes_after_complete_tls_record() {
+        let mut input = build_client_hello_record(&[0x01, 0x02]);
+        input.push(0x16);
+        input.push(0x03);
+        input.push(0x03);
+        input.push(0x00);
+        input.push(0x01);
+        input.push(0x00);
+
+        let err = parse_client_hello_record_bytes(&input).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("trailing data"));
     }
 
     #[test]
@@ -274,6 +331,14 @@ mod tests {
 
         assert_eq!(record.raw_record.len(), input.len());
         assert_eq!(record.raw_record, input);
+        assert_eq!(
+            &record.raw_record[..RECORD_HEADER_LEN],
+            &input[..RECORD_HEADER_LEN]
+        );
+        assert_eq!(
+            &record.raw_record[RECORD_HEADER_LEN..],
+            &input[RECORD_HEADER_LEN..]
+        );
     }
 
     #[test]

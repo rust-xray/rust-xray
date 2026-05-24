@@ -340,6 +340,34 @@ mod tests {
     }
 
     #[test]
+    fn reality_accepted_debug_redacts_auth_key() {
+        use crate::reality::auth::RealityAuthResult;
+
+        let accepted = RealityAccepted {
+            auth: RealityAuthResult {
+                auth_key: [0xAB; 32],
+                client_public_key: [0xCD; 32],
+            },
+            client: RealityClientAuth {
+                client_version: [1, 8, 0, 0],
+                unix_time: 1_700_000_000,
+                short_id: [0x01, 0x02, 0, 0, 0, 0, 0, 0],
+            },
+            sni: Some("example.com".to_string()),
+        };
+
+        let debug = format!("{accepted:?}");
+
+        assert!(debug.contains("auth_key"));
+        assert!(debug.contains("client_public_key"));
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("client_version"));
+        assert!(debug.contains("example.com"));
+        assert!(!debug.contains("[171, 171, 171"));
+        assert!(!debug.contains("[205, 205, 205"));
+    }
+
+    #[test]
     fn inspect_reality_client_hello_accepts_empty_configured_short_id() {
         let server_names = vec!["example.com".to_string()];
         let short_ids = vec![Vec::new()];

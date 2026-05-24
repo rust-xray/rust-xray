@@ -1,6 +1,6 @@
 mod auth;
 mod decision;
-mod handshake;
+pub mod handshake;
 mod server;
 mod session;
 mod short_id;

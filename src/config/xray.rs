@@ -28,6 +28,27 @@ pub struct InboundObject {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct VlessInboundSettings {
+    #[serde(default)]
+    pub clients: Vec<VlessClientObject>,
+
+    pub decryption: Option<String>,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VlessClientObject {
+    pub id: String,
+    pub email: Option<String>,
+    pub flow: Option<String>,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct StreamSettingsObject {
     pub network: Option<String>,
     pub security: Option<String>,
@@ -96,6 +117,8 @@ pub struct RealityInboundRuntime {
     pub min_client_ver: Option<String>,
     pub max_client_ver: Option<String>,
     pub show: bool,
+    pub vless_clients: Vec<VlessClientObject>,
+    pub vless_decryption: Option<String>,
 }
 
 pub fn load_xray_config_from_file(path: impl AsRef<Path>) -> std::io::Result<XrayConfig> {
@@ -138,6 +161,30 @@ pub fn get_inbound_reality_settings(inbound: &InboundObject) -> Option<&RealityS
         .stream_settings
         .as_ref()
         .and_then(|stream| stream.reality_settings.as_ref())
+}
+
+pub fn inbound_vless_settings(
+    inbound: &InboundObject,
+) -> std::io::Result<Option<VlessInboundSettings>> {
+    if inbound.protocol.as_deref() != Some("vless") {
+        return Ok(None);
+    }
+
+    let settings = inbound.settings.as_ref().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "vless inbound settings are required",
+        )
+    })?;
+
+    serde_json::from_value(settings.clone())
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to parse vless inbound settings: {e}"),
+            )
+        })
+        .map(Some)
 }
 
 pub fn inbound_listen_addr(inbound: &InboundObject) -> std::io::Result<String> {
@@ -216,6 +263,12 @@ pub fn first_reality_inbound_runtime(
         )
     })?;
 
+    let vless_settings = inbound_vless_settings(inbound)?;
+    let (vless_clients, vless_decryption) = match vless_settings {
+        Some(settings) => (settings.clients, settings.decryption),
+        None => (Vec::new(), None),
+    };
+
     Ok(RealityInboundRuntime {
         tag: inbound.tag.clone(),
         protocol: inbound.protocol.clone(),
@@ -228,6 +281,8 @@ pub fn first_reality_inbound_runtime(
         min_client_ver: settings.min_client_ver.clone(),
         max_client_ver: settings.max_client_ver.clone(),
         show: settings.show,
+        vless_clients,
+        vless_decryption,
     })
 }
 
@@ -343,6 +398,77 @@ mod tests {
         assert_eq!(runtime.max_time_diff, 10000);
         assert!(!runtime.show);
         assert_eq!(runtime.private_key, "test-private-key");
+        assert_eq!(runtime.vless_clients.len(), 1);
+        assert_eq!(
+            runtime.vless_clients[0].id,
+            "00000000-0000-0000-0000-000000000001"
+        );
+        assert_eq!(runtime.vless_decryption.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn inbound_vless_settings_parses_clients_and_decryption() {
+        let json = r#"{
+            "protocol": "vless",
+            "settings": {
+                "clients": [{
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "email": "user@example.com",
+                    "flow": "xtls-rprx-vision",
+                    "level": 0
+                }],
+                "decryption": "none",
+                "fallbacks": []
+            }
+        }"#;
+
+        let inbound: InboundObject = serde_json::from_str(json).unwrap();
+        let settings = inbound_vless_settings(&inbound).unwrap().unwrap();
+
+        assert_eq!(settings.clients.len(), 1);
+        assert_eq!(
+            settings.clients[0].id,
+            "00000000-0000-0000-0000-000000000001"
+        );
+        assert_eq!(
+            settings.clients[0].email.as_deref(),
+            Some("user@example.com")
+        );
+        assert_eq!(
+            settings.clients[0].flow.as_deref(),
+            Some("xtls-rprx-vision")
+        );
+        assert_eq!(settings.decryption.as_deref(), Some("none"));
+        assert!(settings.extra.contains_key("fallbacks"));
+        assert!(settings.clients[0].extra.contains_key("level"));
+    }
+
+    #[test]
+    fn inbound_vless_settings_returns_none_for_non_vless_protocol() {
+        let json = r#"{
+            "protocol": "trojan",
+            "settings": {"clients": []}
+        }"#;
+
+        let inbound: InboundObject = serde_json::from_str(json).unwrap();
+
+        assert!(inbound_vless_settings(&inbound).unwrap().is_none());
+    }
+
+    #[test]
+    fn inbound_vless_settings_requires_settings_for_vless() {
+        let inbound = InboundObject {
+            tag: None,
+            listen: None,
+            port: None,
+            protocol: Some("vless".to_string()),
+            settings: None,
+            stream_settings: None,
+            extra: BTreeMap::new(),
+        };
+
+        let err = inbound_vless_settings(&inbound).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -353,6 +479,10 @@ mod tests {
                 "listen": "127.0.0.1",
                 "port": 443,
                 "protocol": "vless",
+                "settings": {
+                    "clients": [{"id": "00000000-0000-0000-0000-000000000001"}],
+                    "decryption": "none"
+                },
                 "streamSettings": {
                     "security": "reality",
                     "realitySettings": {

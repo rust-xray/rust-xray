@@ -7,6 +7,7 @@ pub mod error;
 pub mod proxy;
 pub mod reality;
 pub mod tls;
+pub mod vless;
 
 /// Re-exports the contents of the [rustls-pki-types](https://docs.rs/rustls-pki-types) crate for easy access
 pub mod pki_types {

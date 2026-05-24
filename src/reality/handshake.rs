@@ -26,6 +26,12 @@ pub async fn fetch_dest_handshake(
 
     let mut raw_server_bytes = vec![0u8; DEST_HANDSHAKE_READ_CAP];
     let read_len = dest.read(&mut raw_server_bytes).await?;
+    if read_len == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "destination closed connection before sending handshake response",
+        ));
+    }
     raw_server_bytes.truncate(read_len);
 
     Ok(RealityDestHandshake { raw_server_bytes })

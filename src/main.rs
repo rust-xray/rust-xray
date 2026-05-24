@@ -78,6 +78,7 @@ async fn handle_client(
 
     match inspect_reality_client_hello(&ch, &record.handshake_message, inspect_cfg) {
         Ok(RealityDecision::Accepted(accepted)) => {
+            // Accepted REALITY clients must not be sent to fallback relay.
             if let Err(err) =
                 handle_accepted_reality_client(stream, record, accepted, &runtime.dest_addr).await
             {
