@@ -43,8 +43,9 @@ pub(crate) enum RealitySessionOpenResult {
 }
 
 const REALITY_SESSION_ID_OFFSET: usize = 39;
-const REALITY_SESSION_ID_LEN: usize = 32;
+pub(crate) const REALITY_SESSION_ID_LEN: usize = 32;
 const REALITY_PLAINTEXT_LEN: usize = 16;
+const REALITY_NONCE_LEN: usize = 12;
 
 pub(crate) fn open_reality_session_id(
     hello: &ClientHelloPayload,
@@ -77,7 +78,7 @@ pub(crate) fn open_reality_session_id(
             format!("REALITY AES-GCM key invalid: {e}"),
         )
     })?;
-    let nonce = Nonce::from_slice(&hello.random.0[20..32]);
+    let nonce = Nonce::from_slice(&hello.random.0[20..20 + REALITY_NONCE_LEN]);
 
     let plaintext = match cipher.decrypt(
         nonce,
@@ -189,7 +190,7 @@ pub fn validate_reality_client_auth(
         return Ok(true);
     }
 
-    let auth_unix_ms = u64::from(auth.unix_time) * 1000;
+    let auth_unix_ms = u64::from(auth.unix_time).saturating_mul(1000);
     let diff_ms = now_unix_ms.abs_diff(auth_unix_ms);
 
     if diff_ms > cfg.max_time_diff_ms {
@@ -213,37 +214,31 @@ mod tests {
 
     const TEST_AUTH_KEY: [u8; 32] = [7u8; 32];
 
-    fn build_minimal_handshake_message(random: &[u8; 32], session_id: &[u8; 32]) -> Vec<u8> {
-        let payload_len = 2 + 32 + 1 + REALITY_SESSION_ID_LEN;
-        let mut msg = Vec::with_capacity(HANDSHAKE_HEADER_LEN + payload_len);
-        msg.push(0x01);
-        msg.extend_from_slice(&(payload_len as u32).to_be_bytes()[1..]);
-        msg.extend_from_slice(&[0x03, 0x03]);
-        msg.extend_from_slice(random);
-        msg.push(REALITY_SESSION_ID_LEN as u8);
-        msg.extend_from_slice(session_id);
-        msg
-    }
-
-    const HANDSHAKE_HEADER_LEN: usize = 4;
-
-    fn seal_reality_session_id(
+    fn build_test_aead_session(
         auth_key: &[u8; 32],
-        random: &[u8; 32],
+        random: [u8; 32],
         raw_client_hello_message: &mut [u8],
-        plaintext: &[u8; REALITY_PLAINTEXT_LEN],
-    ) -> [u8; REALITY_SESSION_ID_LEN] {
-        let mut aad = raw_client_hello_message.to_vec();
-        aad[REALITY_SESSION_ID_OFFSET..REALITY_SESSION_ID_OFFSET + REALITY_SESSION_ID_LEN].fill(0);
+        client_version: [u8; 4],
+        unix_time: u32,
+        short_id: [u8; 8],
+    ) -> [u8; 32] {
+        let mut plaintext = [0u8; REALITY_PLAINTEXT_LEN];
+        plaintext[0..4].copy_from_slice(&client_version);
+        plaintext[4..8].copy_from_slice(&unix_time.to_be_bytes());
+        plaintext[8..16].copy_from_slice(&short_id);
+
+        raw_client_hello_message
+            [REALITY_SESSION_ID_OFFSET..REALITY_SESSION_ID_OFFSET + REALITY_SESSION_ID_LEN]
+            .fill(0);
 
         let cipher = Aes256Gcm::new_from_slice(auth_key).expect("valid test key");
-        let nonce = Nonce::from_slice(&random[20..32]);
+        let nonce = Nonce::from_slice(&random[20..20 + REALITY_NONCE_LEN]);
         let ciphertext = cipher
             .encrypt(
                 nonce,
                 Payload {
-                    msg: plaintext,
-                    aad: &aad,
+                    msg: &plaintext,
+                    aad: raw_client_hello_message,
                 },
             )
             .expect("encrypt test vector");
@@ -273,82 +268,88 @@ mod tests {
         }
     }
 
-    fn valid_test_vector() -> (ClientHelloPayload, Vec<u8>, RealityClientAuth) {
+    fn valid_aead_test_vector() -> (ClientHelloPayload, Vec<u8>, RealityClientAuth) {
+        let auth_key = TEST_AUTH_KEY;
         let mut random = [0u8; 32];
         random[20..32].copy_from_slice(&[0xAA; 12]);
 
-        let mut plaintext = [0u8; REALITY_PLAINTEXT_LEN];
-        plaintext[0] = 1;
-        plaintext[1] = 8;
-        plaintext[4..8].copy_from_slice(&1_700_000_000u32.to_be_bytes());
-        plaintext[8] = 0xAB;
-        plaintext[9] = 0xCD;
+        let client_version = [1, 8, 0, 0];
+        let unix_time = 1_700_000_000;
+        let short_id = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
 
-        let mut handshake_message = build_minimal_handshake_message(&random, &[0u8; 32]);
-        let ciphertext =
-            seal_reality_session_id(&TEST_AUTH_KEY, &random, &mut handshake_message, &plaintext);
+        let mut raw_client_hello_message = vec![0u8; 80];
+        raw_client_hello_message[0] = 0x01;
 
-        let session_id = session_id_from_32_bytes(ciphertext);
-        let hello = hello_with_session_id_and_random(session_id, Random(random));
-        handshake_message
+        let ciphertext = build_test_aead_session(
+            &auth_key,
+            random,
+            &mut raw_client_hello_message,
+            client_version,
+            unix_time,
+            short_id,
+        );
+        raw_client_hello_message
             [REALITY_SESSION_ID_OFFSET..REALITY_SESSION_ID_OFFSET + REALITY_SESSION_ID_LEN]
             .copy_from_slice(&ciphertext);
 
+        let session_id = session_id_from_32_bytes(ciphertext);
+        let hello = hello_with_session_id_and_random(session_id, Random(random));
+
         let expected = RealityClientAuth {
-            client_version: [1, 8, 0, 0],
-            unix_time: 1_700_000_000,
-            short_id: {
-                let mut short_id = [0u8; 8];
-                short_id[0] = 0xAB;
-                short_id[1] = 0xCD;
-                short_id
-            },
+            client_version,
+            unix_time,
+            short_id,
         };
 
-        (hello, handshake_message, expected)
+        (hello, raw_client_hello_message, expected)
     }
 
     #[test]
-    fn open_reality_session_id_decrypts_valid_vector() {
-        let (hello, handshake_message, expected) = valid_test_vector();
+    fn open_reality_session_id_opens_valid_ciphertext() {
+        let (hello, raw_client_hello_message, expected) = valid_aead_test_vector();
 
-        let result = open_reality_session_id(&hello, &handshake_message, &TEST_AUTH_KEY).unwrap();
+        let result =
+            open_reality_session_id(&hello, &raw_client_hello_message, &TEST_AUTH_KEY).unwrap();
 
         assert_eq!(result, RealitySessionOpenResult::Opened(expected));
     }
 
     #[test]
-    fn open_reality_session_id_returns_auth_failed_for_short_session_id() {
-        let hello = hello_with_session_id_and_random(SessionId::empty(), Random([0u8; 32]));
-
-        let result = open_reality_session_id(&hello, &[], &TEST_AUTH_KEY).unwrap();
-
-        assert_eq!(result, RealitySessionOpenResult::AuthFailed);
-    }
-
-    #[test]
-    fn open_reality_session_id_returns_auth_failed_for_wrong_auth_key() {
-        let (hello, handshake_message, _) = valid_test_vector();
+    fn wrong_auth_key_returns_auth_failed() {
+        let (hello, raw_client_hello_message, _) = valid_aead_test_vector();
         let wrong_key = [8u8; 32];
 
-        let result = open_reality_session_id(&hello, &handshake_message, &wrong_key).unwrap();
+        let result =
+            open_reality_session_id(&hello, &raw_client_hello_message, &wrong_key).unwrap();
 
         assert_eq!(result, RealitySessionOpenResult::AuthFailed);
     }
 
     #[test]
-    fn open_reality_session_id_returns_auth_failed_for_wrong_aad() {
-        let (hello, mut handshake_message, _) = valid_test_vector();
-        handshake_message[0] = 0x02;
+    fn wrong_aad_returns_auth_failed() {
+        let (hello, mut raw_client_hello_message, _) = valid_aead_test_vector();
+        raw_client_hello_message[10] ^= 1;
 
-        let result = open_reality_session_id(&hello, &handshake_message, &TEST_AUTH_KEY).unwrap();
+        let result =
+            open_reality_session_id(&hello, &raw_client_hello_message, &TEST_AUTH_KEY).unwrap();
 
         assert_eq!(result, RealitySessionOpenResult::AuthFailed);
     }
 
     #[test]
-    fn open_reality_session_id_returns_invalid_data_for_short_handshake_message() {
-        let (hello, _, _) = valid_test_vector();
+    fn short_session_id_returns_auth_failed() {
+        let hello = hello_with_session_id_and_random(SessionId::empty(), Random([0u8; 32]));
+        let raw_client_hello_message = vec![0u8; 80];
+
+        let result =
+            open_reality_session_id(&hello, &raw_client_hello_message, &TEST_AUTH_KEY).unwrap();
+
+        assert_eq!(result, RealitySessionOpenResult::AuthFailed);
+    }
+
+    #[test]
+    fn too_short_raw_client_hello_message_returns_invalid_data() {
+        let (hello, _, _) = valid_aead_test_vector();
 
         let err = open_reality_session_id(&hello, &[0u8; 40], &TEST_AUTH_KEY).unwrap_err();
 
@@ -380,44 +381,48 @@ mod tests {
     }
 
     #[test]
-    fn validate_reality_client_auth_short_id_match() {
+    fn short_id_matches_exact_and_prefix() {
+        let decrypted = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+
+        assert!(short_id_matches(
+            &decrypted,
+            &[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]
+        ));
+        assert!(short_id_matches(&decrypted, &[0x01, 0x23]));
+        assert!(!short_id_matches(&decrypted, &[0x01, 0x24]));
+        assert!(short_id_matches(&decrypted, &[]));
+    }
+
+    #[test]
+    fn validate_short_id_exact_eight_byte_match() {
         let server_names = vec!["example.com".to_string()];
-        let short_ids = vec![vec![0x01, 0x23], vec![0xab, 0xcd]];
+        let short_ids = vec![vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]];
         let cfg = validation_cfg(&server_names, &short_ids, 0);
         let auth = RealityClientAuth {
             client_version: [0; 4],
             unix_time: 1_700_000_000,
-            short_id: {
-                let mut short_id = [0u8; 8];
-                short_id[0] = 0xab;
-                short_id[1] = 0xcd;
-                short_id
-            },
+            short_id: [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef],
         };
 
         assert!(validate_reality_client_auth(&auth, cfg, 0).unwrap());
     }
 
     #[test]
-    fn validate_reality_client_auth_short_id_mismatch() {
+    fn validate_short_id_prefix_match() {
         let server_names = vec!["example.com".to_string()];
         let short_ids = vec![vec![0x01, 0x23]];
         let cfg = validation_cfg(&server_names, &short_ids, 0);
         let auth = RealityClientAuth {
             client_version: [0; 4],
             unix_time: 1_700_000_000,
-            short_id: {
-                let mut short_id = [0u8; 8];
-                short_id[0] = 0xff;
-                short_id
-            },
+            short_id: [0x01, 0x23, 0x45, 0x67, 0x00, 0x00, 0x00, 0x00],
         };
 
-        assert!(!validate_reality_client_auth(&auth, cfg, 0).unwrap());
+        assert!(validate_reality_client_auth(&auth, cfg, 0).unwrap());
     }
 
     #[test]
-    fn validate_reality_client_auth_empty_configured_short_id_matches_any() {
+    fn validate_empty_configured_short_id_matches_any_decrypted() {
         let server_names = vec!["example.com".to_string()];
         let short_ids = vec![Vec::new()];
         let cfg = validation_cfg(&server_names, &short_ids, 0);
@@ -431,7 +436,21 @@ mod tests {
     }
 
     #[test]
-    fn validate_reality_client_auth_empty_short_ids() {
+    fn validate_short_id_mismatch_returns_false() {
+        let server_names = vec!["example.com".to_string()];
+        let short_ids = vec![vec![0x01, 0x23]];
+        let cfg = validation_cfg(&server_names, &short_ids, 0);
+        let auth = RealityClientAuth {
+            client_version: [0; 4],
+            unix_time: 1_700_000_000,
+            short_id: [0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        };
+
+        assert!(!validate_reality_client_auth(&auth, cfg, 0).unwrap());
+    }
+
+    #[test]
+    fn validate_empty_short_ids_list_returns_false() {
         let server_names = vec!["example.com".to_string()];
         let short_ids: Vec<Vec<u8>> = vec![];
         let cfg = validation_cfg(&server_names, &short_ids, 0);
@@ -445,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_reality_client_auth_max_time_diff_disabled_when_zero() {
+    fn validate_max_time_diff_disabled_when_zero() {
         let server_names = vec!["example.com".to_string()];
         let short_ids = vec![vec![0x01]];
         let cfg = validation_cfg(&server_names, &short_ids, 0);
@@ -463,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_reality_client_auth_time_inside_window() {
+    fn validate_max_time_diff_inside_window() {
         let server_names = vec!["example.com".to_string()];
         let short_ids = vec![vec![0x01]];
         let cfg = validation_cfg(&server_names, &short_ids, 5_000);
@@ -476,13 +495,14 @@ mod tests {
                 short_id
             },
         };
-        let now_unix_ms = u64::from(auth.unix_time) * 1000 + 2_000;
+        let auth_unix_ms = u64::from(auth.unix_time).saturating_mul(1000);
+        let now_unix_ms = auth_unix_ms + 2_000;
 
         assert!(validate_reality_client_auth(&auth, cfg, now_unix_ms).unwrap());
     }
 
     #[test]
-    fn validate_reality_client_auth_time_outside_window() {
+    fn validate_max_time_diff_outside_window() {
         let server_names = vec!["example.com".to_string()];
         let short_ids = vec![vec![0x01]];
         let cfg = validation_cfg(&server_names, &short_ids, 1_000);
@@ -495,7 +515,8 @@ mod tests {
                 short_id
             },
         };
-        let now_unix_ms = u64::from(auth.unix_time) * 1000 + 2_000;
+        let auth_unix_ms = u64::from(auth.unix_time).saturating_mul(1000);
+        let now_unix_ms = auth_unix_ms + 2_000;
 
         assert!(!validate_reality_client_auth(&auth, cfg, now_unix_ms).unwrap());
     }

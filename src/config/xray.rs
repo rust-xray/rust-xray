@@ -90,8 +90,6 @@ pub struct RealityInboundRuntime {
     pub listen_addr: String,
     pub dest_addr: String,
     pub private_key: String,
-
-    // TODO: used after REALITY session_id AEAD decrypt is implemented.
     pub server_names: Vec<String>,
     pub short_ids: Vec<Vec<u8>>,
     pub max_time_diff: u64,

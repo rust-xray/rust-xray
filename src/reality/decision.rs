@@ -136,15 +136,12 @@ mod tests {
     const REALITY_PLAINTEXT_LEN: usize = 16;
     const HANDSHAKE_HEADER_LEN: usize = 4;
 
-    struct FixedRandom;
-
-    impl crate::protocol::rand::SecureRandom for FixedRandom {
-        fn fill(&self, buf: &mut [u8]) -> Result<(), crate::protocol::rand::GetRandomFailed> {
-            for (i, byte) in buf.iter_mut().enumerate() {
-                *byte = i as u8;
-            }
-            Ok(())
-        }
+    fn session_id_from_32_bytes(data: [u8; 32]) -> SessionId {
+        let mut encoded = Vec::with_capacity(33);
+        encoded.push(32);
+        encoded.extend_from_slice(&data);
+        let mut rd = Reader::init(&encoded);
+        SessionId::read(&mut rd).expect("32-byte session id")
     }
 
     fn reality_candidate_hello(random: Random) -> ClientHelloPayload {
@@ -177,14 +174,6 @@ mod tests {
         msg.push(REALITY_SESSION_ID_LEN as u8);
         msg.extend_from_slice(session_id);
         msg
-    }
-
-    fn session_id_from_32_bytes(data: [u8; 32]) -> SessionId {
-        let mut encoded = Vec::with_capacity(33);
-        encoded.push(32);
-        encoded.extend_from_slice(&data);
-        let mut rd = Reader::init(&encoded);
-        SessionId::read(&mut rd).expect("32-byte session id")
     }
 
     fn seal_reality_session_id(
@@ -282,17 +271,19 @@ mod tests {
     }
 
     #[test]
-    fn inspect_reality_client_hello_fallbacks_for_undecryptable_session_id() {
+    fn inspect_reality_client_hello_fallbacks_for_invalid_session_id() {
         let mut random = [0u8; 32];
         random[20..32].copy_from_slice(&[0xAA; 12]);
         let mut hello = reality_candidate_hello(Random(random));
-        hello.session_id = SessionId::random(&FixedRandom).unwrap();
+        hello.session_id = session_id_from_32_bytes([0xFF; 32]);
         let handshake_message = build_minimal_handshake_message(&random, &[0u8; 32]);
+        let server_names = vec!["example.com".to_string()];
+        let short_ids = vec![vec![0xAB, 0xCD]];
 
         let result = inspect_reality_client_hello(
             &hello,
             &handshake_message,
-            inspect_cfg(&[], &[vec![0xAB]], 0, None),
+            inspect_cfg(&server_names, &short_ids, 0, None),
         )
         .unwrap();
 

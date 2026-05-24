@@ -182,8 +182,22 @@ mod tests {
         let record = parse_client_hello_record_bytes(&input).expect("valid record");
 
         assert_eq!(record.raw_record, input);
-        assert_eq!(record.handshake_message.len(), 4 + 3);
+        assert_eq!(
+            record.raw_record.len(),
+            RECORD_HEADER_LEN + record.handshake_message.len()
+        );
+        assert_eq!(record.raw_record[0], TLS_CONTENT_TYPE_HANDSHAKE);
+        assert_eq!(record.handshake_message[0], TLS_HANDSHAKE_CLIENT_HELLO);
+        assert_eq!(record.handshake_message.len(), HANDSHAKE_HEADER_LEN + 3);
+        assert_eq!(
+            record.handshake_message.len(),
+            HANDSHAKE_HEADER_LEN + record.handshake_payload.len()
+        );
         assert_eq!(record.handshake_payload, vec![0xaa, 0xbb, 0xcc]);
+        assert_eq!(
+            &record.handshake_message[HANDSHAKE_HEADER_LEN..],
+            record.handshake_payload.as_slice()
+        );
     }
 
     #[test]
@@ -260,6 +274,39 @@ mod tests {
 
         assert_eq!(record.raw_record.len(), input.len());
         assert_eq!(record.raw_record, input);
+    }
+
+    #[test]
+    fn parse_returns_handshake_message_for_reality_aad() {
+        let payload = vec![0x03, 0x03, 0x00, 0x01, 0x02];
+        let input = build_client_hello_record(&payload);
+        let record = parse_client_hello_record_bytes(&input).expect("valid record");
+
+        assert_eq!(record.handshake_message[0], TLS_HANDSHAKE_CLIENT_HELLO);
+        assert_eq!(
+            record.handshake_message.len(),
+            HANDSHAKE_HEADER_LEN + record.handshake_payload.len()
+        );
+        assert_eq!(record.handshake_payload, payload);
+        assert_ne!(
+            record.handshake_payload.first(),
+            Some(&TLS_HANDSHAKE_CLIENT_HELLO)
+        );
+        assert_eq!(
+            record.raw_record.len(),
+            RECORD_HEADER_LEN + record.handshake_message.len()
+        );
+        assert_eq!(
+            &record.raw_record[..RECORD_HEADER_LEN],
+            &input[..RECORD_HEADER_LEN]
+        );
+        assert_eq!(
+            &record.raw_record[RECORD_HEADER_LEN..],
+            record.handshake_message.as_slice()
+        );
+        assert!(!record
+            .handshake_message
+            .starts_with(&[TLS_CONTENT_TYPE_HANDSHAKE]));
     }
 
     #[test]
