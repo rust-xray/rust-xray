@@ -10,30 +10,57 @@ stub для валидного REALITY-клиента.
 
 **Non-REALITY clients are relayed to `dest`.**
 
-**This is not a drop-in replacement for Xray-core.** Accepted path (ServerHello
-patching, VLESS/Vision handoff) ещё не реализован.
+**This is not a drop-in replacement for Xray-core.**
+
+**Valid REALITY clients still reach the `Unsupported` accepted path until
+ServerHello patching is implemented.** VLESS parser/auth/outbound skeleton exists
+in the library, but **is not yet reachable from a real REALITY accepted
+connection** — the accepted stream is not handed off until the REALITY server
+handshake is completed.
 
 ## Реализовано
 
-- **AEAD `session_id` decrypt** — X25519 keyshare, HKDF-SHA256 auth key,
-  AES-256-GCM open, nonce = `random[20..32]`, AAD с обнулённым `session_id`.
-- **`shortId` validation** — prefix match против `shortIds` (0..8 байт; пустой
-  configured shortId = prefix длины 0).
-- **`maxTimeDiff` validation** — `unix_time` из plaintext vs wall clock;
-  `maxTimeDiff == 0` отключает проверку.
-- **`minClientVer` / `maxClientVer` validation** — опционально, если заданы в
-  конфиге; invalid version string → `InvalidInput` (не silent fallback).
-- **`serverNames` / SNI validation** — ранняя проверка до crypto (exact match,
-  case-insensitive).
+### REALITY inbound
 
-### Инфраструктура
+- **Xray-compatible REALITY config parsing** — `RealityInboundRuntime`, typed
+  VLESS inbound settings (`VlessClientObject`), listen/dest/keys/shortIds/policy
+  fields.
+- **REALITY ClientHello auth** — X25519 keyshare extraction, HKDF-SHA256 auth
+  key derivation.
+- **AEAD `session_id` decrypt** — AES-256-GCM open, nonce = `random[20..32]`,
+  AAD с обнулённым `session_id`.
+- **Policy validation**
+  - `shortId` prefix match против `shortIds` (0..8 байт; пустой configured
+    shortId = prefix длины 0)
+  - `maxTimeDiff` — `unix_time` из plaintext vs wall clock; `0` отключает
+    проверку
+  - `minClientVer` / `maxClientVer` — опционально; invalid version string →
+    `InvalidInput` (не silent fallback)
+  - `serverNames` / SNI — ранняя проверка до crypto (exact match,
+    case-insensitive)
+- **TLS ClientHello parsing** — первый TLS record.
+- **Fallback relay** — TCP relay на `dest`/`target` для обычных и невалидных
+  клиентов.
+- **Accepted-path wiring (stub)** — `RealityAccepted`, `handle_accepted_reality_client`
+  принимает parsed VLESS clients, но возвращает `Unsupported`; ServerHello
+  patching placeholder в `handshake.rs`.
 
-- Xray-compatible config parsing (`RealityInboundRuntime`).
-- TLS ClientHello parsing (первый TLS record).
-- Fallback relay для обычных и невалидных клиентов.
-- Accepted-path scaffold: `RealityAccepted`, `fetch_dest_handshake` /
-  `patch_reality_server_hello` (placeholder).
-- Unit-тесты для config, TLS, AEAD, policy, SNI и decision flow.
+### VLESS (library skeleton, not on accepted path yet)
+
+- **VLESS config users parsing** — `VlessInboundSettings`, `VlessClientObject`,
+  `build_vless_clients()` at startup.
+- **VLESS request parser** — `parse_vless_request()`, `read_vless_request()`
+  with `initial_payload` preservation.
+- **VLESS UUID auth** — `authenticate_vless_client()`, flow metadata check
+  (`None`, `""`, `xtls-rprx-vision` allowed as metadata only).
+- **Minimal freedom TCP outbound skeleton** — `connect_tcp_destination()`,
+  `relay_tcp()`; `handle_vless_tcp_inbound()` pipeline (parse → auth → connect →
+  relay) exists but is **not called** from REALITY accepted path.
+
+### Tests
+
+Unit-тесты для config, TLS, AEAD, policy, SNI, decision flow, VLESS parser/auth,
+freedom outbound helpers, runtime config loading with VLESS clients.
 
 ## Policy validation matrix
 
@@ -56,15 +83,32 @@ patching, VLESS/Vision handoff) ещё не реализован.
 Секреты (`privateKey`, `auth_key`, shared secret, plaintext `session_id`) в логи
 не выводятся.
 
-## Осталось TODO
+## Не реализовано
 
-- **Accepted path** — connect → forward ClientHello → read dest handshake →
-  reply to client.
-- **ServerHello patching** — REALITY crypto/session modification.
-- **VLESS/Vision** — stream handoff после REALITY handshake.
+- **REALITY ServerHello patching** — `patch_reality_server_hello()` placeholder.
+- **Actual accepted stream handoff** — после REALITY handshake stream не
+  передаётся в VLESS handler.
+- **VLESS response header exact semantics** — response header клиенту не
+  отправляется; TODO в `handle_vless_tcp_inbound`.
+- **Vision flow behavior** — flow metadata принимается, но Vision не
+  реализован.
+- **UDP** — VLESS UDP command → `Unsupported`.
+- **Mux** — VLESS Mux command → `Unsupported`.
+- **Routing** — outbound selection, rules, balancers.
 - **`mldsa65`** — post-quantum REALITY extensions (`mldsa65Seed`).
 - **Fallback limits** — `limitFallbackUpload` / `limitFallbackDownload`.
 - Фрагментированный `ClientHello` across multiple TLS records.
+
+## Осталось TODO
+
+- **ServerHello patching** — REALITY crypto/session modification; prerequisite
+  for accepted path.
+- **Accepted path handoff** — connect to dest, forward ClientHello, read/patch
+  ServerHello, reply to client, then call `handle_vless_tcp_inbound`.
+- **VLESS response header** — exact client-facing semantics before/after relay.
+- **Vision** — `xtls-rprx-vision` behavior after REALITY + VLESS are connected.
+- **UDP / Mux / routing** — beyond minimal TCP freedom outbound.
+- **`mldsa65`**, **fallback limits**, fragmented ClientHello (see above).
 
 ## Требования
 
@@ -169,7 +213,8 @@ RUST_LOG=debug cargo run -- ./config.json
 3. SNI check против `serverNames` → иначе **Fallback**.
 4. X25519 + HKDF + AES-GCM open `session_id` → иначе **Fallback**.
 5. Policy validation (`shortId`, client version, time) → иначе **Fallback**.
-6. **Accepted** → `handle_accepted_reality_client` → `Unsupported` (без fallback relay).
+6. **Accepted** → `handle_accepted_reality_client` → `Unsupported` (без fallback
+   relay; VLESS clients loaded but not used until ServerHello patching).
 7. **Fallback** → TCP relay на `dest`/`target` с уже прочитанными байтами.
 
 ## Troubleshooting
@@ -189,8 +234,8 @@ RUST_LOG=debug cargo run -- ./config.json
 
 ```
 src/
-├── main.rs              # listener, client handler, fallback vs accepted routing
-├── config/              # Xray JSON config, RealityInboundRuntime
+├── main.rs              # listener, RuntimeConfig, fallback vs accepted routing
+├── config/              # Xray JSON config, RealityInboundRuntime, VLESS settings
 ├── tls/                 # TLS record read/parse
 ├── protocol/            # TLS codec, ClientHello, extensions
 ├── reality/
@@ -201,11 +246,21 @@ src/
 │   ├── version.rs       # minClientVer / maxClientVer parse & compare
 │   ├── short_id.rs
 │   ├── handshake.rs     # fetch_dest_handshake, patch placeholder
-│   └── server.rs        # accepted-path entry (stub)
+│   └── server.rs        # accepted-path entry (stub, VLESS clients wired)
+├── vless/
+│   ├── config.rs        # VlessClient, build_vless_clients
+│   ├── protocol.rs      # VlessRequest parser
+│   └── inbound.rs       # read_vless_request, auth, handle_vless_tcp_inbound
+├── outbound/
+│   └── freedom.rs       # connect_tcp_destination, relay_tcp
 └── proxy/               # fallback relay
 ```
 
 ## Ограничения
 
 - Первый TLS record должен содержать полный `ClientHello` без trailing data.
-- Валидный REALITY-клиент **не** отправляется в fallback — это намеренно.
+- Валидный REALITY-клиент **не** отправляется в fallback — это намеренно; accepted
+  path всё равно возвращает `Unsupported` до ServerHello patching.
+- VLESS parser/auth/freedom outbound протестированы unit-тестами, но **не
+  доступны** через реальное REALITY accepted-соединение.
+- Это **не** drop-in replacement для Xray-core.

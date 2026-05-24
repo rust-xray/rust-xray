@@ -2,6 +2,7 @@ use tokio::net::TcpStream;
 use tracing::{info, warn};
 
 use crate::tls::TlsClientHelloRecord;
+use crate::vless::VlessClient;
 
 use super::decision::RealityAccepted;
 use super::session::short_id_prefix_len;
@@ -22,6 +23,7 @@ pub async fn handle_accepted_reality_client(
     record: TlsClientHelloRecord,
     accepted: RealityAccepted,
     dest_addr: &str,
+    vless_clients: &[VlessClient],
 ) -> std::io::Result<()> {
     let _ = (client, record);
 
@@ -30,6 +32,7 @@ pub async fn handle_accepted_reality_client(
         client_version = ?accepted.client.client_version,
         unix_time = accepted.client.unix_time,
         short_id_len = short_id_prefix_len(&accepted.client.short_id),
+        vless_client_count = vless_clients.len(),
         %dest_addr,
         "REALITY client accepted after AEAD + policy validation"
     );
@@ -44,7 +47,9 @@ pub async fn handle_accepted_reality_client(
     // TODO: read dest ServerHello/handshake
     // TODO: patch ServerHello according to REALITY
     // TODO: send patched handshake to client
-    // TODO: hand off stream to VLESS/Vision
+    // TODO: after ServerHello patching, call handle_vless_tcp_inbound on decrypted/accepted stream.
+    // Do not call handle_vless_tcp_inbound here yet — the REALITY accepted stream is not ready
+    // until ServerHello patching is implemented.
 
     Err(accepted_path_not_implemented_error())
 }

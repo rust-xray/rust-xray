@@ -4,6 +4,7 @@ pub mod protocol;
 pub mod codec;
 pub mod config;
 pub mod error;
+pub mod outbound;
 pub mod proxy;
 pub mod reality;
 pub mod tls;

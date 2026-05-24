@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use rust_xray::codec::{Codec, Reader};
 use rust_xray::config::{
-    first_reality_inbound_runtime, load_xray_config_from_file, RealityInboundRuntime,
+    first_reality_inbound_runtime, load_xray_config_from_file, RealityInboundRuntime, XrayConfig,
 };
 use rust_xray::protocol::structs::ClientHelloPayload;
 use rust_xray::proxy::relay_fallback;
@@ -16,6 +16,12 @@ use rust_xray::reality::{
     RealityInspectConfig,
 };
 use rust_xray::tls::read_client_hello_record;
+use rust_xray::vless::{build_vless_clients, VlessClient};
+
+struct RuntimeConfig {
+    reality: RealityInboundRuntime,
+    vless_clients: Vec<VlessClient>,
+}
 
 async fn relay_fallback_with_log(
     client: TcpStream,
@@ -32,10 +38,7 @@ async fn relay_fallback_with_log(
         })
 }
 
-async fn handle_client(
-    mut stream: TcpStream,
-    runtime: Arc<RealityInboundRuntime>,
-) -> std::io::Result<()> {
+async fn handle_client(mut stream: TcpStream, config: Arc<RuntimeConfig>) -> std::io::Result<()> {
     let peer = stream.peer_addr().ok();
 
     let record = read_client_hello_record(&mut stream).await.map_err(|e| {
@@ -58,7 +61,7 @@ async fn handle_client(
             warn!(?peer, error = ?err, "ClientHello parse failed");
             return relay_fallback_with_log(
                 stream,
-                &runtime.dest_addr,
+                &config.reality.dest_addr,
                 &record.raw_record,
                 "ClientHello parse error",
             )
@@ -67,20 +70,26 @@ async fn handle_client(
     };
 
     let inspect_cfg = RealityInspectConfig {
-        private_key: &runtime.private_key,
-        server_names: &runtime.server_names,
-        short_ids: &runtime.short_ids,
-        max_time_diff_ms: runtime.max_time_diff,
-        min_client_ver: runtime.min_client_ver.as_deref(),
-        max_client_ver: runtime.max_client_ver.as_deref(),
+        private_key: &config.reality.private_key,
+        server_names: &config.reality.server_names,
+        short_ids: &config.reality.short_ids,
+        max_time_diff_ms: config.reality.max_time_diff,
+        min_client_ver: config.reality.min_client_ver.as_deref(),
+        max_client_ver: config.reality.max_client_ver.as_deref(),
         now_unix_ms: None,
     };
 
     match inspect_reality_client_hello(&ch, &record.handshake_message, inspect_cfg) {
         Ok(RealityDecision::Accepted(accepted)) => {
             // Accepted REALITY clients must not be sent to fallback relay.
-            if let Err(err) =
-                handle_accepted_reality_client(stream, record, accepted, &runtime.dest_addr).await
+            if let Err(err) = handle_accepted_reality_client(
+                stream,
+                record,
+                accepted,
+                &config.reality.dest_addr,
+                &config.vless_clients,
+            )
+            .await
             {
                 warn!(?peer, error = %err, "REALITY accepted path failed");
                 return Err(err);
@@ -91,7 +100,7 @@ async fn handle_client(
             debug!(?peer, "REALITY inspect returned fallback");
             relay_fallback_with_log(
                 stream,
-                &runtime.dest_addr,
+                &config.reality.dest_addr,
                 &record.raw_record,
                 "REALITY fallback",
             )
@@ -101,7 +110,7 @@ async fn handle_client(
             warn!(?peer, error = %err, "REALITY inspect failed");
             relay_fallback_with_log(
                 stream,
-                &runtime.dest_addr,
+                &config.reality.dest_addr,
                 &record.raw_record,
                 "REALITY inspect error",
             )
@@ -117,34 +126,45 @@ fn config_path_from_args() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./config.json"))
 }
 
-fn load_runtime_config(path: &PathBuf) -> std::io::Result<RealityInboundRuntime> {
-    let xray = load_xray_config_from_file(path)?;
-    let runtime = first_reality_inbound_runtime(&xray)?;
+fn runtime_config_from_xray(xray: &XrayConfig) -> std::io::Result<RuntimeConfig> {
+    let reality = first_reality_inbound_runtime(xray)?;
+    let vless_clients = build_vless_clients(&reality.vless_clients)?;
 
-    if runtime.protocol.as_deref() == Some("vless") {
-        info!(tag = ?runtime.tag, "using VLESS REALITY inbound");
+    Ok(RuntimeConfig {
+        reality,
+        vless_clients,
+    })
+}
+
+fn load_runtime_config(path: &PathBuf) -> std::io::Result<RuntimeConfig> {
+    let xray = load_xray_config_from_file(path)?;
+    let config = runtime_config_from_xray(&xray)?;
+
+    if config.reality.protocol.as_deref() == Some("vless") {
+        info!(tag = ?config.reality.tag, "using VLESS REALITY inbound");
     } else {
         warn!(
-            tag = ?runtime.tag,
-            protocol = ?runtime.protocol,
+            tag = ?config.reality.tag,
+            protocol = ?config.reality.protocol,
             "using REALITY inbound with non-vless protocol"
         );
     }
 
-    if runtime.show {
+    if config.reality.show {
         info!("REALITY show mode enabled in config");
     }
 
     info!(
-        listen = %runtime.listen_addr,
-        dest = %runtime.dest_addr,
-        server_names = ?runtime.server_names,
-        short_id_count = runtime.short_ids.len(),
-        max_time_diff = runtime.max_time_diff,
+        listen = %config.reality.listen_addr,
+        dest = %config.reality.dest_addr,
+        server_names = ?config.reality.server_names,
+        short_id_count = config.reality.short_ids.len(),
+        max_time_diff = config.reality.max_time_diff,
+        vless_client_count = config.vless_clients.len(),
         "loaded REALITY inbound settings"
     );
 
-    Ok(runtime)
+    Ok(config)
 }
 
 #[tokio::main]
@@ -163,9 +183,9 @@ async fn run() -> std::io::Result<()> {
     let config_path = config_path_from_args();
     info!(path = %config_path.display(), "loading Xray config");
 
-    let runtime = load_runtime_config(&config_path)?;
-    let listen_addr = runtime.listen_addr.clone();
-    let runtime = Arc::new(runtime);
+    let config = load_runtime_config(&config_path)?;
+    let listen_addr = config.reality.listen_addr.clone();
+    let config = Arc::new(config);
 
     let listener = TcpListener::bind(&listen_addr).await?;
     info!(addr = %listen_addr, "REALITY listener started");
@@ -181,11 +201,53 @@ async fn run() -> std::io::Result<()> {
 
         info!(%peer, "TCP client accepted");
 
-        let runtime = Arc::clone(&runtime);
+        let config = Arc::clone(&config);
         tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, runtime).await {
+            if let Err(err) = handle_client(stream, config).await {
                 debug!(%peer, error = %err, "connection closed with error");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VLESS_REALITY_CONFIG: &str = r#"{
+        "inbounds": [{
+            "tag": "reality-in",
+            "listen": "127.0.0.1",
+            "port": 443,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id": "00000000-0000-0000-0000-000000000001"}],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": false,
+                    "dest": "www.example.com:443",
+                    "serverNames": ["www.example.com"],
+                    "privateKey": "test-private-key",
+                    "shortIds": [""]
+                }
+            }
+        }]
+    }"#;
+
+    #[test]
+    fn runtime_config_from_xray_builds_vless_clients() {
+        let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
+        let config = runtime_config_from_xray(&xray).expect("build runtime config");
+
+        assert_eq!(config.vless_clients.len(), 1);
+        assert_eq!(
+            config.vless_clients[0].id,
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+        );
+        assert_eq!(config.reality.protocol.as_deref(), Some("vless"));
     }
 }
