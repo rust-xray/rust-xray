@@ -20,5 +20,8 @@ tracing = "0.1.41"
 tracing-subscriber = {version = "0.3.19", features = ["env-filter"]}
 x25519-dalek = {version = "2.0.1", features = ["static_secrets", "getrandom"]}
 zeroize = "1.8.1"
+rcgen = "0.13"
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
+subtle = "2"
 
 

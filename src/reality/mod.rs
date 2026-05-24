@@ -1,4 +1,5 @@
 mod auth;
+mod certificate;
 mod decision;
 pub mod handshake;
 mod server;
@@ -9,6 +10,7 @@ pub mod tls13;
 mod version;
 
 pub use auth::RealityAuthResult;
+pub use certificate::{patch_reality_certificate_der, RealityCertificatePatchInput};
 pub use decision::{
     inspect_reality_client_hello, RealityAccepted, RealityDecision, RealityInspectConfig,
 };
@@ -17,10 +19,7 @@ pub use handshake::{
     patch_reality_server_hello, prepare_reality_tls13_state, PartialTls13Handshake,
     PatchedRealityHandshake, RealityDestHandshake, RealityObservedServerHello,
 };
-pub use server::{
-    experimental_partial_tls13_send_enabled, handle_accepted_reality_client,
-    partial_tls13_accepted_path_result,
-};
+pub use server::handle_accepted_reality_client;
 pub use session::{
     short_id_prefix_len, validate_reality_client_auth, RealityClientAuth, RealityValidationConfig,
 };

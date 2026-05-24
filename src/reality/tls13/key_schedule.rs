@@ -3,6 +3,7 @@ use std::io::{Error, ErrorKind};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256, Sha384};
+use subtle::ConstantTimeEq;
 
 use super::cipher_suite::Tls13CipherSuite;
 use super::transcript::Tls13HashAlgorithm;
@@ -17,6 +18,14 @@ pub struct Tls13HandshakeSecrets {
     pub handshake_secret: Vec<u8>,
     pub client_handshake_traffic_secret: Vec<u8>,
     pub server_handshake_traffic_secret: Vec<u8>,
+}
+
+/// Derived TLS 1.3 application traffic secrets after the handshake completes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tls13ApplicationSecrets {
+    pub master_secret: Vec<u8>,
+    pub client_application_traffic_secret: Vec<u8>,
+    pub server_application_traffic_secret: Vec<u8>,
 }
 
 /// Derived TLS 1.3 traffic encryption material.
@@ -303,6 +312,59 @@ pub fn compute_finished_verify_data(
     }
 }
 
+/// Constant-time verification of TLS 1.3 Finished verify_data.
+pub fn verify_finished_data(
+    suite: Tls13CipherSuite,
+    finished_key: &[u8],
+    transcript_hash: &[u8],
+    received_verify_data: &[u8],
+) -> std::io::Result<bool> {
+    let expected = compute_finished_verify_data(suite, finished_key, transcript_hash)?;
+    if expected.len() != received_verify_data.len() {
+        return Ok(false);
+    }
+    Ok(expected.ct_eq(received_verify_data).into())
+}
+
+/// Derives the TLS 1.3 master secret from the handshake secret.
+pub fn derive_master_secret(
+    suite: Tls13CipherSuite,
+    handshake_secret: &[u8],
+) -> std::io::Result<Vec<u8>> {
+    let output_len = hash_len(suite.hash);
+    let zero_ikm = vec![0u8; output_len];
+    let derived_secret = derive_secret_for_hash(
+        suite.hash,
+        handshake_secret,
+        b"derived",
+        &empty_hash(suite.hash),
+    )?;
+    Ok(hkdf_extract_for_hash(
+        suite.hash,
+        &derived_secret,
+        &zero_ikm,
+    ))
+}
+
+/// Derives TLS 1.3 application traffic secrets after server and client Finished.
+pub fn derive_application_traffic_secrets(
+    suite: Tls13CipherSuite,
+    handshake_secret: &[u8],
+    transcript_hash: &[u8],
+) -> std::io::Result<Tls13ApplicationSecrets> {
+    let master_secret = derive_master_secret(suite, handshake_secret)?;
+    let client_application_traffic_secret =
+        derive_secret_for_hash(suite.hash, &master_secret, b"c ap traffic", transcript_hash)?;
+    let server_application_traffic_secret =
+        derive_secret_for_hash(suite.hash, &master_secret, b"s ap traffic", transcript_hash)?;
+
+    Ok(Tls13ApplicationSecrets {
+        master_secret,
+        client_application_traffic_secret,
+        server_application_traffic_secret,
+    })
+}
+
 pub fn hkdf_extract_sha384(salt: &[u8], ikm: &[u8]) -> Vec<u8> {
     let salt = if salt.is_empty() { None } else { Some(salt) };
     let (prk, _) = Hkdf::<Sha384>::extract(salt, ikm);
@@ -587,6 +649,115 @@ mod tests {
             .expect("valid finished verify_data");
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn verify_finished_data_accepts_matching_verify_data() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let finished_key = [0xDDu8; SHA256_OUTPUT_LEN];
+        let transcript_hash = [0xEEu8; SHA256_OUTPUT_LEN];
+        let verify_data =
+            compute_finished_verify_data(suite, &finished_key, &transcript_hash).expect("valid");
+
+        assert!(
+            verify_finished_data(suite, &finished_key, &transcript_hash, &verify_data)
+                .expect("valid verify")
+        );
+    }
+
+    #[test]
+    fn verify_finished_data_rejects_wrong_verify_data() {
+        let suite = tls13_cipher_suite(TLS_AES_256_GCM_SHA384).expect("known suite");
+        let finished_key = [0x11u8; SHA384_OUTPUT_LEN];
+        let transcript_hash = [0x22u8; SHA384_OUTPUT_LEN];
+        let verify_data =
+            compute_finished_verify_data(suite, &finished_key, &transcript_hash).expect("valid");
+
+        let mut wrong = verify_data.clone();
+        wrong[0] ^= 0x01;
+
+        assert!(
+            !verify_finished_data(suite, &finished_key, &transcript_hash, &wrong)
+                .expect("valid verify")
+        );
+    }
+
+    #[test]
+    fn derive_master_secret_output_length_matches_hash_len_sha256() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let handshake_secret = [0x33u8; SHA256_OUTPUT_LEN];
+
+        let master_secret = derive_master_secret(suite, &handshake_secret).expect("valid master");
+
+        assert_eq!(master_secret.len(), hash_len(suite.hash));
+    }
+
+    #[test]
+    fn derive_master_secret_output_length_matches_hash_len_sha384() {
+        let suite = tls13_cipher_suite(TLS_AES_256_GCM_SHA384).expect("known suite");
+        let handshake_secret = [0x44u8; SHA384_OUTPUT_LEN];
+
+        let master_secret = derive_master_secret(suite, &handshake_secret).expect("valid master");
+
+        assert_eq!(master_secret.len(), hash_len(suite.hash));
+    }
+
+    #[test]
+    fn derive_application_traffic_secrets_output_lengths_match_hash_len() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let handshake_secret = [0x55u8; SHA256_OUTPUT_LEN];
+        let transcript_hash = [0x66u8; SHA256_OUTPUT_LEN];
+
+        let secrets =
+            derive_application_traffic_secrets(suite, &handshake_secret, &transcript_hash)
+                .expect("valid application secrets");
+
+        assert_eq!(secrets.master_secret.len(), hash_len(suite.hash));
+        assert_eq!(
+            secrets.client_application_traffic_secret.len(),
+            hash_len(suite.hash)
+        );
+        assert_eq!(
+            secrets.server_application_traffic_secret.len(),
+            hash_len(suite.hash)
+        );
+    }
+
+    #[test]
+    fn derive_application_traffic_secrets_is_deterministic() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let handshake_secret = [0x77u8; SHA256_OUTPUT_LEN];
+        let transcript_hash = [0x88u8; SHA256_OUTPUT_LEN];
+
+        let first = derive_application_traffic_secrets(suite, &handshake_secret, &transcript_hash)
+            .expect("valid application secrets");
+        let second = derive_application_traffic_secrets(suite, &handshake_secret, &transcript_hash)
+            .expect("valid application secrets");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn derive_application_traffic_secrets_different_transcript_changes_traffic_secrets() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let handshake_secret = [0x99u8; SHA256_OUTPUT_LEN];
+        let transcript_a = [0x01u8; SHA256_OUTPUT_LEN];
+        let transcript_b = [0x02u8; SHA256_OUTPUT_LEN];
+
+        let secrets_a = derive_application_traffic_secrets(suite, &handshake_secret, &transcript_a)
+            .expect("valid application secrets");
+        let secrets_b = derive_application_traffic_secrets(suite, &handshake_secret, &transcript_b)
+            .expect("valid application secrets");
+
+        assert_eq!(secrets_a.master_secret, secrets_b.master_secret);
+        assert_ne!(
+            secrets_a.client_application_traffic_secret,
+            secrets_b.client_application_traffic_secret
+        );
+        assert_ne!(
+            secrets_a.server_application_traffic_secret,
+            secrets_b.server_application_traffic_secret
+        );
     }
 
     #[test]
