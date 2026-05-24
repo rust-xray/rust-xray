@@ -1,12 +1,12 @@
-use std::vec::Vec;
 use core::fmt;
+use std::vec::Vec;
 
 use crate::pki_types::CertificateDer;
 use zeroize::Zeroize;
 
-use crate::errors::InvalidMessage;
 use crate::codec;
 use crate::codec::{Codec, Reader};
+use crate::errors::InvalidMessage;
 
 /// An externally length'd payload
 #[derive(Clone, Eq, PartialEq)]
@@ -118,6 +118,10 @@ impl PayloadU16 {
         Self(bytes)
     }
 
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+
     pub fn empty() -> Self {
         Self::new(Vec::new())
     }
@@ -201,4 +205,20 @@ pub(super) fn hex<'a>(
         write!(f, "{:02x}", b)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::Codec;
+
+    #[test]
+    fn payload_u16_bytes_vs_get_encoding_length() {
+        let payload = PayloadU16::new(vec![0xAB; 32]);
+
+        assert_eq!(payload.bytes().len(), 32);
+        assert_eq!(payload.get_encoding().len(), 34);
+        assert_eq!(&payload.get_encoding()[..2], &32u16.to_be_bytes());
+        assert_eq!(&payload.get_encoding()[2..], payload.bytes());
+    }
 }

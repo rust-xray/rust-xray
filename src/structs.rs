@@ -1,13 +1,15 @@
-use std::collections::BTreeSet;
-use crate::codec::{Reader, Codec, LengthPrefixedBuffer, ListLength, TlsListElement};
-use crate::enums::{CertificateCompressionAlgorithm, ProtocolVersion, SignatureScheme, PSKKeyExchangeMode,
-                   CertificateStatusType, ServerNameType, NamedGroup, ECPointFormat, ExtensionType, EchClientHelloType, 
-                   HpkeKdf, HpkeAead, Compression, CipherSuite};
-use crate::pki_types::DnsName;
-use crate::base::{Payload, PayloadU8, PayloadU16};
+use crate::base::{Payload, PayloadU16, PayloadU8};
+use crate::codec::{Codec, LengthPrefixedBuffer, ListLength, Reader, TlsListElement};
+use crate::enums::{
+    CertificateCompressionAlgorithm, CertificateStatusType, CipherSuite, Compression,
+    ECPointFormat, EchClientHelloType, ExtensionType, HpkeAead, HpkeKdf, NamedGroup,
+    PSKKeyExchangeMode, ProtocolVersion, ServerNameType, SignatureScheme,
+};
 use crate::errors::InvalidMessage;
-use std::fmt;
+use crate::pki_types::DnsName;
 use crate::rand::{self, SecureRandom};
+use std::collections::BTreeSet;
+use std::fmt;
 
 // #[derive(Debug)]
 // pub(super) struct ClientHello {
@@ -29,7 +31,7 @@ use crate::rand::{self, SecureRandom};
 //             compression_method: vec![],
 //             extetensions: vec![],
 //         }
-//         
+//
 //     }
 // }
 
@@ -102,7 +104,9 @@ impl Codec<'_> for Random {
 }
 
 impl Random {
-    pub(crate) fn new(secure_random: &dyn SecureRandom) -> Result<Self, crate::rand::GetRandomFailed> {
+    pub(crate) fn new(
+        secure_random: &dyn SecureRandom,
+    ) -> Result<Self, crate::rand::GetRandomFailed> {
         let mut data = [0u8; 32];
         secure_random.fill(&mut data)?;
         Ok(Self(data))
@@ -179,6 +183,10 @@ impl SessionId {
             data: [0u8; 32],
             len: 0,
         }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data[..self.len]
     }
 }
 
@@ -300,9 +308,7 @@ impl ConvertServerNameList for [ServerName] {
             }
         }
 
-        self.iter()
-            .filter_map(only_dns_hostnames)
-            .next()
+        self.iter().filter_map(only_dns_hostnames).next()
     }
 }
 
@@ -666,8 +672,7 @@ impl Codec<'_> for ClientExtension {
             _ => Self::Unknown(UnknownExtension::read(typ, &mut sub)),
         };
 
-        sub.expect_empty("ClientExtension")
-            .map(|_| ext)
+        sub.expect_empty("ClientExtension").map(|_| ext)
     }
 }
 
@@ -702,9 +707,7 @@ fn trim_hostname_trailing_dot_for_sni(dns_name: &DnsName<'_>) -> DnsName<'static
     // ASCII encoding without a trailing dot"
     if dns_name_str.ends_with('.') {
         let trimmed = &dns_name_str[0..dns_name_str.len() - 1];
-        DnsName::try_from(trimmed)
-            .unwrap()
-            .to_owned()
+        DnsName::try_from(trimmed).unwrap().to_owned()
     } else {
         dns_name.to_owned()
     }
@@ -803,7 +806,6 @@ impl Codec<'_> for EncryptedClientHelloOuter {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HpkeSymmetricCipherSuite {
     pub kdf_id: HpkeKdf,
@@ -827,7 +829,6 @@ impl Codec<'_> for HpkeSymmetricCipherSuite {
 impl TlsListElement for HpkeSymmetricCipherSuite {
     const SIZE_LEN: ListLength = ListLength::U16;
 }
-
 
 impl TlsListElement for CipherSuite {
     const SIZE_LEN: ListLength = ListLength::U16;
@@ -925,19 +926,15 @@ impl ClientHelloPayload {
         let compressed_end_idx = compressed_start_idx.map(|start| start + to_compress.len());
         let marker_ext = ClientExtension::EncryptedClientHelloOuterExtensions(to_compress);
 
-        let exts = self
-            .extensions
-            .iter()
-            .enumerate()
-            .filter_map(|(i, ext)| {
-                if Some(i) == compressed_start_idx {
-                    Some(&marker_ext)
-                } else if Some(i) > compressed_start_idx && Some(i) < compressed_end_idx {
-                    None
-                } else {
-                    Some(ext)
-                }
-            });
+        let exts = self.extensions.iter().enumerate().filter_map(|(i, ext)| {
+            if Some(i) == compressed_start_idx {
+                Some(&marker_ext)
+            } else if Some(i) > compressed_start_idx && Some(i) < compressed_end_idx {
+                None
+            } else {
+                Some(ext)
+            }
+        });
 
         let nested = LengthPrefixedBuffer::new(ListLength::U16, bytes);
         for ext in exts {
@@ -948,17 +945,11 @@ impl ClientHelloPayload {
     /// Returns true if there is more than one extension of a given
     /// type.
     pub(crate) fn has_duplicate_extension(&self) -> bool {
-        has_duplicates::<_, _, u16>(
-            self.extensions
-                .iter()
-                .map(|ext| ext.ext_type()),
-        )
+        has_duplicates::<_, _, u16>(self.extensions.iter().map(|ext| ext.ext_type()))
     }
 
     pub(crate) fn find_extension(&self, ext: ExtensionType) -> Option<&ClientExtension> {
-        self.extensions
-            .iter()
-            .find(|x| x.ext_type() == ext)
+        self.extensions.iter().find(|x| x.ext_type() == ext)
     }
 
     pub(crate) fn sni_extension(&self) -> Option<&[ServerName]> {
@@ -1039,11 +1030,7 @@ impl ClientHelloPayload {
     pub(crate) fn has_keyshare_extension_with_duplicates(&self) -> bool {
         self.keyshare_extension()
             .map(|entries| {
-                has_duplicates::<_, _, u16>(
-                    entries
-                        .iter()
-                        .map(|kse| u16::from(kse.group)),
-                )
+                has_duplicates::<_, _, u16>(entries.iter().map(|kse| u16::from(kse.group)))
             })
             .unwrap_or_default()
     }
@@ -1084,8 +1071,7 @@ impl ClientHelloPayload {
     }
 
     pub(crate) fn early_data_extension_offered(&self) -> bool {
-        self.find_extension(ExtensionType::EarlyData)
-            .is_some()
+        self.find_extension(ExtensionType::EarlyData).is_some()
     }
 
     pub(crate) fn certificate_compression_extension(
@@ -1107,7 +1093,6 @@ impl ClientHelloPayload {
     }
 }
 
-
 /// The method of encoding to use for a handshake message.
 ///
 /// In some cases a handshake message may be encoded differently depending on the purpose
@@ -1121,5 +1106,3 @@ pub(crate) enum Encoding {
     /// Encoding for ECH inner client hello.
     EchInnerHello { to_compress: Vec<ExtensionType> },
 }
-
-

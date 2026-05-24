@@ -980,4 +980,3 @@ enum_builder! {
         ClientHelloInner => 1
     }
 }
-

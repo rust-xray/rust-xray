@@ -1,5 +1,5 @@
-use std::vec::Vec;
 use core::fmt::Debug;
+use std::vec::Vec;
 
 use crate::errors::InvalidMessage;
 

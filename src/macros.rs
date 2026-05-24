@@ -71,5 +71,3 @@ macro_rules! enum_builder {
         }
     };
 }
-
-
