@@ -232,7 +232,7 @@ mod tests {
                     "show": false,
                     "dest": "www.example.com:443",
                     "serverNames": ["www.example.com"],
-                    "privateKey": "test-private-key",
+                    "privateKey": "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4",
                     "shortIds": [""]
                 }
             }

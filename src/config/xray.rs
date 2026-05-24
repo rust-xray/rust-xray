@@ -3,6 +3,9 @@ use std::path::Path;
 
 use serde::Deserialize;
 use serde_json::Value;
+use tracing::warn;
+
+const REALITY_DEFAULT_DEST_PORT: u16 = 443;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct XrayConfig {
@@ -14,10 +17,17 @@ pub struct XrayConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum InboundPortValue {
+    Number(u16),
+    String(String),
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct InboundObject {
     pub tag: Option<String>,
     pub listen: Option<String>,
-    pub port: Option<u16>,
+    pub port: Option<InboundPortValue>,
     pub protocol: Option<String>,
     pub settings: Option<Value>,
     #[serde(rename = "streamSettings")]
@@ -118,7 +128,104 @@ pub struct RealityInboundRuntime {
     pub max_client_ver: Option<String>,
     pub show: bool,
     pub vless_clients: Vec<VlessClientObject>,
-    pub vless_decryption: Option<String>,
+    pub vless_decryption: String,
+}
+
+fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn is_vless_protocol(protocol: Option<&str>) -> bool {
+    protocol.is_some_and(|value| eq_ignore_ascii_case(value, "vless"))
+}
+
+fn is_reality_security(security: Option<&str>) -> bool {
+    security.is_some_and(|value| eq_ignore_ascii_case(value, "reality"))
+}
+
+fn is_tcp_compatible_network(network: Option<&str>) -> bool {
+    match network.map(str::trim).filter(|value| !value.is_empty()) {
+        None => true,
+        Some(value) if eq_ignore_ascii_case(value, "tcp") || eq_ignore_ascii_case(value, "raw") => {
+            true
+        }
+        _ => false,
+    }
+}
+
+pub fn parse_inbound_port(port: Option<&InboundPortValue>) -> std::io::Result<u16> {
+    let port = port.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "inbound port is required")
+    })?;
+
+    match port {
+        InboundPortValue::Number(value) => Ok(*value),
+        InboundPortValue::String(value) => {
+            if value.contains('-') {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "port ranges are not supported for REALITY inbound",
+                ));
+            }
+            value.parse::<u16>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid inbound port string: {value:?}"),
+                )
+            })
+        }
+    }
+}
+
+pub fn format_listen_host(listen: Option<&str>) -> std::io::Result<String> {
+    let listen = listen
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("0.0.0.0");
+
+    if listen == "::" {
+        return Ok("[::]".to_string());
+    }
+    if listen == "::1" || listen == "[::1]" {
+        return Ok("[::1]".to_string());
+    }
+    if listen.starts_with('[') {
+        if !listen.contains(']') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid IPv6 listen address: {listen:?}"),
+            ));
+        }
+        return Ok(listen.to_string());
+    }
+    if listen.contains(':') {
+        return Ok(format!("[{listen}]"));
+    }
+
+    Ok(listen.to_string())
+}
+
+fn warn_unimplemented_vless_fallbacks(settings: &VlessInboundSettings) {
+    match settings.extra.get("fallbacks") {
+        Some(Value::Array(items)) if !items.is_empty() => {
+            warn!(
+                fallback_count = items.len(),
+                "VLESS fallbacks are parsed but not implemented"
+            );
+        }
+        _ => {}
+    }
+}
+
+fn validate_vless_decryption(decryption: Option<&str>) -> std::io::Result<String> {
+    match decryption.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok("none".to_string()),
+        Some(value) if eq_ignore_ascii_case(value, "none") => Ok("none".to_string()),
+        Some(value) => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("unsupported VLESS inbound decryption: {value:?}; only \"none\" is supported"),
+        )),
+    }
 }
 
 pub fn load_xray_config_from_file(path: impl AsRef<Path>) -> std::io::Result<XrayConfig> {
@@ -143,17 +250,25 @@ pub fn find_reality_inbounds(config: &XrayConfig) -> Vec<&InboundObject> {
         .inbounds
         .iter()
         .filter(|inbound| {
-            inbound
-                .stream_settings
-                .as_ref()
-                .is_some_and(|stream| stream.security.as_deref() == Some("reality"))
-                && inbound
-                    .stream_settings
-                    .as_ref()
-                    .and_then(|stream| stream.reality_settings.as_ref())
-                    .is_some()
+            let Some(stream) = inbound.stream_settings.as_ref() else {
+                return false;
+            };
+
+            is_vless_protocol(inbound.protocol.as_deref())
+                && is_reality_security(stream.security.as_deref())
+                && is_tcp_compatible_network(stream.network.as_deref())
+                && stream.reality_settings.is_some()
         })
         .collect()
+}
+
+pub fn is_supported_reality_tcp_inbound(inbound: &InboundObject) -> bool {
+    inbound.stream_settings.as_ref().is_some_and(|stream| {
+        is_vless_protocol(inbound.protocol.as_deref())
+            && is_reality_security(stream.security.as_deref())
+            && is_tcp_compatible_network(stream.network.as_deref())
+            && stream.reality_settings.is_some()
+    })
 }
 
 pub fn get_inbound_reality_settings(inbound: &InboundObject) -> Option<&RealitySettingsObject> {
@@ -166,7 +281,7 @@ pub fn get_inbound_reality_settings(inbound: &InboundObject) -> Option<&RealityS
 pub fn inbound_vless_settings(
     inbound: &InboundObject,
 ) -> std::io::Result<Option<VlessInboundSettings>> {
-    if inbound.protocol.as_deref() != Some("vless") {
+    if !is_vless_protocol(inbound.protocol.as_deref()) {
         return Ok(None);
     }
 
@@ -177,28 +292,70 @@ pub fn inbound_vless_settings(
         )
     })?;
 
-    serde_json::from_value(settings.clone())
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("failed to parse vless inbound settings: {e}"),
-            )
-        })
-        .map(Some)
+    let settings: VlessInboundSettings = serde_json::from_value(settings.clone()).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to parse vless inbound settings: {e}"),
+        )
+    })?;
+
+    warn_unimplemented_vless_fallbacks(&settings);
+    validate_vless_decryption(settings.decryption.as_deref())?;
+
+    Ok(Some(settings))
 }
 
 pub fn inbound_listen_addr(inbound: &InboundObject) -> std::io::Result<String> {
-    let listen = inbound.listen.as_deref().unwrap_or("0.0.0.0");
-    let port = inbound.port.ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "inbound port is required")
-    })?;
+    let host = format_listen_host(inbound.listen.as_deref())?;
+    let port = parse_inbound_port(inbound.port.as_ref())?;
+    Ok(format!("{host}:{port}"))
+}
 
-    Ok(format!("{listen}:{port}"))
+fn normalize_dest_addr(addr: &str) -> std::io::Result<String> {
+    let addr = addr.trim();
+    if addr.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "dest/target must not be empty",
+        ));
+    }
+
+    if addr.starts_with('[') {
+        let closing = addr.find(']').ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid IPv6 dest/target address: {addr:?}"),
+            )
+        })?;
+        let host = &addr[..=closing];
+        let remainder = &addr[closing + 1..];
+        if remainder.is_empty() {
+            return Ok(format!("{host}:{REALITY_DEFAULT_DEST_PORT}"));
+        }
+        if remainder.starts_with(':')
+            && remainder[1..].parse::<u16>().is_ok()
+            && remainder[1..].parse::<u16>().unwrap() > 0
+        {
+            return Ok(addr.to_string());
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid IPv6 dest/target address: {addr:?}"),
+        ));
+    }
+
+    if let Some((host, port)) = addr.rsplit_once(':') {
+        if !host.is_empty() && port.parse::<u16>().is_ok() {
+            return Ok(addr.to_string());
+        }
+    }
+
+    Ok(format!("{addr}:{REALITY_DEFAULT_DEST_PORT}"))
 }
 
 fn parse_dest_target_value(value: &Value) -> std::io::Result<String> {
     match value {
-        Value::String(addr) => Ok(addr.clone()),
+        Value::String(addr) => normalize_dest_addr(addr),
         Value::Number(number) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
@@ -237,6 +394,26 @@ pub fn reality_private_key(settings: &RealitySettingsObject) -> std::io::Result<
     }
 }
 
+pub fn reality_server_names(settings: &RealitySettingsObject) -> std::io::Result<Vec<String>> {
+    if settings.server_names.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "realitySettings.serverNames must contain at least one server name",
+        ));
+    }
+
+    for server_name in &settings.server_names {
+        if server_name == "*" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "realitySettings.serverNames wildcard \"*\" is not supported",
+            ));
+        }
+    }
+
+    Ok(settings.server_names.clone())
+}
+
 pub fn reality_short_ids(settings: &RealitySettingsObject) -> std::io::Result<Vec<Vec<u8>>> {
     settings
         .short_ids
@@ -252,9 +429,17 @@ pub fn first_reality_inbound_runtime(
     let inbound = inbounds.first().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "no inbound with streamSettings.security == \"reality\" found",
+            "no supported VLESS TCP REALITY inbound found",
         )
     })?;
+
+    if inbounds.len() > 1 {
+        warn!(
+            inbound_count = inbounds.len(),
+            selected_tag = ?inbound.tag,
+            "multiple supported VLESS TCP REALITY inbounds found; using the first match"
+        );
+    }
 
     let settings = get_inbound_reality_settings(inbound).ok_or_else(|| {
         std::io::Error::new(
@@ -265,17 +450,29 @@ pub fn first_reality_inbound_runtime(
 
     let vless_settings = inbound_vless_settings(inbound)?;
     let (vless_clients, vless_decryption) = match vless_settings {
-        Some(settings) => (settings.clients, settings.decryption),
-        None => (Vec::new(), None),
+        Some(settings) => (
+            settings.clients,
+            settings
+                .decryption
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| "none".to_string()),
+        ),
+        None => (Vec::new(), "none".to_string()),
     };
+
+    let private_key = reality_private_key(settings)?.to_owned();
+    crate::reality::validate_reality_private_key_b64(&private_key)?;
+    crate::vless::build_vless_clients(&vless_clients).map(|_| ())?;
 
     Ok(RealityInboundRuntime {
         tag: inbound.tag.clone(),
         protocol: inbound.protocol.clone(),
         listen_addr: inbound_listen_addr(inbound)?,
         dest_addr: reality_dest_addr(settings)?,
-        private_key: reality_private_key(settings)?.to_owned(),
-        server_names: settings.server_names.clone(),
+        private_key,
+        server_names: reality_server_names(settings)?,
         short_ids: reality_short_ids(settings)?,
         max_time_diff: settings.max_time_diff,
         min_client_ver: settings.min_client_ver.clone(),
@@ -290,9 +487,10 @@ pub fn first_reality_inbound_runtime(
 mod tests {
     use super::*;
 
+    const TEST_REALITY_PRIVATE_KEY: &str = "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4";
+
     const MINIMAL_VLESS_REALITY: &str = r#"{
         "inbounds": [{
-            "tag": "reality-in",
             "listen": "0.0.0.0",
             "port": 443,
             "protocol": "vless",
@@ -331,7 +529,7 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert_eq!(
             err.to_string(),
-            "no inbound with streamSettings.security == \"reality\" found"
+            "no supported VLESS TCP REALITY inbound found"
         );
     }
 
@@ -372,7 +570,7 @@ mod tests {
                         "show": false,
                         "dest": "www.example.com:443",
                         "serverNames": ["www.example.com"],
-                        "privateKey": "test-private-key",
+                        "privateKey": "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4",
                         "maxTimeDiff": 10000,
                         "shortIds": ["", "0123456789abcdef"]
                     }
@@ -397,13 +595,13 @@ mod tests {
         );
         assert_eq!(runtime.max_time_diff, 10000);
         assert!(!runtime.show);
-        assert_eq!(runtime.private_key, "test-private-key");
+        assert_eq!(runtime.private_key, TEST_REALITY_PRIVATE_KEY);
         assert_eq!(runtime.vless_clients.len(), 1);
         assert_eq!(
             runtime.vless_clients[0].id,
             "00000000-0000-0000-0000-000000000001"
         );
-        assert_eq!(runtime.vless_decryption.as_deref(), Some("none"));
+        assert_eq!(runtime.vless_decryption, "none");
     }
 
     #[test]
@@ -489,7 +687,7 @@ mod tests {
                         "show": true,
                         "dest": "www.example.com:443",
                         "serverNames": ["Example.COM"],
-                        "privateKey": "test-private-key",
+                        "privateKey": "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4",
                         "minClientVer": "1.8.0",
                         "maxClientVer": "24.9.30",
                         "maxTimeDiff": 5000,
@@ -616,5 +814,391 @@ mod tests {
             short_ids[1],
             vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]
         );
+    }
+
+    const REALISTIC_XRAY_SERVER: &str =
+        include_str!("../../scripts/live_reality_smoke/xray-compatible-server.fixture.json");
+
+    #[test]
+    fn parses_realistic_xray_vless_tcp_reality_server_config() {
+        let config: XrayConfig =
+            serde_json::from_str(REALISTIC_XRAY_SERVER).expect("parse realistic config");
+        let runtime = first_reality_inbound_runtime(&config).expect("runtime");
+
+        assert_eq!(runtime.listen_addr, "127.0.0.1:24443");
+        assert_eq!(runtime.dest_addr, "www.microsoft.com:443");
+        assert_eq!(runtime.vless_decryption, "none");
+        assert!(config.extra.contains_key("log"));
+        assert!(config.extra.contains_key("routing"));
+        assert!(config.inbounds[0].extra.contains_key("sniffing"));
+        assert!(config.inbounds[0]
+            .stream_settings
+            .as_ref()
+            .unwrap()
+            .extra
+            .contains_key("sockopt"));
+    }
+
+    #[test]
+    fn accepts_port_as_string() {
+        let inbound: InboundObject =
+            serde_json::from_str(r#"{"listen":"127.0.0.1","port":"443","protocol":"vless"}"#)
+                .unwrap();
+        assert_eq!(inbound_listen_addr(&inbound).unwrap(), "127.0.0.1:443");
+    }
+
+    #[test]
+    fn rejects_port_ranges_with_clear_error() {
+        let inbound: InboundObject =
+            serde_json::from_str(r#"{"listen":"127.0.0.1","port":"443-444"}"#).unwrap();
+        let err = inbound_listen_addr(&inbound).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("port ranges are not supported"));
+    }
+
+    #[test]
+    fn formats_ipv6_listen_correctly() {
+        assert_eq!(format_listen_host(Some("::")).unwrap(), "[::]");
+        assert_eq!(format_listen_host(Some("::1")).unwrap(), "[::1]");
+        assert_eq!(format_listen_host(Some("[::1]")).unwrap(), "[::1]");
+        assert_eq!(
+            inbound_listen_addr(&InboundObject {
+                tag: None,
+                listen: Some("::1".to_string()),
+                port: Some(InboundPortValue::Number(24443)),
+                protocol: None,
+                settings: None,
+                stream_settings: None,
+                extra: BTreeMap::new(),
+            })
+            .unwrap(),
+            "[::1]:24443"
+        );
+    }
+
+    #[test]
+    fn accepts_security_and_protocol_case_insensitively() {
+        let json = r#"{
+            "inbounds": [{
+                "port": 443,
+                "protocol": "VLESS",
+                "settings": {"clients": [], "decryption": "none"},
+                "streamSettings": {
+                    "security": "REALITY",
+                    "realitySettings": {
+                        "dest": "example.com:443",
+                        "serverNames": ["example.com"],
+                        "privateKey": "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4",
+                        "shortIds": [""]
+                    }
+                }
+            }]
+        }"#;
+        let config: XrayConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(find_reality_inbounds(&config).len(), 1);
+    }
+
+    #[test]
+    fn accepts_network_raw_as_tcp_compatible() {
+        let json = r#"{
+            "inbounds": [{
+                "port": 443,
+                "protocol": "vless",
+                "settings": {"clients": [], "decryption": "none"},
+                "streamSettings": {
+                    "network": "raw",
+                    "security": "reality",
+                    "realitySettings": {
+                        "dest": "example.com:443",
+                        "serverNames": ["example.com"],
+                        "privateKey": "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4",
+                        "shortIds": [""]
+                    }
+                }
+            }]
+        }"#;
+        let config: XrayConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(find_reality_inbounds(&config).len(), 1);
+    }
+
+    #[test]
+    fn skips_unsupported_ws_reality_inbound_and_selects_next_tcp() {
+        let json = r#"{
+            "inbounds": [
+                {
+                    "tag": "ws-reality",
+                    "port": 8443,
+                    "protocol": "vless",
+                    "settings": {"clients": [], "decryption": "none"},
+                    "streamSettings": {
+                        "network": "ws",
+                        "security": "reality",
+                        "realitySettings": {
+                            "dest": "ws.example.com:443",
+                            "serverNames": ["ws.example.com"],
+                            "privateKey": "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4",
+                            "shortIds": [""]
+                        }
+                    }
+                },
+                {
+                    "tag": "tcp-reality",
+                    "port": 443,
+                    "protocol": "vless",
+                    "settings": {
+                        "clients": [{"id": "00000000-0000-0000-0000-000000000001"}],
+                        "decryption": "none"
+                    },
+                    "streamSettings": {
+                        "network": "tcp",
+                        "security": "reality",
+                        "realitySettings": {
+                            "dest": "tcp.example.com:443",
+                            "serverNames": ["tcp.example.com"],
+                            "privateKey": "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4",
+                            "shortIds": [""]
+                        }
+                    }
+                }
+            ]
+        }"#;
+        let config: XrayConfig = serde_json::from_str(json).unwrap();
+        let inbounds = find_reality_inbounds(&config);
+        assert_eq!(inbounds.len(), 1);
+        assert_eq!(inbounds[0].tag.as_deref(), Some("tcp-reality"));
+        let runtime = first_reality_inbound_runtime(&config).unwrap();
+        assert_eq!(runtime.dest_addr, "tcp.example.com:443");
+    }
+
+    #[test]
+    fn dest_without_port_defaults_to_443() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "dest": "example.com",
+            "serverNames": ["example.com"],
+            "privateKey": "abc",
+            "shortIds": [""]
+        }))
+        .unwrap();
+        assert_eq!(reality_dest_addr(&settings).unwrap(), "example.com:443");
+    }
+
+    #[test]
+    fn ipv6_dest_stays_bracketed() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "dest": "[2606:4700:4700::1111]:443",
+            "serverNames": ["example.com"],
+            "privateKey": "abc",
+            "shortIds": [""]
+        }))
+        .unwrap();
+        assert_eq!(
+            reality_dest_addr(&settings).unwrap(),
+            "[2606:4700:4700::1111]:443"
+        );
+    }
+
+    #[test]
+    fn rejects_wildcard_server_names() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["*"],
+            "privateKey": "abc",
+            "shortIds": [""]
+        }))
+        .unwrap();
+        let err = reality_server_names(&settings).unwrap_err();
+        assert!(err.to_string().contains("wildcard"));
+    }
+
+    #[test]
+    fn rejects_empty_server_names_with_clear_error() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": [],
+            "privateKey": "abc",
+            "shortIds": [""]
+        }))
+        .unwrap();
+        let err = reality_server_names(&settings).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("serverNames must contain at least one server name"));
+    }
+
+    #[test]
+    fn accepts_uppercase_short_ids() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": "abc",
+            "shortIds": ["0123456789ABCDEF"]
+        }))
+        .unwrap();
+        assert_eq!(
+            reality_short_ids(&settings).unwrap(),
+            vec![vec![0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]]
+        );
+    }
+
+    #[test]
+    fn rejects_odd_length_short_id() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": "abc",
+            "shortIds": ["abc"]
+        }))
+        .unwrap();
+        let err = reality_short_ids(&settings).unwrap_err();
+        assert!(err.to_string().contains("abc"));
+        assert!(err.to_string().contains("even"));
+    }
+
+    #[test]
+    fn rejects_too_long_short_id() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": "abc",
+            "shortIds": ["0123456789abcdef0"]
+        }))
+        .unwrap();
+        let err = reality_short_ids(&settings).unwrap_err();
+        assert!(err.to_string().contains("0123456789abcdef0"));
+    }
+
+    #[test]
+    fn rejects_non_hex_short_id() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": "abc",
+            "shortIds": ["012g"]
+        }))
+        .unwrap();
+        let err = reality_short_ids(&settings).unwrap_err();
+        assert!(err.to_string().contains("012g"));
+    }
+
+    #[test]
+    fn defaults_missing_vless_decryption_to_none() {
+        let inbound: InboundObject = serde_json::from_str(
+            r#"{"protocol":"vless","settings":{"clients":[{"id":"00000000-0000-0000-0000-000000000001"}]}}"#,
+        )
+        .unwrap();
+        let settings = inbound_vless_settings(&inbound).unwrap().unwrap();
+        assert!(settings.decryption.is_none());
+
+        let json = format!(
+            r#"{{
+            "inbounds": [{{
+                "port": 443,
+                "protocol": "vless",
+                "settings": {{
+                    "clients": [{{"id": "00000000-0000-0000-0000-000000000001"}}]
+                }},
+                "streamSettings": {{
+                    "security": "reality",
+                    "realitySettings": {{
+                        "dest": "example.com:443",
+                        "serverNames": ["example.com"],
+                        "privateKey": "{TEST_REALITY_PRIVATE_KEY}",
+                        "shortIds": [""]
+                    }}
+                }}
+            }}]
+        }}"#
+        );
+        let config: XrayConfig = serde_json::from_str(&json).unwrap();
+        let runtime = first_reality_inbound_runtime(&config).unwrap();
+        assert_eq!(runtime.vless_decryption, "none");
+    }
+
+    #[test]
+    fn rejects_decryption_other_than_none() {
+        let inbound: InboundObject = serde_json::from_str(
+            r#"{"protocol":"vless","settings":{"clients":[],"decryption":"auto"}}"#,
+        )
+        .unwrap();
+        let err = inbound_vless_settings(&inbound).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn validates_client_uuid_at_runtime() {
+        let json = format!(
+            r#"{{
+            "inbounds": [{{
+                "port": 443,
+                "protocol": "vless",
+                "settings": {{
+                    "clients": [{{"id": "not-a-uuid"}}],
+                    "decryption": "none"
+                }},
+                "streamSettings": {{
+                    "security": "reality",
+                    "realitySettings": {{
+                        "dest": "example.com:443",
+                        "serverNames": ["example.com"],
+                        "privateKey": "{TEST_REALITY_PRIVATE_KEY}",
+                        "shortIds": [""]
+                    }}
+                }}
+            }}]
+        }}"#
+        );
+        let config: XrayConfig = serde_json::from_str(&json).unwrap();
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert!(err.to_string().contains("invalid VLESS client id"));
+    }
+
+    #[test]
+    fn preserves_unknown_fields_in_extra_for_realistic_config() {
+        let json = r#"{
+            "log": {"loglevel": "debug"},
+            "inbounds": [{
+                "tag": "in",
+                "port": 443,
+                "protocol": "vless",
+                "settings": {
+                    "clients": [{
+                        "id": "00000000-0000-0000-0000-000000000001",
+                        "alterId": 0,
+                        "customClientField": true
+                    }],
+                    "decryption": "none",
+                    "fallbacks": [{"dest": 80}]
+                },
+                "streamSettings": {
+                    "security": "reality",
+                    "realitySettings": {
+                        "dest": "example.com:443",
+                        "serverNames": ["example.com"],
+                        "privateKey": "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4",
+                        "shortIds": [""],
+                        "customRealityField": "keep"
+                    },
+                    "customStreamField": 1
+                },
+                "customInboundField": "keep"
+            }],
+            "routing": {"rules": []},
+            "unknownTopLevel": true
+        }"#;
+        let config: XrayConfig = serde_json::from_str(json).unwrap();
+        assert!(config.extra.contains_key("log"));
+        assert!(config.extra.contains_key("routing"));
+        assert!(config.extra.contains_key("unknownTopLevel"));
+        assert!(config.inbounds[0].extra.contains_key("customInboundField"));
+        let stream = config.inbounds[0].stream_settings.as_ref().unwrap();
+        assert!(stream.extra.contains_key("customStreamField"));
+        let reality = stream.reality_settings.as_ref().unwrap();
+        assert!(reality.extra.contains_key("customRealityField"));
+        let settings = inbound_vless_settings(&config.inbounds[0])
+            .unwrap()
+            .unwrap();
+        assert!(settings.extra.contains_key("fallbacks"));
+        assert!(settings.clients[0].extra.contains_key("alterId"));
+        assert!(settings.clients[0].extra.contains_key("customClientField"));
     }
 }

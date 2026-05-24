@@ -25,6 +25,7 @@ The private key is intentionally public for deterministic CI/fixture testing.
 | File | Purpose |
 |------|---------|
 | `rust-xray-server.fixture.json` | REALITY + plain VLESS inbound (empty flow) on `127.0.0.1:24443` |
+| `xray-compatible-server.fixture.json` | Xray-style server config with log/routing/outbounds/sniffing/sockopt |
 | `rust-xray-server.vision.fixture.json` | Same server config with `xtls-rprx-vision` (expected to fail before relay) |
 | `xray-client.template.json` | Xray client template with `__TEST_PUBLIC_KEY__` placeholder |
 | `xray-client-smoke.fixture.json` | Pre-filled plain VLESS client config for the committed test key pair |

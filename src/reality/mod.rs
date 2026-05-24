@@ -11,7 +11,7 @@ pub(crate) mod stages;
 pub mod tls13;
 mod version;
 
-pub use auth::RealityAuthResult;
+pub use auth::{validate_reality_private_key_b64, RealityAuthResult};
 pub use certificate::{certificate_der_has_ed25519_signature_tail, patch_reality_certificate_der};
 pub use decision::{
     inspect_reality_client_hello, RealityAccepted, RealityDecision, RealityInspectConfig,

@@ -10,7 +10,7 @@ pub fn parse_short_id_hex(value: &str) -> std::io::Result<Vec<u8>> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "shortId hex length must be at most 16 chars, got {}",
+                "invalid shortId {value:?}: hex length must be at most 16 chars, got {}",
                 value.len()
             ),
         ));
@@ -19,14 +19,17 @@ pub fn parse_short_id_hex(value: &str) -> std::io::Result<Vec<u8>> {
     if !value.len().is_multiple_of(2) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("shortId hex length must be even, got {}", value.len()),
+            format!(
+                "invalid shortId {value:?}: hex length must be even, got {}",
+                value.len()
+            ),
         ));
     }
 
     if !value.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("shortId must be hex, got {value:?}"),
+            format!("invalid shortId {value:?}: must be hex"),
         ));
     }
 
@@ -37,7 +40,7 @@ pub fn parse_short_id_hex(value: &str) -> std::io::Result<Vec<u8>> {
         .map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("invalid shortId hex: {e}"),
+                format!("invalid shortId {value:?}: {e}"),
             )
         })
 }

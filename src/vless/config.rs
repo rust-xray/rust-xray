@@ -11,10 +11,10 @@ pub fn build_vless_clients(clients: &[VlessClientObject]) -> std::io::Result<Vec
     clients
         .iter()
         .map(|client| {
-            let id = client.id.parse::<uuid::Uuid>().map_err(|e| {
+            let id = client.id.parse::<uuid::Uuid>().map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("invalid vless client id {:?}: {e}", client.id),
+                    format!("invalid VLESS client id: {}", client.id),
                 )
             })?;
 

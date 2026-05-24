@@ -67,6 +67,10 @@ pub(crate) fn extract_x25519_keyshare(hello: &ClientHelloPayload) -> Option<[u8;
     find_x25519_public_key(keyshares)
 }
 
+pub fn validate_reality_private_key_b64(value: &str) -> std::io::Result<()> {
+    decode_reality_private_key(value).map(|_| ())
+}
+
 pub(crate) fn derive_reality_auth_key(
     hello: &ClientHelloPayload,
     server_private_key_b64: &str,
