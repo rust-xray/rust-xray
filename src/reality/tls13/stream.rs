@@ -45,6 +45,7 @@ const MAX_DEBUG_VLESS_PLAINTEXT_BYTES: usize = 64;
 const MAX_DEBUG_TLS_RECORD_PREFIX_BYTES: usize = 32;
 const TLS13_AEAD_TAG_LEN: usize = 16;
 const TLS13_APPLICATION_STREAM_DIRECTION: &str = "client_to_server";
+const TLS13_APPLICATION_STREAM_WRITE_DIRECTION: &str = "server_to_client";
 const TLS_ALERT_LEVEL_WARNING: u8 = 1;
 const TLS_ALERT_LEVEL_FATAL: u8 = 2;
 const TLS_ALERT_CLOSE_NOTIFY: u8 = 0;
@@ -94,6 +95,90 @@ fn encrypted_payload_suffix_hex(payload: &[u8]) -> String {
     }
     let suffix_len = payload.len().min(MAX_DEBUG_TLS_RECORD_PREFIX_BYTES);
     hex_encode(&payload[payload.len() - suffix_len..])
+}
+
+fn plaintext_prefix_hex(plaintext: &[u8]) -> String {
+    let preview_len = plaintext.len().min(MAX_DEBUG_TLS_RECORD_PREFIX_BYTES);
+    hex_encode(&plaintext[..preview_len])
+}
+
+fn tls_record_payload_len(record: &[u8]) -> usize {
+    record.len().checked_sub(TLS_RECORD_HEADER_LEN).unwrap_or(0)
+}
+
+fn log_application_stream_encrypt_start(
+    encrypt_sequence: u64,
+    plaintext_len: usize,
+    cipher_suite: &str,
+    plaintext: &[u8],
+) {
+    if debug_tls_record_prefix_enabled() {
+        info!(
+            stage = stages::TLS13_APPLICATION_STREAM_ENCRYPT,
+            direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
+            encrypt_sequence,
+            plaintext_len,
+            cipher_suite,
+            plaintext_prefix_hex = plaintext_prefix_hex(plaintext),
+            debug_tls_record_prefix_enabled = true,
+            "encrypt TLS application-stream record"
+        );
+    } else {
+        info!(
+            stage = stages::TLS13_APPLICATION_STREAM_ENCRYPT,
+            direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
+            encrypt_sequence,
+            plaintext_len,
+            cipher_suite,
+            "encrypt TLS application-stream record"
+        );
+    }
+}
+
+fn log_application_stream_encrypt_complete(record: &[u8]) {
+    let encrypted_record_payload_len = tls_record_payload_len(record);
+    let record_total_len = record.len();
+
+    if debug_tls_record_prefix_enabled() {
+        info!(
+            stage = stages::TLS13_APPLICATION_STREAM_ENCRYPT,
+            direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
+            encrypted_record_payload_len,
+            record_total_len,
+            record_header_hex = tls_record_header_hex(record),
+            debug_tls_record_prefix_enabled = true,
+            "encrypted TLS application-stream record"
+        );
+    } else {
+        info!(
+            stage = stages::TLS13_APPLICATION_STREAM_ENCRYPT,
+            direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
+            encrypted_record_payload_len,
+            record_total_len,
+            "encrypted TLS application-stream record"
+        );
+    }
+}
+
+fn log_application_stream_writer_flush() {
+    info!(
+        stage = stages::TLS13_APPLICATION_STREAM_FLUSH,
+        direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
+        "flush TLS application-stream writer"
+    );
+}
+
+fn log_application_stream_writer_shutdown(
+    pending_ciphertext_len: usize,
+    transport_shutdown_called: bool,
+) {
+    info!(
+        stage = stages::TLS13_APPLICATION_STREAM_SHUTDOWN,
+        direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
+        pending_ciphertext_len,
+        transport_shutdown_called,
+        "TLS application-stream writer shutdown"
+    );
 }
 
 struct ApplicationStreamRecordMeta {
@@ -678,6 +763,34 @@ impl Tls13ClientWriteState {
         Poll::Ready(Ok(plaintext_len))
     }
 
+    fn poll_flush_pending_ciphertext<S>(
+        &mut self,
+        mut inner: Pin<&mut S>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        while !self.ciphertext_write_buf.is_empty() {
+            match inner.as_mut().poll_write(cx, &self.ciphertext_write_buf) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "TLS 1.3 application stream write returned zero",
+                    )));
+                }
+                Poll::Ready(Ok(written)) => {
+                    let _ = self.ciphertext_write_buf.split_to(written);
+                }
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            }
+        }
+
+        self.pending_write_plaintext_len = None;
+        Poll::Ready(Ok(()))
+    }
+
     fn poll_write<S>(
         &mut self,
         inner: Pin<&mut S>,
@@ -712,8 +825,13 @@ impl Tls13ClientWriteState {
             return Poll::Ready(Ok(0));
         }
 
+        let encrypt_sequence = self.write_encryptor.sequence;
+        let cipher_suite = self.write_encryptor.suite.name;
+        log_application_stream_encrypt_start(encrypt_sequence, buf.len(), cipher_suite, buf);
+
         match self.write_encryptor.encrypt_application_data(buf) {
             Ok(record) => {
+                log_application_stream_encrypt_complete(&record);
                 self.ciphertext_write_buf.extend_from_slice(&record);
                 self.pending_write_plaintext_len = Some(buf.len());
                 self.poll_write_encrypted_record(inner, cx, buf.len())
@@ -824,11 +942,27 @@ where
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        log_application_stream_writer_flush();
         Pin::new(&mut self.as_mut().get_mut().inner).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.as_mut().get_mut().inner).poll_shutdown(cx)
+        let this = self.as_mut().get_mut();
+        let pending_ciphertext_len = this.write.ciphertext_write_buf.len();
+        // TODO: send encrypted TLS close_notify before transport shutdown.
+        match this
+            .write
+            .poll_flush_pending_ciphertext(Pin::new(&mut this.inner), cx)?
+        {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(()) => {}
+        }
+        match Pin::new(&mut this.inner).poll_flush(cx)? {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(()) => {}
+        }
+        log_application_stream_writer_shutdown(pending_ciphertext_len, false);
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -1035,7 +1169,10 @@ where
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.as_mut().get_mut().inner).poll_shutdown(cx)
+        let this = self.as_mut().get_mut();
+        let pending_ciphertext_len = this.write.ciphertext_write_buf.len();
+        log_application_stream_writer_shutdown(pending_ciphertext_len, true);
+        Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }
 
@@ -1100,6 +1237,8 @@ where
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
@@ -2008,12 +2147,12 @@ mod tests {
             let mut buf = [0u8; 32];
             let read = stream.read(&mut buf).await.expect("read after key update");
             assert_eq!(&buf[..read], b"after-key-update");
-            assert_eq!(stream.client_decrypt_sequence(), 2);
+            assert_eq!(stream.client_decrypt_sequence(), 1);
         });
     }
 
     #[test]
-    fn key_update_preserves_record_sequence_without_reset() {
+    fn key_update_resets_record_sequence_after_traffic_key_change() {
         block_on(async {
             let (mut client_io, server_io) = duplex(4096);
             let (mut client_encryptor, server_decryptor) =
@@ -2036,7 +2175,7 @@ mod tests {
             let encrypted1 = client_encryptor
                 .encrypt_application_data(b"after-key-update")
                 .expect("encrypted record 1");
-            assert_eq!(client_encryptor.sequence, 3);
+            assert_eq!(client_encryptor.sequence, 1);
 
             client_io.write_all(&encrypted0).await.expect("write 0");
             client_io
@@ -2055,7 +2194,7 @@ mod tests {
 
             let read = stream.read(&mut buf).await.expect("read second");
             assert_eq!(&buf[..read], b"after-key-update");
-            assert_eq!(stream.client_decrypt_sequence(), 3);
+            assert_eq!(stream.client_decrypt_sequence(), 1);
         });
     }
 
@@ -2088,5 +2227,111 @@ mod tests {
         let err = parse_application_stream_tls_alert(&[TLS_ALERT_LEVEL_FATAL], 3).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         assert!(err.to_string().contains("too short"));
+    }
+
+    struct ShutdownTrackingWriter {
+        written: Vec<u8>,
+        shutdown_calls: u32,
+        block_next_write: bool,
+    }
+
+    impl ShutdownTrackingWriter {
+        fn new() -> Self {
+            Self {
+                written: Vec::new(),
+                shutdown_calls: 0,
+                block_next_write: false,
+            }
+        }
+
+        fn block_next_write(mut self) -> Self {
+            self.block_next_write = true;
+            self
+        }
+    }
+
+    impl AsyncWrite for ShutdownTrackingWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.block_next_write {
+                self.block_next_write = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            self.written.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.shutdown_calls += 1;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn noop_waker() -> Waker {
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(
+            |_| RawWaker::new(std::ptr::null(), &VTABLE),
+            |_| {},
+            |_| {},
+            |_| {},
+        );
+        unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+    }
+
+    fn client_writer_for_test(
+        inner: ShutdownTrackingWriter,
+    ) -> RealityTls13ClientWriter<ShutdownTrackingWriter> {
+        let (write_encryptor, _) = server_to_client_keys();
+        RealityTls13ClientWriter {
+            inner,
+            write: Tls13ClientWriteState::new(write_encryptor, Arc::new(AtomicBool::new(false))),
+        }
+    }
+
+    #[test]
+    fn client_writer_poll_shutdown_flushes_pending_encrypted_bytes() {
+        let inner = ShutdownTrackingWriter::new().block_next_write();
+        let mut writer = client_writer_for_test(inner);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        match Pin::new(&mut writer).poll_write(&mut cx, b"pending-shutdown-flush") {
+            Poll::Pending => {}
+            Poll::Ready(result) => panic!("expected pending write, got {result:?}"),
+        }
+        assert!(!writer.write.ciphertext_write_buf.is_empty());
+
+        match Pin::new(&mut writer).poll_shutdown(&mut cx) {
+            Poll::Ready(Ok(())) => {}
+            other => panic!("expected shutdown ready Ok(()), got {other:?}"),
+        }
+
+        assert!(writer.write.ciphertext_write_buf.is_empty());
+        assert!(!writer.inner.written.is_empty());
+        assert_eq!(writer.inner.written[0], TLS_RECORD_APPLICATION_DATA);
+        assert_eq!(writer.inner.shutdown_calls, 0);
+    }
+
+    #[test]
+    fn client_writer_poll_shutdown_does_not_shutdown_underlying_transport() {
+        let inner = ShutdownTrackingWriter::new();
+        let mut writer = client_writer_for_test(inner);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        match Pin::new(&mut writer).poll_shutdown(&mut cx) {
+            Poll::Ready(Ok(())) => {}
+            other => panic!("expected shutdown ready Ok(()), got {other:?}"),
+        }
+
+        assert_eq!(writer.inner.shutdown_calls, 0);
     }
 }

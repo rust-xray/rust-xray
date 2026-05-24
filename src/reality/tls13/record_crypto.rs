@@ -344,6 +344,7 @@ impl Tls13RecordEncryptor {
                 format!("TLS 1.3 sending traffic key derivation failed: {err}"),
             )
         })?;
+        self.sequence = 0;
         Ok(())
     }
 
@@ -579,6 +580,7 @@ impl Tls13RecordDecryptor {
                 format!("TLS 1.3 receiving traffic key derivation failed: {err}"),
             )
         })?;
+        self.sequence = 0;
         Ok(())
     }
 
@@ -678,6 +680,8 @@ fn application_record_decrypt_error(
 mod tests {
     use super::*;
     use crate::reality::tls13::{
+        key_schedule::derive_traffic_key,
+        messages::{parse_key_update_handshake, KEY_UPDATE_NOT_REQUESTED},
         tls13_cipher_suite, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
         TLS_CHACHA20_POLY1305_SHA256,
     };
@@ -699,6 +703,36 @@ mod tests {
             key: (0x20..0x40).collect(),
             iv: (0x01..0x0d).collect(),
         }
+    }
+
+    fn sample_traffic_secret(seed: u8) -> Vec<u8> {
+        vec![seed; 32]
+    }
+
+    fn encryptor_with_traffic_secret(seed: u8) -> Tls13RecordEncryptor {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let traffic_secret = sample_traffic_secret(seed);
+        let keys = derive_traffic_key(suite, &traffic_secret).expect("traffic keys");
+        Tls13RecordEncryptor::with_traffic_secret(suite, keys, traffic_secret).expect("encryptor")
+    }
+
+    fn decryptor_with_traffic_secret(seed: u8) -> Tls13RecordDecryptor {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let traffic_secret = sample_traffic_secret(seed);
+        let keys = derive_traffic_key(suite, &traffic_secret).expect("traffic keys");
+        Tls13RecordDecryptor::with_traffic_secret(suite, keys, traffic_secret).expect("decryptor")
+    }
+
+    fn client_app_traffic_pair(seed: u8) -> (Tls13RecordEncryptor, Tls13RecordDecryptor) {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let traffic_secret = sample_traffic_secret(seed);
+        let keys = derive_traffic_key(suite, &traffic_secret).expect("traffic keys");
+        let encryptor =
+            Tls13RecordEncryptor::with_traffic_secret(suite, keys.clone(), traffic_secret.clone())
+                .expect("encryptor");
+        let decryptor = Tls13RecordDecryptor::with_traffic_secret(suite, keys, traffic_secret)
+            .expect("decryptor");
+        (encryptor, decryptor)
     }
 
     #[test]
@@ -1097,5 +1131,130 @@ mod tests {
         let err = Tls13RecordDecryptor::new(suite, keys).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert!(err.to_string().contains("ChaCha20"));
+    }
+
+    #[test]
+    fn receiving_key_update_resets_sequence() {
+        let mut decryptor = decryptor_with_traffic_secret(0xAA);
+        let old_keys = decryptor.keys.clone();
+        decryptor.sequence = 4;
+
+        decryptor
+            .apply_receiving_traffic_key_update()
+            .expect("receiving key update");
+
+        assert_eq!(decryptor.sequence, 0);
+        assert_ne!(decryptor.keys.key, old_keys.key);
+        assert_ne!(decryptor.keys.iv, old_keys.iv);
+    }
+
+    #[test]
+    fn sending_key_update_resets_sequence() {
+        let mut encryptor = encryptor_with_traffic_secret(0xBB);
+        let old_keys = encryptor.keys.clone();
+        encryptor.sequence = 7;
+
+        encryptor
+            .apply_sending_traffic_key_update()
+            .expect("sending key update");
+
+        assert_eq!(encryptor.sequence, 0);
+        assert_ne!(encryptor.keys.key, old_keys.key);
+        assert_ne!(encryptor.keys.iv, old_keys.iv);
+    }
+
+    #[test]
+    fn key_update_roundtrip_resets_sequence_for_next_appdata() {
+        let (mut encryptor, mut decryptor) = client_app_traffic_pair(0xCC);
+        let first_plaintext = b"before key update";
+        let second_plaintext = b"after key update";
+
+        let first_record = encryptor
+            .encrypt_application_data(first_plaintext)
+            .expect("first appdata");
+        assert_eq!(encryptor.sequence, 1);
+
+        let key_update_record = encryptor
+            .encrypt_key_update(KEY_UPDATE_NOT_REQUESTED)
+            .expect("key update");
+        assert_eq!(encryptor.sequence, 2);
+        encryptor
+            .apply_sending_traffic_key_update()
+            .expect("sending key update");
+        assert_eq!(encryptor.sequence, 0);
+
+        let second_record = encryptor
+            .encrypt_application_data(second_plaintext)
+            .expect("second appdata");
+        assert_eq!(encryptor.sequence, 1);
+
+        let first_parsed = parse_encrypted_application_record(&first_record);
+        let decrypted_first = decryptor
+            .decrypt_application_data_record(&first_parsed)
+            .expect("decrypt first appdata");
+        assert_eq!(decrypted_first, first_plaintext);
+        assert_eq!(decryptor.sequence, 1);
+
+        let key_update_parsed = parse_encrypted_application_record(&key_update_record);
+        let key_update_message = decryptor
+            .decrypt_handshake_record(&key_update_parsed)
+            .expect("decrypt key update");
+        assert_eq!(
+            parse_key_update_handshake(&key_update_message).expect("parse key update"),
+            KEY_UPDATE_NOT_REQUESTED
+        );
+        assert_eq!(decryptor.sequence, 2);
+        decryptor
+            .apply_receiving_traffic_key_update()
+            .expect("receiving key update");
+        assert_eq!(decryptor.sequence, 0);
+
+        let second_parsed = parse_encrypted_application_record(&second_record);
+        let decrypted_second = decryptor
+            .decrypt_application_data_record(&second_parsed)
+            .expect("decrypt second appdata");
+        assert_eq!(decrypted_second, second_plaintext);
+        assert_eq!(decryptor.sequence, 1);
+    }
+
+    #[test]
+    fn encrypt_server_key_update_response_uses_old_key_then_resets_sequence() {
+        let (mut server_encryptor, mut client_decryptor) = client_app_traffic_pair(0xDD);
+        let old_keys = server_encryptor.keys.clone();
+        server_encryptor.sequence = 3;
+
+        let key_update_response = server_encryptor
+            .encrypt_server_key_update_response()
+            .expect("server key update response");
+        assert_eq!(server_encryptor.sequence, 0);
+        assert_ne!(server_encryptor.keys.key, old_keys.key);
+        assert_ne!(server_encryptor.keys.iv, old_keys.iv);
+
+        let follow_up = server_encryptor
+            .encrypt_application_data(b"server appdata after key update")
+            .expect("server appdata after key update");
+        assert_eq!(server_encryptor.sequence, 1);
+
+        client_decryptor.sequence = 3;
+        let key_update_parsed = parse_encrypted_application_record(&key_update_response);
+        let key_update_message = client_decryptor
+            .decrypt_handshake_record(&key_update_parsed)
+            .expect("decrypt server key update");
+        assert_eq!(
+            parse_key_update_handshake(&key_update_message).expect("parse key update"),
+            KEY_UPDATE_NOT_REQUESTED
+        );
+        assert_eq!(client_decryptor.sequence, 4);
+        client_decryptor
+            .apply_receiving_traffic_key_update()
+            .expect("receiving key update");
+        assert_eq!(client_decryptor.sequence, 0);
+
+        let follow_up_parsed = parse_encrypted_application_record(&follow_up);
+        let decrypted = client_decryptor
+            .decrypt_application_data_record(&follow_up_parsed)
+            .expect("decrypt server appdata after key update");
+        assert_eq!(decrypted, b"server appdata after key update");
+        assert_eq!(client_decryptor.sequence, 1);
     }
 }
