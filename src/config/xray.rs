@@ -95,6 +95,8 @@ pub struct RealityInboundRuntime {
     pub server_names: Vec<String>,
     pub short_ids: Vec<Vec<u8>>,
     pub max_time_diff: u64,
+    pub min_client_ver: Option<String>,
+    pub max_client_ver: Option<String>,
     pub show: bool,
 }
 
@@ -225,6 +227,8 @@ pub fn first_reality_inbound_runtime(
         server_names: settings.server_names.clone(),
         short_ids: reality_short_ids(settings)?,
         max_time_diff: settings.max_time_diff,
+        min_client_ver: settings.min_client_ver.clone(),
+        max_client_ver: settings.max_client_ver.clone(),
         show: settings.show,
     })
 }

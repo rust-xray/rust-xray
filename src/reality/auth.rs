@@ -9,7 +9,7 @@ use crate::protocol::enums::{NamedGroup, ProtocolVersion};
 use crate::protocol::structs::{ClientHelloPayload, KeyShareEntry};
 
 pub struct RealityAuthResult {
-    pub(crate) auth_key: [u8; 42],
+    pub(crate) auth_key: [u8; 32],
     #[allow(dead_code)] // populated for future REALITY handshake path
     pub(crate) client_public_key: [u8; 32],
 }
@@ -91,7 +91,7 @@ pub(crate) fn derive_reality_auth_key(
     let shared_secret = server_secret.diffie_hellman(&client_public);
 
     let hk = Hkdf::<Sha256>::new(Some(&hello.random.0[..20]), shared_secret.as_bytes());
-    let mut auth_key = [0u8; 42];
+    let mut auth_key = [0u8; 32];
     hk.expand(b"REALITY", &mut auth_key).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn reality_auth_result_debug_redacts_sensitive_fields() {
         let auth = RealityAuthResult {
-            auth_key: [7u8; 42],
+            auth_key: [7u8; 32],
             client_public_key: [9u8; 32],
         };
 

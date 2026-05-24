@@ -10,6 +10,7 @@ const HANDSHAKE_HEADER_LEN: usize = 4;
 #[derive(Debug, PartialEq, Eq)]
 pub struct TlsClientHelloRecord {
     pub raw_record: Vec<u8>,
+    pub handshake_message: Vec<u8>,
     pub handshake_payload: Vec<u8>,
 }
 
@@ -126,10 +127,12 @@ fn parse_client_hello_body(header: &[u8], body: &[u8]) -> std::io::Result<TlsCli
     raw_record.extend_from_slice(header);
     raw_record.extend_from_slice(body);
 
+    let handshake_message = body[..handshake_end].to_vec();
     let handshake_payload = body[HANDSHAKE_HEADER_LEN..handshake_end].to_vec();
 
     Ok(TlsClientHelloRecord {
         raw_record,
+        handshake_message,
         handshake_payload,
     })
 }
@@ -179,6 +182,7 @@ mod tests {
         let record = parse_client_hello_record_bytes(&input).expect("valid record");
 
         assert_eq!(record.raw_record, input);
+        assert_eq!(record.handshake_message.len(), 4 + 3);
         assert_eq!(record.handshake_payload, vec![0xaa, 0xbb, 0xcc]);
     }
 
@@ -265,6 +269,14 @@ mod tests {
         let record = parse_client_hello_record_bytes(&input).expect("valid record");
 
         assert_eq!(record.handshake_payload, payload);
+        assert_eq!(
+            record.handshake_message.len(),
+            HANDSHAKE_HEADER_LEN + payload.len()
+        );
+        assert_eq!(
+            &record.handshake_message[HANDSHAKE_HEADER_LEN..],
+            payload.as_slice()
+        );
         assert!(!record.handshake_payload.is_empty());
         assert_ne!(record.handshake_payload[0], TLS_HANDSHAKE_CLIENT_HELLO);
     }

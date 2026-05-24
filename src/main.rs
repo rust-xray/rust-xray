@@ -11,18 +11,11 @@ use rust_xray::config::{
 };
 use rust_xray::protocol::structs::ClientHelloPayload;
 use rust_xray::proxy::relay_fallback;
-use rust_xray::reality::{inspect_reality_client_hello, RealityAuthResult, RealityDecision};
-use rust_xray::tls::{read_client_hello_record, TlsClientHelloRecord};
-
-async fn handle_valid_reality_client(
-    _client: TcpStream,
-    _record: TlsClientHelloRecord,
-    _auth: RealityAuthResult,
-) -> std::io::Result<()> {
-    info!("valid REALITY candidate accepted");
-    // Stub: ServerHello patching and full REALITY handshake are not implemented yet.
-    Ok(())
-}
+use rust_xray::reality::{
+    handle_accepted_reality_client, inspect_reality_client_hello, RealityDecision,
+    RealityInspectConfig,
+};
+use rust_xray::tls::read_client_hello_record;
 
 async fn relay_fallback_with_log(
     client: TcpStream,
@@ -73,9 +66,25 @@ async fn handle_client(
         }
     };
 
-    match inspect_reality_client_hello(&ch, &record.handshake_payload, &runtime.private_key) {
-        Ok(RealityDecision::Accepted(auth)) => {
-            handle_valid_reality_client(stream, record, auth).await
+    let inspect_cfg = RealityInspectConfig {
+        private_key: &runtime.private_key,
+        server_names: &runtime.server_names,
+        short_ids: &runtime.short_ids,
+        max_time_diff_ms: runtime.max_time_diff,
+        min_client_ver: runtime.min_client_ver.as_deref(),
+        max_client_ver: runtime.max_client_ver.as_deref(),
+        now_unix_ms: None,
+    };
+
+    match inspect_reality_client_hello(&ch, &record.handshake_message, inspect_cfg) {
+        Ok(RealityDecision::Accepted(accepted)) => {
+            if let Err(err) =
+                handle_accepted_reality_client(stream, record, accepted, &runtime.dest_addr).await
+            {
+                warn!(?peer, error = %err, "REALITY accepted path failed");
+                return Err(err);
+            }
+            Ok(())
         }
         Ok(RealityDecision::Fallback) => {
             debug!(?peer, "REALITY inspect returned fallback");
