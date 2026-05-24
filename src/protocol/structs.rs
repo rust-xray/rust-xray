@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::codec::{Codec, LengthPrefixedBuffer, ListLength, Reader, TlsListElement};
 use crate::error::InvalidMessage;
 use crate::pki_types::DnsName;

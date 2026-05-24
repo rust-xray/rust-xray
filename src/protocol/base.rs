@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use core::fmt;
 use std::vec::Vec;
 

@@ -2,7 +2,7 @@ use std::fmt;
 use std::io::{Error, ErrorKind};
 
 use ed25519_dalek::pkcs8::DecodePrivateKey;
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use rcgen::{CertificateParams, DnType, KeyPair, PKCS_ED25519};
 
 use super::messages::{
@@ -197,6 +197,7 @@ pub fn build_tls13_certificate_verify_ed25519(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Verifier, VerifyingKey};
 
     #[test]
     fn generate_reality_ephemeral_ed25519_certificate_returns_non_empty_der() {

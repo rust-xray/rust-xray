@@ -106,7 +106,6 @@ pub async fn handle_accepted_reality_client(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::reality::tls13::RealityTls13ApplicationStream;
     use tokio::io::{AsyncRead, AsyncWrite};
 

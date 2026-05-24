@@ -1,5 +1,7 @@
 //! The single place where we generate random material for our own use.
 
+#![allow(dead_code)]
+
 use std::vec;
 use std::vec::Vec;
 

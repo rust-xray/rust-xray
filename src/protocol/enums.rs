@@ -1,5 +1,6 @@
 #![allow(non_camel_case_types)]
 #![allow(missing_docs)]
+#![allow(dead_code)]
 use crate::codec::{Codec, Reader};
 use crate::protocol::structs::KeyExchangeAlgorithm;
 
