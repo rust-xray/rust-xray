@@ -197,6 +197,10 @@ make capture-clienthello  # TCP captor → /tmp/client_hello.bin
 Fixture capture details: **[tests/fixtures/reality/README.md](tests/fixtures/reality/README.md)**.
 Semi-automated setup (requires exported keys): `bash scripts/create_reality_fixture.sh`.
 
+Manual REALITY accepted-path smoke test (local Xray client + `rust-xray` server):
+**[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/README.md)** —
+test-only keys, not for production.
+
 Release-сборка:
 
 ```bash
@@ -209,7 +213,7 @@ cargo build --release
 аргументом:
 
 ```bash
-cargo run -- ./config.json
+cargo run --bin rust-xray -- ./config.json
 ```
 
 Минимальный пример:
@@ -257,7 +261,7 @@ cargo run -- ./config.json
 ## Запуск
 
 ```bash
-RUST_LOG=info cargo run -- ./config.json
+RUST_LOG=info cargo run --bin rust-xray -- ./config.json
 ```
 
 ### Decision flow

@@ -11,7 +11,8 @@ use crate::tls::records::{
 };
 
 use super::cipher_suite::{Tls13AeadAlgorithm, Tls13CipherSuite};
-use super::key_schedule::Tls13TrafficKeys;
+use super::key_schedule::{derive_traffic_key, update_traffic_secret, Tls13TrafficKeys};
+use super::messages::{build_key_update_message, KEY_UPDATE_NOT_REQUESTED};
 
 const TLS13_IV_LEN: usize = 12;
 const GCM_TAG_LEN: usize = 16;
@@ -22,6 +23,7 @@ pub struct Tls13RecordEncryptor {
     pub suite: Tls13CipherSuite,
     pub keys: Tls13TrafficKeys,
     pub sequence: u64,
+    traffic_secret: Option<Vec<u8>>,
 }
 
 /// TLS 1.3 AEAD record decryptor for application data records.
@@ -30,6 +32,7 @@ pub struct Tls13RecordDecryptor {
     pub suite: Tls13CipherSuite,
     pub keys: Tls13TrafficKeys,
     pub sequence: u64,
+    traffic_secret: Option<Vec<u8>>,
 }
 
 /// TLS 1.3 per-record nonce: `static_iv XOR padded_sequence_number`.
@@ -113,6 +116,24 @@ fn parse_tls13_inner_plaintext(
     expected_content_type: u8,
     wrong_content_type_error: &str,
 ) -> std::io::Result<Vec<u8>> {
+    let (content, content_type) = tls13_inner_plaintext_parts(inner)?;
+
+    match content_type {
+        content_type if content_type == expected_content_type => Ok(content),
+        TLS_RECORD_HANDSHAKE | TLS_RECORD_APPLICATION_DATA
+            if content_type != expected_content_type =>
+        {
+            Err(Error::new(ErrorKind::Unsupported, wrong_content_type_error))
+        }
+        other => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("TLS 1.3 unexpected inner content type: {other}"),
+        )),
+    }
+}
+
+/// Returns TLS 1.3 inner plaintext body and trailing content-type byte.
+pub(crate) fn tls13_inner_plaintext_parts(inner: &[u8]) -> std::io::Result<(Vec<u8>, u8)> {
     if inner.is_empty() {
         return Err(Error::new(
             ErrorKind::InvalidData,
@@ -133,35 +154,34 @@ fn parse_tls13_inner_plaintext(
     }
 
     let content_type = inner[end - 1];
-    let content = &inner[..end - 1];
-
-    match content_type {
-        content_type if content_type == expected_content_type => Ok(content.to_vec()),
-        TLS_RECORD_HANDSHAKE | TLS_RECORD_APPLICATION_DATA
-            if content_type != expected_content_type =>
-        {
-            Err(Error::new(ErrorKind::Unsupported, wrong_content_type_error))
-        }
-        other => Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("TLS 1.3 unexpected inner content type: {other}"),
-        )),
-    }
+    Ok((inner[..end - 1].to_vec(), content_type))
 }
 
-fn parse_tls13_application_inner_plaintext(inner: &[u8]) -> std::io::Result<Vec<u8>> {
-    parse_tls13_inner_plaintext(
-        inner,
-        TLS_RECORD_APPLICATION_DATA,
-        "TLS 1.3 application data decrypt does not accept handshake inner content type",
-    )
+pub(crate) fn tls13_inner_plaintext_content_type(inner: &[u8]) -> Option<u8> {
+    tls13_inner_plaintext_parts(inner)
+        .ok()
+        .map(|(_, content_type)| content_type)
 }
 
-fn parse_tls13_handshake_inner_plaintext(inner: &[u8]) -> std::io::Result<Vec<u8>> {
+pub(crate) fn tls13_inner_plaintext_body(inner: &[u8]) -> Option<Vec<u8>> {
+    tls13_inner_plaintext_parts(inner)
+        .ok()
+        .map(|(content, _)| content)
+}
+
+pub(crate) fn parse_tls13_handshake_inner_plaintext(inner: &[u8]) -> std::io::Result<Vec<u8>> {
     parse_tls13_inner_plaintext(
         inner,
         TLS_RECORD_HANDSHAKE,
         "TLS 1.3 handshake decrypt does not accept application data inner content type",
+    )
+}
+
+pub(crate) fn parse_tls13_application_inner_plaintext(inner: &[u8]) -> std::io::Result<Vec<u8>> {
+    parse_tls13_inner_plaintext(
+        inner,
+        TLS_RECORD_APPLICATION_DATA,
+        "TLS 1.3 application data decrypt does not accept handshake inner content type",
     )
 }
 
@@ -285,7 +305,64 @@ impl Tls13RecordEncryptor {
             suite,
             keys,
             sequence: 0,
+            traffic_secret: None,
         })
+    }
+
+    pub fn with_traffic_secret(
+        suite: Tls13CipherSuite,
+        keys: Tls13TrafficKeys,
+        traffic_secret: Vec<u8>,
+    ) -> std::io::Result<Self> {
+        validate_traffic_keys(suite, &keys)?;
+
+        Ok(Self {
+            suite,
+            keys,
+            sequence: 0,
+            traffic_secret: Some(traffic_secret),
+        })
+    }
+
+    /// Updates the sending application traffic secret and derived key/iv after KeyUpdate send.
+    pub fn apply_sending_traffic_key_update(&mut self) -> std::io::Result<()> {
+        let traffic_secret = self.traffic_secret.as_mut().ok_or_else(|| {
+            Error::new(
+                ErrorKind::Unsupported,
+                "TLS 1.3 sending traffic key update requires application traffic secret",
+            )
+        })?;
+        *traffic_secret = update_traffic_secret(self.suite, traffic_secret).map_err(|err| {
+            Error::new(
+                err.kind(),
+                format!("TLS 1.3 sending traffic key update failed: {err}"),
+            )
+        })?;
+        self.keys = derive_traffic_key(self.suite, traffic_secret).map_err(|err| {
+            Error::new(
+                err.kind(),
+                format!("TLS 1.3 sending traffic key derivation failed: {err}"),
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Encrypts a TLS 1.3 KeyUpdate post-handshake message into an ApplicationData record.
+    pub fn encrypt_key_update(&mut self, request_update: u8) -> std::io::Result<Vec<u8>> {
+        let message = build_key_update_message(request_update).map_err(|err| {
+            Error::new(
+                err.kind(),
+                format!("TLS 1.3 KeyUpdate message build failed: {err}"),
+            )
+        })?;
+        self.encrypt_handshake_message(&message)
+    }
+
+    /// Sends KeyUpdate with `update_not_requested` and updates sending traffic keys.
+    pub fn encrypt_server_key_update_response(&mut self) -> std::io::Result<Vec<u8>> {
+        let record = self.encrypt_key_update(KEY_UPDATE_NOT_REQUESTED)?;
+        self.apply_sending_traffic_key_update()?;
+        Ok(record)
     }
 
     /// Encrypts a handshake message into a TLS ApplicationData record.
@@ -396,6 +473,63 @@ impl Tls13RecordEncryptor {
 
         Ok(record)
     }
+
+    #[cfg(test)]
+    pub(crate) fn encrypt_application_record_with_inner_content_type(
+        &mut self,
+        body: &[u8],
+        inner_content_type: u8,
+    ) -> std::io::Result<Vec<u8>> {
+        let nonce_bytes = tls13_record_nonce(&self.keys.iv, self.sequence)?;
+
+        let mut inner_plaintext = Vec::with_capacity(body.len() + 1);
+        inner_plaintext.extend_from_slice(body);
+        inner_plaintext.push(inner_content_type);
+
+        let ciphertext_len = u16::try_from(inner_plaintext.len() + GCM_TAG_LEN).map_err(|_| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "TLS 1.3 encrypted application data record exceeds u16 payload limit",
+            )
+        })?;
+        let aad = build_record_aad(TLS_LEGACY_VERSION_1_2, ciphertext_len);
+
+        let ciphertext = match self.suite.aead {
+            Tls13AeadAlgorithm::Aes128Gcm => {
+                encrypt_aes128_gcm(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
+            }
+            Tls13AeadAlgorithm::Aes256Gcm => {
+                encrypt_aes256_gcm(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
+            }
+            Tls13AeadAlgorithm::ChaCha20Poly1305 => {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "TLS 1.3 ChaCha20-Poly1305 record encryption is not implemented yet",
+                ));
+            }
+        };
+
+        if ciphertext.len() != ciphertext_len as usize {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "TLS 1.3 encrypted payload length mismatch: expected {}, got {}",
+                    ciphertext_len,
+                    ciphertext.len()
+                ),
+            ));
+        }
+
+        let record = build_tls_record(
+            TLS_RECORD_APPLICATION_DATA,
+            TLS_LEGACY_VERSION_1_2,
+            &ciphertext,
+        )?;
+
+        self.sequence = increment_sequence(self.sequence)?;
+
+        Ok(record)
+    }
 }
 
 impl Tls13RecordDecryptor {
@@ -406,7 +540,46 @@ impl Tls13RecordDecryptor {
             suite,
             keys,
             sequence: 0,
+            traffic_secret: None,
         })
+    }
+
+    pub fn with_traffic_secret(
+        suite: Tls13CipherSuite,
+        keys: Tls13TrafficKeys,
+        traffic_secret: Vec<u8>,
+    ) -> std::io::Result<Self> {
+        validate_traffic_keys(suite, &keys)?;
+
+        Ok(Self {
+            suite,
+            keys,
+            sequence: 0,
+            traffic_secret: Some(traffic_secret),
+        })
+    }
+
+    /// Updates the receiving application traffic secret and derived key/iv after KeyUpdate receive.
+    pub fn apply_receiving_traffic_key_update(&mut self) -> std::io::Result<()> {
+        let traffic_secret = self.traffic_secret.as_mut().ok_or_else(|| {
+            Error::new(
+                ErrorKind::Unsupported,
+                "TLS 1.3 receiving traffic key update requires application traffic secret",
+            )
+        })?;
+        *traffic_secret = update_traffic_secret(self.suite, traffic_secret).map_err(|err| {
+            Error::new(
+                err.kind(),
+                format!("TLS 1.3 receiving traffic key update failed: {err}"),
+            )
+        })?;
+        self.keys = derive_traffic_key(self.suite, traffic_secret).map_err(|err| {
+            Error::new(
+                err.kind(),
+                format!("TLS 1.3 receiving traffic key derivation failed: {err}"),
+            )
+        })?;
+        Ok(())
     }
 
     pub fn decrypt_application_data_record(
@@ -425,7 +598,7 @@ impl Tls13RecordDecryptor {
         parse_tls13_handshake_inner_plaintext(&inner_plaintext)
     }
 
-    fn decrypt_record_payload(
+    pub(crate) fn decrypt_record_payload(
         &mut self,
         record: &crate::tls::TlsRecord,
     ) -> std::io::Result<Vec<u8>> {
@@ -443,27 +616,62 @@ impl Tls13RecordDecryptor {
             )
         })?;
         let aad = build_record_aad(record.legacy_version, payload_len);
+        let decrypt_sequence = self.sequence;
+        let encrypted_record_len = record.raw.len();
+        let cipher_suite = self.suite.name;
         let nonce_bytes = tls13_record_nonce(&self.keys.iv, self.sequence)?;
 
-        let inner_plaintext = match self.suite.aead {
-            Tls13AeadAlgorithm::Aes128Gcm => {
-                decrypt_aes128_gcm(&self.keys.key, &nonce_bytes, &record.payload, &aad)?
-            }
-            Tls13AeadAlgorithm::Aes256Gcm => {
-                decrypt_aes256_gcm(&self.keys.key, &nonce_bytes, &record.payload, &aad)?
-            }
-            Tls13AeadAlgorithm::ChaCha20Poly1305 => {
-                return Err(Error::new(
-                    ErrorKind::Unsupported,
-                    "TLS 1.3 ChaCha20-Poly1305 record decryption is not implemented yet",
-                ));
-            }
-        };
+        let inner_plaintext =
+            match self.suite.aead {
+                Tls13AeadAlgorithm::Aes128Gcm => {
+                    decrypt_aes128_gcm(&self.keys.key, &nonce_bytes, &record.payload, &aad)
+                        .map_err(|err| {
+                            application_record_decrypt_error(
+                                err,
+                                cipher_suite,
+                                decrypt_sequence,
+                                encrypted_record_len,
+                            )
+                        })?
+                }
+                Tls13AeadAlgorithm::Aes256Gcm => {
+                    decrypt_aes256_gcm(&self.keys.key, &nonce_bytes, &record.payload, &aad)
+                        .map_err(|err| {
+                            application_record_decrypt_error(
+                                err,
+                                cipher_suite,
+                                decrypt_sequence,
+                                encrypted_record_len,
+                            )
+                        })?
+                }
+                Tls13AeadAlgorithm::ChaCha20Poly1305 => {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        "TLS 1.3 ChaCha20-Poly1305 record decryption is not implemented yet",
+                    ));
+                }
+            };
 
         self.sequence = increment_sequence(self.sequence)?;
 
         Ok(inner_plaintext)
     }
+}
+
+fn application_record_decrypt_error(
+    err: Error,
+    cipher_suite: &str,
+    decrypt_sequence: u64,
+    encrypted_record_len: usize,
+) -> Error {
+    Error::new(
+        err.kind(),
+        format!(
+            "{} (decrypt_sequence={decrypt_sequence}, encrypted_record_len={encrypted_record_len}, cipher_suite={cipher_suite})",
+            err
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -473,7 +681,7 @@ mod tests {
         tls13_cipher_suite, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
         TLS_CHACHA20_POLY1305_SHA256,
     };
-    use crate::tls::records::{parse_tls_records, TlsRecordContentType};
+    use crate::tls::records::{parse_tls_records, TlsRecordContentType, TLS_RECORD_ALERT};
 
     fn sample_handshake_message() -> Vec<u8> {
         vec![0x08, 0x00, 0x00, 0x00, 0x00]
@@ -835,6 +1043,47 @@ mod tests {
             .expect("valid decrypted handshake message");
 
         assert_eq!(decrypted, handshake_message);
+    }
+
+    #[test]
+    fn tls13_inner_plaintext_content_type_reads_trailing_content_type() {
+        let inner = vec![0x02, 0x28, TLS_RECORD_ALERT];
+        assert_eq!(
+            tls13_inner_plaintext_content_type(&inner),
+            Some(TLS_RECORD_ALERT)
+        );
+        assert_eq!(tls13_inner_plaintext_body(&inner), Some(vec![0x02, 0x28]));
+    }
+
+    #[test]
+    fn decrypt_handshake_record_rejects_encrypted_alert_inner_content() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let keys = aes128_keys();
+
+        let mut inner_plaintext = vec![0x02, 0x28];
+        inner_plaintext.push(TLS_RECORD_ALERT);
+
+        let nonce_bytes = tls13_record_nonce(&keys.iv, 0).expect("valid nonce");
+        let ciphertext_len =
+            u16::try_from(inner_plaintext.len() + GCM_TAG_LEN).expect("valid ciphertext length");
+        let aad = build_record_aad(TLS_LEGACY_VERSION_1_2, ciphertext_len);
+        let ciphertext =
+            encrypt_aes128_gcm(&keys.key, &nonce_bytes, &inner_plaintext, &aad).expect("encrypt");
+        let record_bytes = build_tls_record(
+            TLS_RECORD_APPLICATION_DATA,
+            TLS_LEGACY_VERSION_1_2,
+            &ciphertext,
+        )
+        .expect("valid record");
+
+        let mut decryptor = Tls13RecordDecryptor::new(suite, keys).expect("valid decryptor");
+        let record = parse_encrypted_application_record(&record_bytes);
+        let err = decryptor.decrypt_handshake_record(&record).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(err
+            .to_string()
+            .contains("unexpected inner content type: 21"));
     }
 
     #[test]

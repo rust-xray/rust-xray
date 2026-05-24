@@ -46,5 +46,8 @@ pub use messages::{
 };
 pub use record_crypto::{tls13_record_nonce, Tls13RecordDecryptor, Tls13RecordEncryptor};
 pub use state::{complete_reality_tls13_handshake, RealityTls13ServerState};
-pub use stream::RealityTls13ApplicationStream;
+pub use stream::{
+    RealityTls13ApplicationStream, RealityTls13ClientReader, RealityTls13ClientWriter,
+    RealityTls13RelayClient,
+};
 pub use transcript::{Tls13HashAlgorithm, TranscriptHash};

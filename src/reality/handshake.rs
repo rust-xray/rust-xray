@@ -11,6 +11,7 @@ use crate::tls::{
 };
 
 use super::decision::RealityAccepted;
+use super::stages;
 use super::tls13::RealityTls13ServerState;
 
 const DEST_HANDSHAKE_READ_CAP: usize = 64 * 1024;
@@ -260,14 +261,14 @@ pub fn prepare_reality_tls13_state(
     let state = RealityTls13ServerState::new(accepted, observed)?;
 
     info!(
+        stage = stages::TLS13_STATE_CREATED,
         cipher_suite = state.suite.name,
         cipher_suite_id = format!("0x{:04x}", state.suite.id),
         sni = ?state.accepted.sni,
-        "observed valid destination TLS 1.3 ServerHello for REALITY"
-    );
-    info!(
-        cipher_suite = state.suite.name,
-        "selected REALITY TLS 1.3 cipher suite"
+        client_version = ?state.accepted.client.client_version,
+        observed_server_hello_message_len =
+            state.observed_server_hello.raw_handshake_message.len(),
+        "REALITY TLS 1.3 server state created"
     );
 
     Ok(state)

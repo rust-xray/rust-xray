@@ -277,6 +277,15 @@ pub fn derive_traffic_key(
     Ok(Tls13TrafficKeys { key, iv })
 }
 
+/// Derives the next TLS 1.3 application traffic secret after KeyUpdate.
+pub fn update_traffic_secret(
+    suite: Tls13CipherSuite,
+    traffic_secret: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let output_len = hash_len(suite.hash);
+    hkdf_expand_label_for_hash(suite.hash, traffic_secret, b"traffic upd", b"", output_len)
+}
+
 pub fn derive_finished_key(suite: Tls13CipherSuite, base_key: &[u8]) -> Result<Vec<u8>, Error> {
     let output_len = hash_len(suite.hash);
     hkdf_expand_label_for_hash(suite.hash, base_key, b"finished", b"", output_len)
@@ -767,5 +776,18 @@ mod tests {
         let keys = derive_traffic_key(suite, &traffic_secret).expect("valid traffic key");
 
         assert_ne!(keys.key, keys.iv);
+    }
+
+    #[test]
+    fn update_traffic_secret_changes_secret_and_derived_keys() {
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let initial = vec![0x42; SHA256_OUTPUT_LEN];
+        let updated = update_traffic_secret(suite, &initial).expect("updated secret");
+        assert_ne!(initial, updated);
+
+        let initial_keys = derive_traffic_key(suite, &initial).expect("initial keys");
+        let updated_keys = derive_traffic_key(suite, &updated).expect("updated keys");
+        assert_ne!(initial_keys.key, updated_keys.key);
+        assert_ne!(initial_keys.iv, updated_keys.iv);
     }
 }

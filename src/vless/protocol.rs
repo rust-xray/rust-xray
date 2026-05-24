@@ -32,6 +32,12 @@ pub fn parse_vless_request(input: &[u8]) -> std::io::Result<(VlessRequest, usize
     let mut offset = 0;
 
     let version = *input.get(offset).ok_or_else(unexpected_eof)?;
+    if version != 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("unsupported vless request version: {version}"),
+        ));
+    }
     offset += 1;
 
     let uuid_bytes: [u8; 16] = input
@@ -120,14 +126,95 @@ pub fn parse_vless_request(input: &[u8]) -> std::io::Result<(VlessRequest, usize
 }
 
 #[cfg(test)]
+pub(crate) fn build_vless_request_wire(
+    version: u8,
+    user_id: &[u8; 16],
+    additional_info: &[u8],
+    command: u8,
+    port: u16,
+    address: &[u8],
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(version);
+    buf.extend_from_slice(user_id);
+    buf.push(additional_info.len() as u8);
+    buf.extend_from_slice(additional_info);
+    buf.push(command);
+    buf.extend_from_slice(&port.to_be_bytes());
+    buf.extend_from_slice(address);
+    buf
+}
+
+#[cfg(test)]
+pub(crate) fn build_vless_domain_address(domain: &str) -> Vec<u8> {
+    let domain_bytes = domain.as_bytes();
+    let mut address = Vec::with_capacity(2 + domain_bytes.len());
+    address.push(0x02);
+    address.push(domain_bytes.len() as u8);
+    address.extend_from_slice(domain_bytes);
+    address
+}
+
+/// Encodes a VLESS inbound response header.
+///
+/// Xray/VLESS clients expect this header on the TLS application stream **before**
+/// any proxied target response bytes. Without it, clients such as Xray may interpret
+/// the first target bytes (for example a TLS ServerHello `0x16`) as a malformed
+/// response header and close the connection.
+///
+/// Layout: `[version, addons_len, addons...]`. For the current MVP inbound path
+/// `addons` is `None`, which encodes as `[version, 0]`.
+pub fn encode_vless_response_header(version: u8, addons: Option<&[u8]>) -> Vec<u8> {
+    let addons = addons.unwrap_or(&[]);
+    if addons.is_empty() {
+        return vec![version, 0];
+    }
+
+    assert!(
+        addons.len() <= u8::MAX as usize,
+        "VLESS response addons length exceeds 255 bytes"
+    );
+
+    let mut header = Vec::with_capacity(2 + addons.len());
+    header.push(version);
+    header.push(addons.len() as u8);
+    header.extend_from_slice(addons);
+    header
+}
+
+#[cfg(test)]
+pub(crate) fn decode_vless_response_header(input: &[u8]) -> std::io::Result<(u8, Vec<u8>)> {
+    if input.len() < 2 {
+        return Err(Error::new(
+            ErrorKind::UnexpectedEof,
+            "vless response header too short",
+        ));
+    }
+
+    let version = input[0];
+    let addons_len = input[1] as usize;
+    if input.len() < 2 + addons_len {
+        return Err(Error::new(
+            ErrorKind::UnexpectedEof,
+            "vless response addons truncated",
+        ));
+    }
+
+    Ok((version, input[2..2 + addons_len].to_vec()))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vless::vision::encode_vision_flow_addons_protobuf;
     use std::net::Ipv4Addr;
 
     const USER_ID: [u8; 16] = [
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01,
     ];
+
+    const LIVE_SMOKE_USER_ID: [u8; 16] = [0x11; 16];
 
     fn build_request(
         version: u8,
@@ -136,15 +223,7 @@ mod tests {
         port: u16,
         address: &[u8],
     ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.push(version);
-        buf.extend_from_slice(&USER_ID);
-        buf.push(additional_info.len() as u8);
-        buf.extend_from_slice(additional_info);
-        buf.push(command);
-        buf.extend_from_slice(&port.to_be_bytes());
-        buf.extend_from_slice(address);
-        buf
+        build_vless_request_wire(version, &USER_ID, additional_info, command, port, address)
     }
 
     #[test]
@@ -216,11 +295,99 @@ mod tests {
 
     #[test]
     fn parse_vless_request_preserves_additional_info() {
-        let additional_info = b"xtls-rprx-vision";
-        let input = build_request(0, additional_info, 0x01, 443, &[0x01, 10, 0, 0, 1]);
+        let additional_info = encode_vision_flow_addons_protobuf();
+        assert_eq!(additional_info.len(), 18);
+        let input = build_request(0, &additional_info, 0x01, 443, &[0x01, 10, 0, 0, 1]);
         let (request, _) = parse_vless_request(&input).unwrap();
 
         assert_eq!(request.additional_info, additional_info);
+    }
+
+    #[test]
+    fn parse_vless_request_rejects_non_zero_version() {
+        let input = build_request(1, &[], 0x01, 443, &[0x01, 10, 0, 0, 1]);
+        let err = parse_vless_request(&input).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn parse_vless_request_live_smoke_shape_example_com() {
+        let tls_client_hello = [
+            0x16, 0x03, 0x01, 0x00, 0x10, 0x01, 0x00, 0x00, 0x0c, 0x03, 0x03, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        let mut packet = build_vless_request_wire(
+            0,
+            &LIVE_SMOKE_USER_ID,
+            &[],
+            0x01,
+            443,
+            &build_vless_domain_address("example.com"),
+        );
+        packet.extend_from_slice(&tls_client_hello);
+
+        let (request, consumed) = parse_vless_request(&packet).unwrap();
+        let initial_payload = &packet[consumed..];
+
+        assert_eq!(request.version, 0);
+        assert_eq!(request.user_id, uuid::Uuid::from_bytes(LIVE_SMOKE_USER_ID));
+        assert_eq!(request.command, VlessCommand::Tcp);
+        assert_eq!(
+            request.destination,
+            VlessDestination::Domain("example.com".to_string(), 443)
+        );
+        assert!(request.additional_info.is_empty());
+        assert!(initial_payload.starts_with(&[0x16, 0x03]));
+        assert_ne!(
+            initial_payload[..16.min(initial_payload.len())],
+            LIVE_SMOKE_USER_ID
+        );
+    }
+
+    #[test]
+    fn parse_vless_request_live_smoke_shape_with_vision_addons() {
+        let addons = encode_vision_flow_addons_protobuf();
+        let tls_client_hello = [0x16, 0x03, 0x01, 0x00, 0x10, 0x01, 0x02, 0x03];
+        let mut packet = build_vless_request_wire(
+            0,
+            &LIVE_SMOKE_USER_ID,
+            &addons,
+            0x01,
+            443,
+            &build_vless_domain_address("example.com"),
+        );
+        packet.extend_from_slice(&tls_client_hello);
+
+        let (request, consumed) = parse_vless_request(&packet).unwrap();
+        let initial_payload = &packet[consumed..];
+
+        assert_eq!(request.additional_info.len(), 18);
+        assert_eq!(request.command, VlessCommand::Tcp);
+        assert!(initial_payload.starts_with(&[0x16, 0x03]));
+        assert_ne!(
+            initial_payload[..16.min(initial_payload.len())],
+            LIVE_SMOKE_USER_ID
+        );
+    }
+
+    #[test]
+    fn parse_vless_request_does_not_include_uuid_in_initial_payload() {
+        let tls_client_hello = [0x16, 0x03, 0x03, 0x00, 0x05];
+        let mut packet = build_vless_request_wire(
+            0,
+            &LIVE_SMOKE_USER_ID,
+            &[],
+            0x01,
+            443,
+            &build_vless_domain_address("example.com"),
+        );
+        packet.extend_from_slice(&tls_client_hello);
+
+        let (request, consumed) = parse_vless_request(&packet).unwrap();
+        let initial_payload = &packet[consumed..];
+
+        assert_eq!(request.user_id, uuid::Uuid::from_bytes(LIVE_SMOKE_USER_ID));
+        assert_eq!(initial_payload, tls_client_hello);
     }
 
     #[test]
@@ -262,5 +429,54 @@ mod tests {
         let err = parse_vless_request(&input).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidData);
+    }
+
+    fn encode_vless_response_for_request(request: &VlessRequest, addons: Option<&[u8]>) -> Vec<u8> {
+        encode_vless_response_header(request.version, addons)
+    }
+
+    #[test]
+    fn encode_vless_response_header_version_zero_has_empty_addons() {
+        assert_eq!(encode_vless_response_header(0, None), vec![0, 0]);
+        assert_eq!(encode_vless_response_header(0, Some(&[])), vec![0, 0]);
+    }
+
+    #[test]
+    fn encode_vless_response_header_version_one_has_empty_addons() {
+        assert_eq!(encode_vless_response_header(1, None), vec![1, 0]);
+        assert_eq!(encode_vless_response_header(1, Some(&[])), vec![1, 0]);
+    }
+
+    #[test]
+    fn encode_vless_response_header_non_empty_addons() {
+        let addons = b"vision-meta";
+        let mut expected = vec![0, addons.len() as u8];
+        expected.extend_from_slice(addons);
+        assert_eq!(encode_vless_response_header(0, Some(addons)), expected);
+
+        let (version, decoded_addons) =
+            decode_vless_response_header(&encode_vless_response_header(0, Some(addons))).unwrap();
+        assert_eq!(version, 0);
+        assert_eq!(decoded_addons, addons);
+    }
+
+    #[test]
+    fn encode_vless_response_header_matches_request_version() {
+        let input = build_request(0, &[], 0x01, 443, &[0x01, 127, 0, 0, 1]);
+        let (request, _) = parse_vless_request(&input).unwrap();
+
+        let header = encode_vless_response_for_request(&request, None);
+        let (decoded_version, decoded_addons) = decode_vless_response_header(&header).unwrap();
+
+        assert_eq!(decoded_version, request.version);
+        assert_eq!(decoded_version, 0);
+        assert!(decoded_addons.is_empty());
+    }
+
+    #[test]
+    fn decode_vless_response_header_rejects_truncated_addons() {
+        let err = decode_vless_response_header(&[0, 3, 0x01]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+        assert!(err.to_string().contains("truncated"));
     }
 }

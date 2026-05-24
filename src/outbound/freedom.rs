@@ -29,32 +29,30 @@ pub async fn connect_tcp_destination(destination: &VlessDestination) -> std::io:
     Ok(stream)
 }
 
-pub async fn relay_tcp<S>(
-    inbound: &mut S,
+pub async fn forward_tcp_initial_payload(
     outbound: &mut TcpStream,
     initial_payload: &[u8],
+) -> std::io::Result<()> {
+    if initial_payload.is_empty() {
+        return Ok(());
+    }
+
+    outbound.write_all(initial_payload).await
+}
+
+pub async fn relay_tcp_bidirectional<S>(
+    mut inbound: S,
+    outbound: &mut TcpStream,
 ) -> std::io::Result<(u64, u64)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    info!(
-        initial_payload_len = initial_payload.len(),
-        "freedom relay started"
-    );
-
-    if !initial_payload.is_empty() {
-        outbound.write_all(initial_payload).await?;
-        info!(
-            initial_payload_len = initial_payload.len(),
-            "freedom relay forwarded initial payload"
-        );
-    }
-
-    let (inbound_to_outbound, outbound_to_inbound) = copy_bidirectional(inbound, outbound).await?;
+    let (inbound_to_outbound, outbound_to_inbound) =
+        copy_bidirectional(&mut inbound, outbound).await?;
 
     info!(
-        initial_payload_len = initial_payload.len(),
-        inbound_to_outbound, outbound_to_inbound, "freedom relay ended"
+        inbound_to_outbound,
+        outbound_to_inbound, "freedom relay ended"
     );
 
     Ok((inbound_to_outbound, outbound_to_inbound))

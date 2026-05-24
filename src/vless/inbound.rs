@@ -1,9 +1,23 @@
 use std::io::ErrorKind;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use crate::outbound::freedom::{connect_tcp_destination, format_vless_destination, relay_tcp};
+use crate::outbound::freedom::{
+    connect_tcp_destination, format_vless_destination, forward_tcp_initial_payload,
+    relay_tcp_bidirectional,
+};
+use crate::reality::stages::{self, stage_error, RealityAcceptedStage};
+use crate::reality::tls13::{RealityTls13ApplicationStream, RealityTls13RelayClient};
 use crate::vless::config::VlessClient;
-use crate::vless::protocol::{parse_vless_request, VlessCommand, VlessRequest};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use crate::vless::protocol::{
+    encode_vless_response_header, parse_vless_request, VlessCommand, VlessRequest,
+};
+use crate::vless::relay_debug::{
+    log_outbound_stream_first_write, log_outbound_to_client_first_write,
+    log_vless_request_diagnostics, log_vless_response_header_prefix,
+};
+use crate::vless::vision::{is_vision_client_flow, VisionUnpadState};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::info;
 
 const MAX_VLESS_HEADER_SIZE: usize = 4096;
@@ -113,51 +127,377 @@ pub fn authenticate_vless_client(
     })
 }
 
-pub async fn handle_vless_tcp_inbound<S>(
-    stream: &mut S,
-    clients: &[VlessClient],
-) -> std::io::Result<()>
+/// Writes and flushes the VLESS response header to the client stream.
+pub async fn prepare_vless_tcp_response<W: AsyncWrite + Unpin>(
+    client_stream: &mut W,
+    version: u8,
+) -> std::io::Result<()> {
+    let header = encode_vless_response_header(version, None);
+    let header_len = header.len();
+    client_stream.write_all(&header).await?;
+    client_stream.flush().await?;
+    if crate::vless::relay_debug::debug_relay_prefix_enabled() {
+        log_vless_response_header_prefix(&header, version, header_len);
+    } else {
+        info!(
+            stage = stages::VLESS_RESPONSE_HEADER_SENT,
+            version, header_len, "sent VLESS response header"
+        );
+    }
+    Ok(())
+}
+
+struct VisionUplinkReader<S> {
+    inner: S,
+    state: VisionUnpadState,
+    pending: Vec<u8>,
+}
+
+impl<S> VisionUplinkReader<S> {
+    fn new(inner: S, state: VisionUnpadState) -> Self {
+        Self {
+            inner,
+            state,
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl<S> AsyncRead for VisionUplinkReader<S>
+where
+    S: AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        loop {
+            if !self.pending.is_empty() {
+                let to_copy = self.pending.len().min(buf.remaining());
+                buf.put_slice(&self.pending[..to_copy]);
+                self.pending.drain(..to_copy);
+                return Poll::Ready(Ok(()));
+            }
+
+            if !self.state.within_padding() {
+                return Pin::new(&mut self.inner).poll_read(cx, buf);
+            }
+
+            let mut chunk = [0u8; 4096];
+            let mut read_buf = tokio::io::ReadBuf::new(&mut chunk);
+            match Pin::new(&mut self.inner).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) if read_buf.filled().is_empty() => {
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Ok(())) => match self.state.unpad(read_buf.filled()) {
+                    Ok(unpadded) if unpadded.is_empty() => continue,
+                    Ok(unpadded) => {
+                        let to_copy = unpadded.len().min(buf.remaining());
+                        buf.put_slice(&unpadded[..to_copy]);
+                        self.pending.extend_from_slice(&unpadded[to_copy..]);
+                        return Poll::Ready(Ok(()));
+                    }
+                    Err(err) => return Poll::Ready(Err(err)),
+                },
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl<S> AsyncWrite for VisionUplinkReader<S>
+where
+    S: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+struct RelayClientWriteProbe<S> {
+    inner: S,
+    first_client_write_logged: bool,
+}
+
+impl<S> RelayClientWriteProbe<S> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            first_client_write_logged: false,
+        }
+    }
+}
+
+impl<S> AsyncRead for RelayClientWriteProbe<S>
+where
+    S: AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S> AsyncWrite for RelayClientWriteProbe<S>
+where
+    S: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(written)) = result {
+            if !self.first_client_write_logged && written > 0 {
+                log_outbound_to_client_first_write(buf, written);
+                self.first_client_write_logged = true;
+            }
+        }
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+async fn relay_vless_tcp_bidirectional<S>(
+    client_stream: S,
+    outbound: &mut tokio::net::TcpStream,
+    vision_state: Option<VisionUnpadState>,
+) -> std::io::Result<(u64, u64)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let inbound = read_vless_request(stream).await?;
-    let auth = authenticate_vless_client(&inbound.request, clients)?;
+    let probed_client = RelayClientWriteProbe::new(client_stream);
+    if let Some(state) = vision_state {
+        let vision_client = VisionUplinkReader::new(probed_client, state);
+        relay_tcp_bidirectional(vision_client, outbound).await
+    } else {
+        relay_tcp_bidirectional(probed_client, outbound).await
+    }
+}
+
+/// Writes a VLESS response header before relaying proxied target bytes to the client.
+pub async fn write_vless_response_header<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    version: u8,
+) -> std::io::Result<()> {
+    prepare_vless_tcp_response(writer, version).await
+}
+
+struct VlessTcpRelayPrepared<S> {
+    stream: S,
+    outbound: tokio::net::TcpStream,
+    vision_state: Option<VisionUnpadState>,
+    auth: VlessAuthenticatedClient,
+    destination: String,
+    command: VlessCommand,
+}
+
+async fn prepare_vless_tcp_relay<S>(
+    mut stream: S,
+    clients: &[VlessClient],
+) -> std::io::Result<VlessTcpRelayPrepared<S>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let inbound = read_vless_request(&mut stream)
+        .await
+        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
+    let auth = authenticate_vless_client(&inbound.request, clients)
+        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
     let destination = format_vless_destination(&inbound.request.destination);
 
+    let raw_initial_payload = inbound.initial_payload;
+    let mut initial_payload = raw_initial_payload.clone();
+    let vision_state = if is_vision_client_flow(auth.flow.as_deref()) {
+        let mut state = VisionUnpadState::new(*inbound.request.user_id.as_bytes());
+        initial_payload = state
+            .unpad(&initial_payload)
+            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+        Some(state)
+    } else {
+        None
+    };
+
+    log_vless_request_diagnostics(
+        inbound.request.version,
+        inbound.request.additional_info.len(),
+        &raw_initial_payload,
+        &initial_payload,
+    );
+
     info!(
+        stage = stages::VLESS_AUTH_OK,
         user_id = %auth.id,
         email = auth.email.as_deref(),
         flow = auth.flow.as_deref(),
         command = ?inbound.request.command,
         %destination,
-        "vless client authenticated"
+        "VLESS client authenticated"
     );
 
     if inbound.request.command != VlessCommand::Tcp {
-        return Err(std::io::Error::new(
-            ErrorKind::Unsupported,
-            format!("unsupported vless command: {:?}", inbound.request.command),
+        return Err(stage_error(
+            RealityAcceptedStage::Vless,
+            std::io::Error::new(
+                ErrorKind::Unsupported,
+                format!("unsupported vless command: {:?}", inbound.request.command),
+            ),
         ));
     }
 
-    // TODO: implement exact VLESS response header semantics.
-
-    let mut outbound = connect_tcp_destination(&inbound.request.destination).await?;
-
-    let (inbound_to_outbound, outbound_to_inbound) =
-        relay_tcp(stream, &mut outbound, &inbound.initial_payload).await?;
+    let mut outbound = connect_tcp_destination(&inbound.request.destination)
+        .await
+        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
 
     info!(
-        email = auth.email.as_deref(),
-        flow = auth.flow.as_deref(),
-        command = ?inbound.request.command,
+        stage = stages::VLESS_OUTBOUND_CONNECTED,
         %destination,
+        "VLESS outbound TCP connected"
+    );
+
+    prepare_vless_tcp_response(&mut stream, inbound.request.version)
+        .await
+        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
+    if !initial_payload.is_empty() {
+        log_outbound_stream_first_write(&initial_payload);
+        forward_tcp_initial_payload(&mut outbound, &initial_payload)
+            .await
+            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+        info!(
+            stage = stages::VLESS_INITIAL_PAYLOAD_FORWARDED,
+            initial_payload_len = initial_payload.len(),
+            "forwarded VLESS initial payload to outbound"
+        );
+    }
+
+    Ok(VlessTcpRelayPrepared {
+        stream,
+        outbound,
+        vision_state,
+        auth,
+        destination,
+        command: inbound.request.command,
+    })
+}
+
+struct VlessTcpRelayFinished {
+    auth: VlessAuthenticatedClient,
+    destination: String,
+    command: VlessCommand,
+}
+
+fn finish_vless_tcp_relay(
+    finished: VlessTcpRelayFinished,
+    relay_result: std::io::Result<(u64, u64)>,
+) -> std::io::Result<()> {
+    let (inbound_to_outbound, outbound_to_inbound) =
+        relay_result.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
+    info!(
+        stage = stages::VLESS_RELAY_DONE,
+        email = finished.auth.email.as_deref(),
+        flow = finished.auth.flow.as_deref(),
+        command = ?finished.command,
+        destination = %finished.destination,
         inbound_to_outbound,
         outbound_to_inbound,
-        "vless tcp inbound relay completed"
+        "VLESS TCP relay completed"
     );
 
     Ok(())
+}
+
+pub async fn handle_vless_tcp_inbound<S>(stream: S, clients: &[VlessClient]) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let prepared = prepare_vless_tcp_relay(stream, clients).await?;
+
+    info!(
+        stage = stages::VLESS_RELAY_STARTED,
+        "VLESS TCP relay started"
+    );
+
+    let VlessTcpRelayPrepared {
+        stream,
+        mut outbound,
+        vision_state,
+        auth,
+        destination,
+        command,
+    } = prepared;
+
+    let relay_result = relay_vless_tcp_bidirectional(stream, &mut outbound, vision_state).await;
+
+    finish_vless_tcp_relay(
+        VlessTcpRelayFinished {
+            auth,
+            destination,
+            command,
+        },
+        relay_result,
+    )
+}
+
+pub async fn handle_reality_vless_tcp_inbound(
+    stream: RealityTls13ApplicationStream<tokio::net::TcpStream>,
+    clients: &[VlessClient],
+) -> std::io::Result<()> {
+    let prepared = prepare_vless_tcp_relay(stream, clients).await?;
+
+    info!(
+        stage = stages::VLESS_RELAY_STARTED,
+        "VLESS TCP relay started"
+    );
+
+    let VlessTcpRelayPrepared {
+        stream,
+        mut outbound,
+        vision_state,
+        auth,
+        destination,
+        command,
+    } = prepared;
+
+    let (reader, writer) = stream.split_for_relay()?;
+    let relay = RealityTls13RelayClient::new(reader, writer);
+    let relay_result = relay_vless_tcp_bidirectional(relay, &mut outbound, vision_state).await;
+
+    finish_vless_tcp_relay(
+        VlessTcpRelayFinished {
+            auth,
+            destination,
+            command,
+        },
+        relay_result,
+    )
 }
 
 /// Placeholder entry point for future VLESS inbound handling.
@@ -405,6 +745,8 @@ mod handle_vless_tcp_inbound_tests {
     use crate::vless::config::VlessClient;
     use std::future::Future;
     use std::io::ErrorKind;
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     const USER_ID: [u8; 16] = [
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -416,13 +758,13 @@ mod handle_vless_tcp_inbound_tests {
         0x02,
     ];
 
-    fn build_vless_request_bytes(user_id: &[u8; 16], command: u8) -> Vec<u8> {
+    fn build_vless_request_bytes(user_id: &[u8; 16], command: u8, port: u16) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.push(0);
         buf.extend_from_slice(user_id);
         buf.push(0);
         buf.push(command);
-        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&port.to_be_bytes());
         buf.extend_from_slice(&[0x01, 127, 0, 0, 1]);
         buf
     }
@@ -445,21 +787,222 @@ mod handle_vless_tcp_inbound_tests {
 
     #[test]
     fn handle_vless_tcp_inbound_udp_command_is_unsupported() {
-        let data = build_vless_request_bytes(&USER_ID, 0x02);
+        let data = build_vless_request_bytes(&USER_ID, 0x02, 443);
         let mut cursor = std::io::Cursor::new(data);
 
-        let err = block_on(handle_vless_tcp_inbound(&mut cursor, &test_clients())).unwrap_err();
+        let err = block_on(handle_vless_tcp_inbound(cursor, &test_clients())).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
     }
 
     #[test]
     fn handle_vless_tcp_inbound_unknown_client_is_permission_denied() {
-        let data = build_vless_request_bytes(&UNKNOWN_USER_ID, 0x01);
+        let data = build_vless_request_bytes(&UNKNOWN_USER_ID, 0x01, 443);
         let mut cursor = std::io::Cursor::new(data);
 
-        let err = block_on(handle_vless_tcp_inbound(&mut cursor, &test_clients())).unwrap_err();
+        let err = block_on(handle_vless_tcp_inbound(cursor, &test_clients())).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn handle_vless_tcp_inbound_writes_response_header_before_outbound_bytes() {
+        block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind outbound listener");
+            let outbound_port = listener.local_addr().expect("local addr").port();
+            let outbound_response = [0x16, 0x03, 0x03, 0x00, 0x05, 0x02];
+
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept outbound");
+                socket
+                    .write_all(&outbound_response)
+                    .await
+                    .expect("write outbound response");
+            });
+
+            let (mut client_io, mut server_io) = duplex(8192);
+            let request = build_vless_request_bytes(&USER_ID, 0x01, outbound_port);
+            client_io
+                .write_all(&request)
+                .await
+                .expect("send vless request");
+
+            let clients = test_clients();
+            let handle =
+                tokio::spawn(async move { handle_vless_tcp_inbound(server_io, &clients).await });
+
+            let mut received = [0u8; 16];
+            let read = client_io
+                .read(&mut received)
+                .await
+                .expect("read client response");
+            assert!(read >= 2);
+            assert_eq!(
+                &received[..2],
+                encode_vless_response_header(0, None).as_slice()
+            );
+
+            if read > 2 {
+                assert_eq!(received[2], outbound_response[0]);
+            } else {
+                let read_more = client_io
+                    .read(&mut received[2..])
+                    .await
+                    .expect("read outbound relay bytes");
+                assert!(read_more > 0);
+                assert_eq!(received[2], outbound_response[0]);
+            }
+
+            handle.abort();
+        });
+    }
+
+    #[test]
+    fn prepare_vless_tcp_response_writes_header_to_client_stream() {
+        block_on(async {
+            let (mut client_io, mut server_io) = duplex(256);
+            prepare_vless_tcp_response(&mut server_io, 0)
+                .await
+                .expect("write response header");
+
+            let mut received = [0u8; 8];
+            let read = client_io
+                .read(&mut received)
+                .await
+                .expect("read response header");
+            assert_eq!(read, 2);
+            assert_eq!(
+                &received[..2],
+                encode_vless_response_header(0, None).as_slice()
+            );
+        });
+    }
+
+    #[test]
+    fn handle_vless_tcp_inbound_unpads_vision_initial_payload_before_outbound() {
+        use crate::vless::vision::wrap_vision_uplink_block;
+
+        block_on(async {
+            let user_id = [0x11; 16];
+            let tls_client_hello = [0x16, 0x03, 0x01, 0x00, 0x10, 0x01, 0x02];
+            let vision_payload = wrap_vision_uplink_block(&user_id, &tls_client_hello);
+
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind outbound listener");
+            let outbound_port = listener.local_addr().expect("local addr").port();
+            let (outbound_ready_tx, outbound_ready_rx) = tokio::sync::oneshot::channel();
+
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept outbound");
+                let mut buf = [0u8; 512];
+                let n = socket.read(&mut buf).await.expect("read initial payload");
+                let captured = buf[..n].to_vec();
+                outbound_ready_tx
+                    .send(captured)
+                    .expect("send outbound capture");
+            });
+
+            let (mut client_io, mut server_io) = duplex(8192);
+            let mut request = build_vless_request_bytes(&user_id, 0x01, outbound_port);
+            request.extend_from_slice(&vision_payload);
+            client_io
+                .write_all(&request)
+                .await
+                .expect("send vless request");
+
+            let clients = vec![VlessClient {
+                id: uuid::Uuid::from_bytes(user_id),
+                email: Some("user@example.com".to_string()),
+                flow: Some("xtls-rprx-vision".to_string()),
+            }];
+
+            let handle =
+                tokio::spawn(async move { handle_vless_tcp_inbound(server_io, &clients).await });
+
+            let _ = client_io.read(&mut [0u8; 8]).await;
+
+            let received = outbound_ready_rx.await.expect("outbound capture");
+            assert!(received.starts_with(&[0x16, 0x03, 0x01]));
+            assert_ne!(&received[..16.min(received.len())], user_id);
+
+            handle.abort();
+        });
+    }
+
+    #[test]
+    fn handle_vless_tcp_inbound_forwards_initial_payload_once_after_response_header() {
+        use std::sync::{Arc, Mutex};
+
+        block_on(async {
+            let initial_payload = b"CLIENT-TLS-CLIENTHELLO-BYTES";
+            let outbound_response = [0x16, 0x03, 0x03, 0x00, 0x05, 0x02];
+
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind outbound listener");
+            let outbound_port = listener.local_addr().expect("local addr").port();
+            let expected_initial_payload = initial_payload.to_vec();
+            let outbound_received = Arc::new(Mutex::new(Vec::new()));
+            let outbound_received_task = Arc::clone(&outbound_received);
+
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept outbound");
+                let mut buf = [0u8; 512];
+                let n = socket.read(&mut buf).await.expect("read initial payload");
+                outbound_received_task
+                    .lock()
+                    .expect("lock outbound capture")
+                    .extend_from_slice(&buf[..n]);
+                socket
+                    .write_all(&outbound_response)
+                    .await
+                    .expect("write outbound response");
+            });
+
+            let (mut client_io, mut server_io) = duplex(8192);
+            let mut request = build_vless_request_bytes(&USER_ID, 0x01, outbound_port);
+            request.extend_from_slice(initial_payload);
+            client_io
+                .write_all(&request)
+                .await
+                .expect("send vless request");
+
+            let handle =
+                tokio::spawn(
+                    async move { handle_vless_tcp_inbound(server_io, &test_clients()).await },
+                );
+
+            let mut received = [0u8; 32];
+            let read = client_io
+                .read(&mut received)
+                .await
+                .expect("read client response header");
+            assert!(read >= 2);
+            assert_eq!(
+                &received[..2],
+                encode_vless_response_header(0, None).as_slice()
+            );
+
+            if read <= 2 {
+                let read_more = client_io
+                    .read(&mut received[read..])
+                    .await
+                    .expect("read outbound relay bytes");
+                assert!(read_more > 0);
+                assert_eq!(received[read], outbound_response[0]);
+            } else {
+                assert_eq!(received[2], outbound_response[0]);
+            }
+
+            assert_eq!(
+                *outbound_received.lock().expect("lock outbound capture"),
+                expected_initial_payload
+            );
+
+            handle.abort();
+        });
     }
 }

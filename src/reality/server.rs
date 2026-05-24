@@ -2,16 +2,17 @@ use std::time::Duration;
 
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::protocol::structs::ClientHelloPayload;
 use crate::tls::TlsClientHelloRecord;
-use crate::vless::handle_vless_tcp_inbound;
+use crate::vless::handle_reality_vless_tcp_inbound;
 use crate::vless::VlessClient;
 
 use super::decision::RealityAccepted;
 use super::handshake::{fetch_dest_handshake, prepare_reality_tls13_state};
 use super::session::short_id_prefix_len;
+use super::stages::{self, stage_error, RealityAcceptedStage};
 use super::tls13::complete_reality_tls13_handshake;
 
 const ACCEPTED_DEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -29,55 +30,60 @@ pub async fn handle_accepted_reality_client(
     vless_clients: &[VlessClient],
 ) -> std::io::Result<()> {
     info!(
+        stage = stages::ACCEPTED_START,
         sni = ?accepted.sni,
         client_version = ?accepted.client.client_version,
         unix_time = accepted.client.unix_time,
         short_id_len = short_id_prefix_len(&accepted.client.short_id),
         vless_client_count = vless_clients.len(),
+        client_hello_record_len = record.raw_record.len(),
         %dest_addr,
-        "REALITY accepted client"
+        "REALITY accepted path started"
     );
 
-    info!(%dest_addr, "REALITY accepted path connecting to dest");
+    info!(stage = stages::DEST_CONNECT_START, %dest_addr, "connecting to dest");
     let mut dest = timeout(ACCEPTED_DEST_CONNECT_TIMEOUT, TcpStream::connect(dest_addr))
         .await
         .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!(
-                    "REALITY accepted path connect to {dest_addr} timed out after {:?}",
-                    ACCEPTED_DEST_CONNECT_TIMEOUT
+            stage_error(
+                RealityAcceptedStage::DestConnect,
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "connect to {dest_addr} timed out after {:?}",
+                        ACCEPTED_DEST_CONNECT_TIMEOUT
+                    ),
                 ),
             )
-        })??;
-    info!(%dest_addr, "REALITY accepted path dest connected");
+        })?
+        .map_err(|err| stage_error(RealityAcceptedStage::DestConnect, err))?;
 
-    info!(
+    info!(stage = stages::DEST_CONNECT_OK, %dest_addr, "dest TCP connected");
+
+    debug!(
+        stage = stages::DEST_SERVER_HELLO_OBSERVED,
         %dest_addr,
         client_hello_record_len = record.raw_record.len(),
-        "REALITY accepted path forwarding client hello record to dest"
+        "forwarding ClientHello record to dest"
     );
-    let dest_handshake = fetch_dest_handshake(&mut dest, &record.raw_record).await?;
+    let dest_handshake = fetch_dest_handshake(&mut dest, &record.raw_record)
+        .await
+        .map_err(|err| stage_error(RealityAcceptedStage::DestServerHello, err))?;
 
     info!(
+        stage = stages::DEST_SERVER_HELLO_OBSERVED,
         %dest_addr,
         dest_record_count = dest_handshake.records.len(),
-        dest_bytes = dest_handshake.raw_server_bytes.len(),
-        "REALITY accepted path dest ServerHello observed"
+        observed_server_bytes_len = dest_handshake.raw_server_bytes.len(),
+        "dest ServerHello observed"
     );
 
-    let state = prepare_reality_tls13_state(dest_handshake, accepted)?;
-
-    info!(
-        %dest_addr,
-        cipher_suite = state.suite.name,
-        sni = ?state.accepted.sni,
-        "REALITY observed destination ServerHello OK"
-    );
+    let state = prepare_reality_tls13_state(dest_handshake, accepted)
+        .map_err(|err| stage_error(RealityAcceptedStage::Tls13State, err))?;
 
     let cipher_suite = state.suite.name;
 
-    let mut tls_app_stream = complete_reality_tls13_handshake(
+    let tls_app_stream = complete_reality_tls13_handshake(
         client,
         &client_hello_payload,
         &record.handshake_message,
@@ -86,20 +92,16 @@ pub async fn handle_accepted_reality_client(
     .await?;
 
     info!(
+        stage = stages::VLESS_START,
         %dest_addr,
         cipher_suite,
-        "REALITY TLS 1.3 handshake complete"
-    );
-
-    info!(
-        %dest_addr,
         vless_client_count = vless_clients.len(),
-        "REALITY VLESS handler started"
+        "handing off to VLESS inbound"
     );
 
-    handle_vless_tcp_inbound(&mut tls_app_stream, vless_clients).await?;
+    handle_reality_vless_tcp_inbound(tls_app_stream, vless_clients).await?;
 
-    info!(%dest_addr, "REALITY accepted path relay ended");
+    info!(stage = stages::VLESS_RELAY_DONE, %dest_addr, "REALITY accepted path complete");
 
     Ok(())
 }

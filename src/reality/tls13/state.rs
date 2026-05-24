@@ -1,14 +1,19 @@
 use std::fmt;
+use std::fmt::Write as _;
 use std::io::{Error, ErrorKind};
 
 use tokio::io::{AsyncRead, AsyncWriteExt};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::protocol::structs::ClientHelloPayload;
+use crate::reality::certificate::{
+    certificate_der_has_ed25519_signature_tail, patch_reality_certificate_der,
+};
 use crate::reality::handshake::RealityObservedServerHello;
+use crate::reality::stages::{self, stage_error, RealityAcceptedStage};
 use crate::reality::RealityAccepted;
 use crate::tls::records::build_handshake_record;
-use crate::tls::TlsRecordContentType;
+use crate::tls::{TlsRecord, TLS_RECORD_ALERT, TLS_RECORD_HANDSHAKE};
 
 use super::certificate::{
     build_tls13_certificate_message, build_tls13_certificate_verify_ed25519,
@@ -28,8 +33,11 @@ use super::messages::{
     build_encrypted_extensions_empty, build_finished, build_tls13_server_hello,
     Tls13ServerHelloParams, HANDSHAKE_TYPE_FINISHED, HANDSHAKE_TYPE_SERVER_HELLO,
 };
-use super::record_crypto::{Tls13RecordDecryptor, Tls13RecordEncryptor};
-use super::stream::{read_tls_record_from_stream, RealityTls13ApplicationStream};
+use super::record_crypto::{
+    parse_tls13_handshake_inner_plaintext, tls13_inner_plaintext_body,
+    tls13_inner_plaintext_content_type, Tls13RecordDecryptor, Tls13RecordEncryptor,
+};
+use super::stream::{read_client_finished_tls_record_from_stream, RealityTls13ApplicationStream};
 use super::transcript::TranscriptHash;
 
 const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 0x01;
@@ -50,6 +58,7 @@ pub struct RealityTls13ServerState {
     pub handshake_secrets: Option<Tls13HandshakeSecrets>,
     pub server_finished_message: Option<Vec<u8>>,
     pub client_finished_verified: bool,
+    pub application_secret_transcript_hash: Option<Vec<u8>>,
     pub application_secrets: Option<Tls13ApplicationSecrets>,
 }
 
@@ -102,6 +111,13 @@ impl fmt::Debug for RealityTls13ServerState {
             )
             .field("client_finished_verified", &self.client_finished_verified)
             .field(
+                "application_secret_transcript_hash",
+                &self
+                    .application_secret_transcript_hash
+                    .as_ref()
+                    .map(|hash| format!("<{} bytes>", hash.len())),
+            )
+            .field(
                 "application_secrets",
                 &self.application_secrets.as_ref().map(|_| "<redacted>"),
             )
@@ -136,6 +152,7 @@ impl RealityTls13ServerState {
             handshake_secrets: None,
             server_finished_message: None,
             client_finished_verified: false,
+            application_secret_transcript_hash: None,
             application_secrets: None,
         })
     }
@@ -243,17 +260,29 @@ impl RealityTls13ServerState {
         let traffic_keys = derive_traffic_key(self.suite, &server_handshake_traffic_secret)?;
         let mut encryptor = Tls13RecordEncryptor::new(self.suite, traffic_keys)?;
 
-        // TODO: REALITY upstream patches/generated cert using HMAC-SHA512 over AuthKey and
-        // Ed25519 public key — see `crate::reality::certificate::patch_reality_certificate_der`.
-
         let encrypted_extensions = build_encrypted_extensions_empty()?;
         self.transcript.update(&encrypted_extensions);
 
         let ephemeral_cert =
             generate_reality_ephemeral_ed25519_certificate(self.accepted.sni.as_deref())?;
-        // TODO(upstream REALITY): patch cert DER via `patch_reality_certificate_der` once the
-        // exact signature offset is ported; requires auth_key + ClientHello/ServerHello bytes.
-        let certificate = build_tls13_certificate_message(&[ephemeral_cert.der])?;
+        let mut cert_der = ephemeral_cert.der.clone();
+        if !certificate_der_has_ed25519_signature_tail(&cert_der) {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "REALITY ephemeral certificate DER lacks Ed25519 signature tail layout",
+            ));
+        }
+        patch_reality_certificate_der(
+            &mut cert_der,
+            &ephemeral_cert.public_key_raw,
+            &self.accepted.auth.auth_key,
+        )?;
+        info!(
+            cert_der_len = cert_der.len(),
+            cert_public_key_len = ephemeral_cert.public_key_raw.len(),
+            "REALITY certificate signature patched"
+        );
+        let certificate = build_tls13_certificate_message(&[cert_der])?;
         self.transcript.update(&certificate);
 
         let certificate_verify_transcript_hash = self.transcript.digest();
@@ -330,11 +359,16 @@ impl RealityTls13ServerState {
         let verify_data = parse_finished_verify_data(finished_message, expected_hash_len)?;
 
         let finished_key = derive_finished_key(self.suite, &client_handshake_traffic_secret)?;
-        let transcript_hash = self.transcript.digest();
-        let verified =
-            verify_finished_data(self.suite, &finished_key, &transcript_hash, &verify_data)?;
+        let transcript_hash_before_client_finished = self.transcript.digest();
+        let verified = verify_finished_data(
+            self.suite,
+            &finished_key,
+            &transcript_hash_before_client_finished,
+            &verify_data,
+        )?;
 
         if verified {
+            self.application_secret_transcript_hash = Some(transcript_hash_before_client_finished);
             self.transcript.update(finished_message);
             self.client_finished_verified = true;
         }
@@ -362,9 +396,14 @@ impl RealityTls13ServerState {
             .handshake_secret
             .clone();
 
-        let transcript_hash = self.transcript.digest();
+        let transcript_hash = self.application_secret_transcript_hash.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "TLS 1.3 application secret derivation requires transcript hash before client Finished",
+            )
+        })?;
         let secrets =
-            derive_application_traffic_secrets(self.suite, &handshake_secret, &transcript_hash)?;
+            derive_application_traffic_secrets(self.suite, &handshake_secret, transcript_hash)?;
         self.application_secrets = Some(secrets);
         Ok(())
     }
@@ -387,107 +426,273 @@ pub async fn complete_reality_tls13_handshake<S>(
 where
     S: AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    info!(
-        sni = ?state.accepted.sni,
-        cipher_suite = state.suite.name,
-        "REALITY TLS 1.3 handshake: preparing ServerHello"
-    );
-    state.prepare_server_hello(client_hello_payload)?;
+    state
+        .prepare_server_hello(client_hello_payload)
+        .map_err(|err| stage_error(RealityAcceptedStage::ServerHello, err))?;
 
-    let server_hello_message = state
-        .server_hello_message
-        .as_ref()
-        .ok_or_else(|| {
+    let server_hello_message = state.server_hello_message.as_ref().ok_or_else(|| {
+        stage_error(
+            RealityAcceptedStage::ServerHello,
             Error::new(
                 ErrorKind::InvalidData,
-                "TLS 1.3 ServerHello message missing after prepare",
-            )
-        })?
-        .clone();
-    let server_hello_record = build_handshake_record(&server_hello_message)?;
-
-    info!("REALITY TLS 1.3 handshake: writing ServerHello record");
-    stream.write_all(&server_hello_record).await?;
-
-    info!("REALITY TLS 1.3 handshake: updating transcript and deriving handshake secrets");
-    let transcript_hash = state.update_transcript_client_server_hello(client_hello_message)?;
-    state.derive_handshake_secrets(&transcript_hash)?;
-
-    info!("REALITY TLS 1.3 handshake: building encrypted server handshake messages");
-    let encrypted_handshake_records = state.build_encrypted_server_handshake_records()?;
+                "ServerHello message missing after prepare",
+            ),
+        )
+    })?;
+    let server_hello_record = build_handshake_record(server_hello_message)
+        .map_err(|err| stage_error(RealityAcceptedStage::ServerHello, err))?;
 
     info!(
-        encrypted_handshake_records_len = encrypted_handshake_records.len(),
-        "REALITY TLS 1.3 handshake: writing encrypted server handshake records"
+        stage = stages::TLS13_SERVER_HELLO_GENERATED,
+        sni = ?state.accepted.sni,
+        cipher_suite = state.suite.name,
+        server_hello_message_len = server_hello_message.len(),
+        server_hello_record_len = server_hello_record.len(),
+        "generated ServerHello"
     );
-    stream.write_all(&encrypted_handshake_records).await?;
-    stream.flush().await?;
 
-    info!("REALITY TLS 1.3 handshake: reading encrypted client Finished record");
-    let client_finished_record = read_tls_record_from_stream(&mut stream).await?;
-    if client_finished_record.content_type != TlsRecordContentType::ApplicationData {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            format!(
-                "TLS 1.3 client Finished must be sent as ApplicationData record, got {:?}",
-                client_finished_record.content_type
-            ),
-        ));
-    }
+    stream
+        .write_all(&server_hello_record)
+        .await
+        .map_err(|err| stage_error(RealityAcceptedStage::ServerHello, err))?;
+
+    let transcript_hash = state
+        .update_transcript_client_server_hello(client_hello_message)
+        .map_err(|err| stage_error(RealityAcceptedStage::Transcript, err))?;
+
+    info!(
+        stage = stages::TLS13_TRANSCRIPT_CLIENT_SERVER_HELLO_UPDATED,
+        cipher_suite = state.suite.name,
+        transcript_hash_len = transcript_hash.len(),
+        "updated ClientHello/ServerHello transcript"
+    );
+
+    state
+        .derive_handshake_secrets(&transcript_hash)
+        .map_err(|err| stage_error(RealityAcceptedStage::HandshakeSecrets, err))?;
+
+    info!(
+        stage = stages::TLS13_HANDSHAKE_SECRETS_DERIVED,
+        cipher_suite = state.suite.name,
+        "derived handshake traffic secrets"
+    );
+
+    let encrypted_handshake_records = state
+        .build_encrypted_server_handshake_records()
+        .map_err(|err| stage_error(RealityAcceptedStage::ServerHandshakeRecords, err))?;
+
+    info!(
+        stage = stages::TLS13_SERVER_ENCRYPTED_HANDSHAKE_BUILT,
+        cipher_suite = state.suite.name,
+        encrypted_handshake_records_len = encrypted_handshake_records.len(),
+        "built encrypted server handshake records"
+    );
+
+    stream
+        .write_all(&encrypted_handshake_records)
+        .await
+        .map_err(|err| stage_error(RealityAcceptedStage::ServerHandshakeRecords, err))?;
+    stream
+        .flush()
+        .await
+        .map_err(|err| stage_error(RealityAcceptedStage::ServerHandshakeRecords, err))?;
+
+    info!(
+        stage = stages::TLS13_SERVER_ENCRYPTED_HANDSHAKE_SENT,
+        encrypted_handshake_records_len = encrypted_handshake_records.len(),
+        "sent encrypted server handshake records"
+    );
+
+    let client_finished_record = read_client_finished_tls_record_from_stream(&mut stream)
+        .await
+        .map_err(|err| stage_error(RealityAcceptedStage::ClientFinishedRead, err))?;
 
     let client_handshake_traffic_secret = state
         .handshake_secrets
         .as_ref()
         .ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                "TLS 1.3 client Finished decrypt requires derived handshake secrets",
+            stage_error(
+                RealityAcceptedStage::ClientFinishedRead,
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "client Finished decrypt requires derived handshake secrets",
+                ),
             )
         })?
         .client_handshake_traffic_secret
         .clone();
-    let client_handshake_keys = derive_traffic_key(state.suite, &client_handshake_traffic_secret)?;
+    let client_handshake_keys =
+        derive_traffic_key(state.suite, &client_handshake_traffic_secret)
+            .map_err(|err| stage_error(RealityAcceptedStage::ClientFinishedRead, err))?;
     let mut client_handshake_decryptor =
-        Tls13RecordDecryptor::new(state.suite, client_handshake_keys)?;
-    let client_finished_message =
-        client_handshake_decryptor.decrypt_handshake_record(&client_finished_record)?;
+        Tls13RecordDecryptor::new(state.suite, client_handshake_keys)
+            .map_err(|err| stage_error(RealityAcceptedStage::ClientFinishedRead, err))?;
+    let client_finished_message = decrypt_client_finished_handshake_message(
+        &mut client_handshake_decryptor,
+        &client_finished_record,
+    )
+    .map_err(|err| stage_error(RealityAcceptedStage::ClientFinishedRead, err))?;
 
-    info!("REALITY TLS 1.3 handshake: verifying client Finished");
-    let verified = state.verify_client_finished_message(&client_finished_message)?;
+    info!(
+        stage = stages::TLS13_CLIENT_FINISHED_READ,
+        client_finished_message_len = client_finished_message.len(),
+        "decrypted client Finished handshake message"
+    );
+
+    let verified = state
+        .verify_client_finished_message(&client_finished_message)
+        .map_err(|err| stage_error(RealityAcceptedStage::ClientFinishedVerify, err))?;
     if !verified {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            "TLS 1.3 client Finished verification failed",
+        return Err(stage_error(
+            RealityAcceptedStage::ClientFinishedVerify,
+            Error::new(
+                ErrorKind::InvalidData,
+                "client Finished verification failed",
+            ),
         ));
     }
 
-    info!("REALITY TLS 1.3 handshake: deriving application traffic secrets");
-    state.derive_application_secrets()?;
+    info!(
+        stage = stages::TLS13_CLIENT_FINISHED_VERIFIED,
+        cipher_suite = state.suite.name,
+        "client Finished verified"
+    );
+
+    state
+        .derive_application_secrets()
+        .map_err(|err| stage_error(RealityAcceptedStage::ApplicationSecrets, err))?;
+
+    info!(
+        stage = stages::TLS13_APPLICATION_SECRETS_DERIVED,
+        cipher_suite = state.suite.name,
+        "derived application traffic secrets"
+    );
 
     let application_secrets = state.application_secrets.as_ref().ok_or_else(|| {
-        Error::new(
-            ErrorKind::InvalidData,
-            "TLS 1.3 application secrets missing after derivation",
+        stage_error(
+            RealityAcceptedStage::ApplicationSecrets,
+            Error::new(
+                ErrorKind::InvalidData,
+                "application secrets missing after derivation",
+            ),
         )
     })?;
 
     let read_keys = derive_traffic_key(
         state.suite,
         &application_secrets.client_application_traffic_secret,
-    )?;
+    )
+    .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
     let write_keys = derive_traffic_key(
         state.suite,
         &application_secrets.server_application_traffic_secret,
-    )?;
-    let read_decryptor = Tls13RecordDecryptor::new(state.suite, read_keys)?;
-    let write_encryptor = Tls13RecordEncryptor::new(state.suite, write_keys)?;
+    )
+    .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
+    let read_decryptor = Tls13RecordDecryptor::with_traffic_secret(
+        state.suite,
+        read_keys,
+        application_secrets
+            .client_application_traffic_secret
+            .clone(),
+    )
+    .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
+    let write_encryptor = Tls13RecordEncryptor::with_traffic_secret(
+        state.suite,
+        write_keys,
+        application_secrets
+            .server_application_traffic_secret
+            .clone(),
+    )
+    .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
 
-    info!("REALITY TLS 1.3 handshake: complete, application stream ready");
+    info!(
+        stage = stages::TLS13_APPLICATION_STREAM_READY,
+        cipher_suite = state.suite.name,
+        sni = ?state.accepted.sni,
+        "application stream ready"
+    );
+
     Ok(RealityTls13ApplicationStream::new(
         stream,
         read_decryptor,
         write_encryptor,
     ))
+}
+
+fn debug_tls13_plaintext_enabled() -> bool {
+    std::env::var("RUST_XRAY_DEBUG_TLS13_PLAINTEXT")
+        .as_deref()
+        .ok()
+        .is_some_and(|value| value == "1")
+}
+
+fn hex_encode_diagnostics(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn decrypt_client_finished_handshake_message(
+    decryptor: &mut Tls13RecordDecryptor,
+    record: &TlsRecord,
+) -> std::io::Result<Vec<u8>> {
+    let encrypted_record_len = record.raw.len();
+    let sequence = decryptor.sequence;
+
+    let inner_plaintext = decryptor
+        .decrypt_record_payload(record)
+        .map_err(|err| client_finished_decrypt_error(encrypted_record_len, sequence, err))?;
+
+    if tls13_inner_plaintext_content_type(&inner_plaintext) == Some(TLS_RECORD_ALERT) {
+        let alert_bytes = tls13_inner_plaintext_body(&inner_plaintext).unwrap_or_default();
+        info!(
+            stage = stages::TLS13_CLIENT_FINISHED_READ,
+            inner_content_type = TLS_RECORD_ALERT,
+            alert_bytes_hex = hex_encode_diagnostics(&alert_bytes),
+            encrypted_record_len = encrypted_record_len,
+            sequence = sequence,
+            "decrypted client Finished candidate contains TLS alert"
+        );
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "client Finished candidate contains encrypted TLS alert",
+        ));
+    }
+
+    let handshake_message = parse_tls13_handshake_inner_plaintext(&inner_plaintext)
+        .map_err(|err| client_finished_decrypt_error(encrypted_record_len, sequence, err))?;
+
+    if handshake_message.first() != Some(&HANDSHAKE_TYPE_FINISHED) {
+        info!(
+            stage = stages::TLS13_CLIENT_FINISHED_READ,
+            inner_content_type = tls13_inner_plaintext_content_type(&inner_plaintext)
+                .unwrap_or(TLS_RECORD_HANDSHAKE),
+            handshake_type = handshake_message.first().copied(),
+            encrypted_record_len = encrypted_record_len,
+            sequence = sequence,
+            "decrypted client Finished candidate is not Finished handshake type"
+        );
+        if debug_tls13_plaintext_enabled() {
+            debug!(
+                stage = stages::TLS13_CLIENT_FINISHED_READ,
+                decrypted_bytes_hex = hex_encode_diagnostics(&handshake_message),
+                "decrypted client Finished candidate plaintext"
+            );
+        }
+    }
+
+    Ok(handshake_message)
+}
+
+fn client_finished_decrypt_error(encrypted_record_len: usize, sequence: u64, err: Error) -> Error {
+    Error::new(
+        err.kind(),
+        format!(
+            "client Finished decrypt failed (encrypted_record_len={encrypted_record_len}, sequence={sequence}): {err}"
+        ),
+    )
 }
 
 fn parse_finished_verify_data(
@@ -684,6 +889,7 @@ mod tests {
         assert!(state.server_finished_message.is_none());
         assert!(!state.client_finished_verified);
         assert!(state.application_secrets.is_none());
+        assert!(state.application_secret_transcript_hash.is_none());
     }
 
     #[test]
@@ -915,6 +1121,73 @@ mod tests {
     }
 
     #[test]
+    fn build_encrypted_server_handshake_records_uses_patched_certificate() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha512;
+
+        use crate::reality::tls13::derive_traffic_key;
+        use crate::reality::tls13::messages::HANDSHAKE_TYPE_CERTIFICATE;
+        use crate::reality::tls13::record_crypto::{
+            parse_tls13_handshake_inner_plaintext, Tls13RecordDecryptor,
+        };
+
+        let mut state = state_with_handshake_secrets();
+        let auth_key = state.accepted.auth.auth_key;
+        let server_handshake_traffic_secret = state
+            .handshake_secrets
+            .as_ref()
+            .expect("handshake secrets")
+            .server_handshake_traffic_secret
+            .clone();
+        let records = state
+            .build_encrypted_server_handshake_records()
+            .expect("valid encrypted handshake records");
+        let parsed = parse_tls_records(&records).expect("parsable encrypted records");
+        assert_eq!(parsed.len(), 4);
+
+        let traffic_keys = derive_traffic_key(state.suite, &server_handshake_traffic_secret)
+            .expect("traffic keys");
+        let mut decryptor =
+            Tls13RecordDecryptor::new(state.suite, traffic_keys).expect("valid decryptor");
+        decryptor
+            .decrypt_record_payload(&parsed[0])
+            .expect("decrypt EncryptedExtensions");
+        let certificate_inner = decryptor
+            .decrypt_record_payload(&parsed[1])
+            .expect("decrypt Certificate");
+        let certificate_message =
+            parse_tls13_handshake_inner_plaintext(&certificate_inner).expect("certificate message");
+
+        assert_eq!(certificate_message[0], HANDSHAKE_TYPE_CERTIFICATE);
+        let cert_der_len = u32::from_be_bytes([
+            0,
+            certificate_message[8],
+            certificate_message[9],
+            certificate_message[10],
+        ]) as usize;
+        let cert_der = &certificate_message[11..11 + cert_der_len];
+        let public_key_raw = ed25519_public_key_bytes_in_rcgen_der(cert_der);
+
+        let mut mac = Hmac::<Sha512>::new_from_slice(&auth_key).expect("valid HMAC key");
+        mac.update(&public_key_raw);
+        let expected_tail = mac.finalize().into_bytes();
+
+        assert_eq!(&cert_der[cert_der.len() - 64..], expected_tail.as_slice());
+    }
+
+    fn ed25519_public_key_bytes_in_rcgen_der(der: &[u8]) -> [u8; 32] {
+        const SUBJECT_PUBLIC_KEY_BIT_STRING: [u8; 3] = [0x03, 0x21, 0x00];
+        let start = der
+            .windows(SUBJECT_PUBLIC_KEY_BIT_STRING.len())
+            .position(|window| window == SUBJECT_PUBLIC_KEY_BIT_STRING)
+            .expect("Ed25519 subject public key BIT STRING")
+            + SUBJECT_PUBLIC_KEY_BIT_STRING.len();
+        der[start..start + 32]
+            .try_into()
+            .expect("Ed25519 public key is 32 bytes")
+    }
+
+    #[test]
     fn build_encrypted_server_handshake_records_non_empty() {
         let mut state = state_with_handshake_secrets();
         let records = state
@@ -1030,6 +1303,7 @@ mod tests {
 
         assert!(verified);
         assert!(state.client_finished_verified);
+        assert!(state.application_secret_transcript_hash.is_some());
     }
 
     #[test]
@@ -1047,6 +1321,7 @@ mod tests {
 
         assert!(!verified);
         assert!(!state.client_finished_verified);
+        assert!(state.application_secret_transcript_hash.is_none());
     }
 
     #[test]
@@ -1064,6 +1339,7 @@ mod tests {
             .expect("client Finished verification result");
         assert!(!verified);
         assert_eq!(state.transcript.len(), transcript_len_before);
+        assert!(state.application_secret_transcript_hash.is_none());
 
         let valid_finished = build_valid_client_finished_message(&state);
         let verified = state
@@ -1074,6 +1350,7 @@ mod tests {
             state.transcript.len(),
             transcript_len_before + valid_finished.len()
         );
+        assert!(state.application_secret_transcript_hash.is_some());
     }
 
     #[test]
@@ -1127,6 +1404,72 @@ mod tests {
     }
 
     #[test]
+    fn derive_application_secrets_uses_transcript_before_client_finished() {
+        let mut state = state_ready_for_server_finished();
+        state
+            .build_server_finished_message()
+            .expect("valid server Finished message");
+
+        let handshake_secret = state
+            .handshake_secrets
+            .as_ref()
+            .expect("handshake secrets")
+            .handshake_secret
+            .clone();
+        let transcript_hash_before = state.transcript.digest();
+        let expected_secrets = derive_application_traffic_secrets(
+            state.suite,
+            &handshake_secret,
+            &transcript_hash_before,
+        )
+        .expect("expected application secrets");
+
+        let client_finished = build_valid_client_finished_message(&state);
+        assert!(state
+            .verify_client_finished_message(&client_finished)
+            .expect("client Finished verification result"));
+
+        let transcript_hash_after = state.transcript.digest();
+        assert_ne!(transcript_hash_before, transcript_hash_after);
+
+        state
+            .derive_application_secrets()
+            .expect("valid application secret derivation");
+
+        let secrets = state
+            .application_secrets
+            .as_ref()
+            .expect("application secrets stored");
+        assert_eq!(secrets, &expected_secrets);
+
+        let wrong_secrets = derive_application_traffic_secrets(
+            state.suite,
+            &handshake_secret,
+            &transcript_hash_after,
+        )
+        .expect("secrets from post-client-finished transcript");
+        assert_ne!(secrets, &wrong_secrets);
+    }
+
+    #[test]
+    fn failed_client_finished_does_not_store_application_secret_transcript_hash() {
+        let mut state = state_ready_for_server_finished();
+        state
+            .build_server_finished_message()
+            .expect("valid server Finished message");
+        let mut invalid_finished = build_valid_client_finished_message(&state);
+        invalid_finished[7] ^= 0x01;
+
+        let verified = state
+            .verify_client_finished_message(&invalid_finished)
+            .expect("client Finished verification result");
+
+        assert!(!verified);
+        assert!(state.application_secret_transcript_hash.is_none());
+        assert!(!state.client_finished_verified);
+    }
+
+    #[test]
     fn derive_application_secrets_requires_verified_client_finished() {
         let mut state = state_ready_for_server_finished();
         state
@@ -1141,6 +1484,21 @@ mod tests {
     }
 
     #[test]
+    fn derive_application_secrets_requires_application_secret_transcript_hash() {
+        let mut state = state_ready_for_server_finished();
+        state
+            .build_server_finished_message()
+            .expect("valid server Finished message");
+        state.client_finished_verified = true;
+
+        let err = state.derive_application_secrets().unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("before client Finished"));
+        assert!(state.application_secrets.is_none());
+    }
+
+    #[test]
     fn derive_application_secrets_requires_handshake_secrets() {
         let mut state = state_with_prepared_server_hello();
         state.client_finished_verified = true;
@@ -1150,5 +1508,104 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert!(err.to_string().contains("handshake secrets"));
         assert!(state.application_secrets.is_none());
+    }
+
+    #[test]
+    fn decrypt_client_finished_handshake_message_reports_decrypt_failure_context() {
+        use crate::reality::tls13::record_crypto::Tls13RecordEncryptor;
+        use crate::reality::tls13::{tls13_cipher_suite, Tls13TrafficKeys, TLS_AES_128_GCM_SHA256};
+        use crate::tls::records::parse_tls_records;
+
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let encrypt_keys = Tls13TrafficKeys {
+            key: (0x10..0x20).collect(),
+            iv: (0x01..0x0d).collect(),
+        };
+        let decrypt_keys = Tls13TrafficKeys {
+            key: (0x20..0x30).collect(),
+            iv: (0x01..0x0d).collect(),
+        };
+
+        let mut encryptor =
+            Tls13RecordEncryptor::new(suite, encrypt_keys).expect("valid encryptor");
+        let record_bytes = encryptor
+            .encrypt_handshake_message(&[HANDSHAKE_TYPE_FINISHED, 0x00, 0x00, 0x20])
+            .expect("valid encrypted record");
+        let record = parse_tls_records(&record_bytes)
+            .expect("parsable record")
+            .swap_remove(0);
+
+        let mut decryptor =
+            Tls13RecordDecryptor::new(suite, decrypt_keys).expect("valid decryptor");
+        let err = decrypt_client_finished_handshake_message(&mut decryptor, &record).unwrap_err();
+
+        assert!(err.to_string().contains("client Finished decrypt failed"));
+        assert!(err.to_string().contains("encrypted_record_len="));
+        assert!(err.to_string().contains("sequence=0"));
+        assert!(!err.to_string().contains("101112131415161718191a1b1c1d1e1f"));
+    }
+
+    #[test]
+    fn decrypt_client_finished_handshake_message_accepts_non_finished_handshake_type() {
+        use crate::reality::tls13::record_crypto::Tls13RecordEncryptor;
+        use crate::reality::tls13::{tls13_cipher_suite, Tls13TrafficKeys, TLS_AES_128_GCM_SHA256};
+        use crate::tls::records::parse_tls_records;
+
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let keys = Tls13TrafficKeys {
+            key: (0x10..0x20).collect(),
+            iv: (0x01..0x0d).collect(),
+        };
+        let server_hello = vec![HANDSHAKE_TYPE_SERVER_HELLO, 0x00, 0x00, 0x01, 0x00];
+
+        let mut encryptor = Tls13RecordEncryptor::new(suite, keys.clone()).expect("encryptor");
+        let record_bytes = encryptor
+            .encrypt_handshake_message(&server_hello)
+            .expect("valid encrypted record");
+        let record = parse_tls_records(&record_bytes)
+            .expect("parsable record")
+            .swap_remove(0);
+
+        let mut decryptor = Tls13RecordDecryptor::new(suite, keys).expect("decryptor");
+        let decrypted =
+            decrypt_client_finished_handshake_message(&mut decryptor, &record).expect("decrypt");
+
+        assert_eq!(decrypted, server_hello);
+    }
+
+    #[test]
+    fn client_finished_decrypt_errors_do_not_include_secret_field_names() {
+        use crate::reality::tls13::record_crypto::Tls13RecordEncryptor;
+        use crate::reality::tls13::{tls13_cipher_suite, Tls13TrafficKeys, TLS_AES_128_GCM_SHA256};
+        use crate::tls::records::parse_tls_records;
+
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let encrypt_keys = Tls13TrafficKeys {
+            key: (0x10..0x20).collect(),
+            iv: (0x01..0x0d).collect(),
+        };
+        let decrypt_keys = Tls13TrafficKeys {
+            key: (0x20..0x30).collect(),
+            iv: (0x01..0x0d).collect(),
+        };
+
+        let mut encryptor =
+            Tls13RecordEncryptor::new(suite, encrypt_keys).expect("valid encryptor");
+        let record_bytes = encryptor
+            .encrypt_handshake_message(&[HANDSHAKE_TYPE_FINISHED, 0x00, 0x00, 0x20])
+            .expect("valid encrypted record");
+        let record = parse_tls_records(&record_bytes)
+            .expect("parsable record")
+            .swap_remove(0);
+
+        let mut decryptor =
+            Tls13RecordDecryptor::new(suite, decrypt_keys).expect("valid decryptor");
+        let err = decrypt_client_finished_handshake_message(&mut decryptor, &record).unwrap_err();
+        let message = err.to_string().to_ascii_lowercase();
+
+        assert!(!message.contains("privatekey"));
+        assert!(!message.contains("auth_key"));
+        assert!(!message.contains("traffic_secret"));
+        assert!(!message.contains("handshake_secret"));
     }
 }

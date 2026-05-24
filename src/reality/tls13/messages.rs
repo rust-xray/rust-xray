@@ -5,6 +5,10 @@ pub const HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS: u8 = 0x08;
 pub const HANDSHAKE_TYPE_CERTIFICATE: u8 = 0x0b;
 pub const HANDSHAKE_TYPE_CERTIFICATE_VERIFY: u8 = 0x0f;
 pub const HANDSHAKE_TYPE_FINISHED: u8 = 0x14;
+pub const HANDSHAKE_TYPE_KEY_UPDATE: u8 = 0x18;
+
+pub const KEY_UPDATE_NOT_REQUESTED: u8 = 0x00;
+pub const KEY_UPDATE_REQUESTED: u8 = 0x01;
 
 const MAX_HANDSHAKE_BODY_LEN: usize = 0x00ff_ffff;
 const MAX_SESSION_ID_ECHO_LEN: usize = 32;
@@ -70,6 +74,54 @@ pub fn build_handshake_message(handshake_type: u8, body: &[u8]) -> Result<Vec<u8
     message.extend_from_slice(&body_len.to_be_bytes()[1..]);
     message.extend_from_slice(body);
     Ok(message)
+}
+
+pub fn build_key_update_message(request_update: u8) -> Result<Vec<u8>> {
+    if request_update != KEY_UPDATE_NOT_REQUESTED && request_update != KEY_UPDATE_REQUESTED {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("TLS 1.3 KeyUpdate request_update must be 0 or 1, got {request_update}"),
+        ));
+    }
+
+    build_handshake_message(HANDSHAKE_TYPE_KEY_UPDATE, &[request_update])
+}
+
+pub fn parse_key_update_handshake(message: &[u8]) -> Result<u8> {
+    if message.first() != Some(&HANDSHAKE_TYPE_KEY_UPDATE) {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "TLS 1.3 KeyUpdate handshake must start with type 0x18",
+        ));
+    }
+
+    if message.len() != 5 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "TLS 1.3 KeyUpdate handshake must be 5 bytes, got {}",
+                message.len()
+            ),
+        ));
+    }
+
+    let body_len = u32::from_be_bytes([0, message[1], message[2], message[3]]) as usize;
+    if body_len != 1 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("TLS 1.3 KeyUpdate handshake body must be 1 byte, got {body_len}"),
+        ));
+    }
+
+    let request_update = message[4];
+    if request_update != KEY_UPDATE_NOT_REQUESTED && request_update != KEY_UPDATE_REQUESTED {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("TLS 1.3 KeyUpdate request_update must be 0 or 1, got {request_update}"),
+        ));
+    }
+
+    Ok(request_update)
 }
 
 fn invalid_input(message: impl Into<String>) -> Error {
@@ -231,6 +283,24 @@ mod tests {
 
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert!(err.to_string().contains("session_id_echo too long"));
+    }
+
+    #[test]
+    fn build_key_update_message_encodes_request_update_byte() {
+        let message = build_key_update_message(KEY_UPDATE_NOT_REQUESTED).unwrap();
+        assert_eq!(message, vec![0x18, 0x00, 0x00, 0x01, 0x00]);
+
+        let requested = build_key_update_message(KEY_UPDATE_REQUESTED).unwrap();
+        assert_eq!(requested, vec![0x18, 0x00, 0x00, 0x01, 0x01]);
+    }
+
+    #[test]
+    fn parse_key_update_handshake_roundtrips() {
+        let message = build_key_update_message(KEY_UPDATE_REQUESTED).unwrap();
+        assert_eq!(
+            parse_key_update_handshake(&message).expect("valid key update"),
+            KEY_UPDATE_REQUESTED
+        );
     }
 
     #[test]

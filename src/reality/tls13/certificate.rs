@@ -27,6 +27,7 @@ const TLS13_CERTIFICATE_VERIFY_CONTEXT: &[u8] = b"TLS 1.3, server CertificateVer
 pub struct RealityEphemeralCertificate {
     pub der: Vec<u8>,
     pub public_key_der: Vec<u8>,
+    pub public_key_raw: [u8; 32],
     pub signing_key: SigningKey,
 }
 
@@ -37,6 +38,10 @@ impl fmt::Debug for RealityEphemeralCertificate {
             .field(
                 "public_key_der",
                 &format!("<{} bytes>", self.public_key_der.len()),
+            )
+            .field(
+                "public_key_raw",
+                &format!("<{} bytes>", self.public_key_raw.len()),
             )
             .field("signing_key", &"<redacted>")
             .finish()
@@ -98,27 +103,12 @@ pub fn generate_reality_ephemeral_ed25519_certificate(
         .map_err(|e| rcgen_error("self-signed certificate generation failed", e))?;
 
     let der = cert.der().to_vec();
-
-    // TODO(upstream REALITY): once the signedCert signature offset is verified for this DER
-    // layout, call `crate::reality::certificate::patch_reality_certificate_der` from the
-    // accepted-path integration site (requires auth_key + ClientHello/ServerHello messages):
-    //
-    // ```ignore
-    // patch_reality_certificate_der(
-    //     &mut der,
-    //     &public_key_der,
-    //     RealityCertificatePatchInput {
-    //         auth_key,
-    //         client_hello_message,
-    //         server_hello_message,
-    //         mldsa65_seed: None,
-    //     },
-    // )?;
-    // ```
+    let public_key_raw = signing_key.verifying_key().to_bytes();
 
     Ok(RealityEphemeralCertificate {
         der,
         public_key_der,
+        public_key_raw,
         signing_key,
     })
 }
@@ -206,6 +196,19 @@ mod tests {
 
         assert!(!cert.der.is_empty());
         assert!(!cert.public_key_der.is_empty());
+    }
+
+    #[test]
+    fn generate_reality_ephemeral_ed25519_certificate_exposes_raw_public_key() {
+        let cert = generate_reality_ephemeral_ed25519_certificate(Some("example.com"))
+            .expect("valid ephemeral certificate");
+
+        assert_eq!(cert.public_key_raw.len(), 32);
+        assert!(!cert.der.is_empty());
+        assert_eq!(
+            cert.public_key_raw,
+            cert.signing_key.verifying_key().to_bytes()
+        );
     }
 
     #[test]

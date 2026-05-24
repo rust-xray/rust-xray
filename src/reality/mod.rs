@@ -7,11 +7,12 @@ mod server;
 mod session;
 mod short_id;
 mod sni;
+pub(crate) mod stages;
 pub mod tls13;
 mod version;
 
 pub use auth::RealityAuthResult;
-pub use certificate::{patch_reality_certificate_der, RealityCertificatePatchInput};
+pub use certificate::{certificate_der_has_ed25519_signature_tail, patch_reality_certificate_der};
 pub use decision::{
     inspect_reality_client_hello, RealityAccepted, RealityDecision, RealityInspectConfig,
 };
@@ -32,4 +33,5 @@ pub use session::{
 };
 pub use short_id::parse_short_id_hex;
 pub use sni::{extract_sni_hostname, server_name_allowed};
+pub use stages::{stage_error, RealityAcceptedStage};
 pub use version::{parse_reality_client_version, version_ge, version_le};
