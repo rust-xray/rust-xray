@@ -327,17 +327,12 @@ enum_builder! {
     ///
     /// [RFC 9180 Section 7.2]: <https://datatracker.ietf.org/doc/html/rfc9180#name-key-derivation-functions-kd>
     @U16
+    @WithDefault
     pub enum HpkeKdf {
+        #[default]
         HKDF_SHA256 => 0x0001,
         HKDF_SHA384 => 0x0002,
         HKDF_SHA512 => 0x0003,
-    }
-}
-
-impl Default for HpkeKdf {
-    // TODO(XXX): revisit the default configuration. This is just what Cloudflare ships right now.
-    fn default() -> Self {
-        Self::HKDF_SHA256
     }
 }
 
@@ -347,7 +342,9 @@ enum_builder! {
     ///
     /// [RFC 9180 Section 7.3]: <https://datatracker.ietf.org/doc/html/rfc9180#name-authenticated-encryption-wi>
     @U16
+    @WithDefault
     pub enum HpkeAead {
+        #[default]
         AES_128_GCM => 0x0001,
         AES_256_GCM => 0x0002,
         CHACHA20_POLY_1305 => 0x0003,
@@ -365,13 +362,6 @@ impl HpkeAead {
             Self::AES_128_GCM | Self::AES_256_GCM | Self::CHACHA20_POLY_1305 => Some(16),
             _ => None,
         }
-    }
-}
-
-impl Default for HpkeAead {
-    // TODO(XXX): revisit the default configuration. This is just what Cloudflare ships right now.
-    fn default() -> Self {
-        Self::AES_128_GCM
     }
 }
 

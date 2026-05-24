@@ -394,11 +394,10 @@ mod tests {
             let mut stream =
                 RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
 
-            let written = stream
+            stream
                 .write_all(b"server response")
                 .await
                 .expect("write plaintext");
-            assert_eq!(written, ());
 
             let mut encrypted = vec![0u8; 4096];
             let read = client_io

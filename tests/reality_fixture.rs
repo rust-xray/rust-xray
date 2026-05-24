@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use rust_xray::codec::{Codec, Reader};
 use rust_xray::protocol::structs::ClientHelloPayload;
 use rust_xray::reality::{
-    inspect_reality_client_hello, parse_reality_client_version, parse_short_id_hex,
-    RealityDecision, RealityInspectConfig,
+    format_reality_short_id_hex, inspect_reality_client_hello, parse_reality_client_version,
+    parse_short_id_hex, RealityDecision, RealityInspectConfig,
 };
 use rust_xray::tls::parse_client_hello_record_bytes;
 
@@ -33,12 +33,8 @@ fn read_trimmed(path: &Path) -> std::io::Result<String> {
     Ok(contents.trim().to_string())
 }
 
-fn discover_fixture_cases() -> Vec<PathBuf> {
-    let root = fixture_root();
-    let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
+fn discover_fixture_cases(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = fs::read_dir(root)?;
 
     let mut cases = Vec::new();
     for entry in entries.flatten() {
@@ -53,7 +49,7 @@ fn discover_fixture_cases() -> Vec<PathBuf> {
     }
 
     cases.sort();
-    cases
+    Ok(cases)
 }
 
 fn load_fixture_case(case_dir: &Path) -> std::io::Result<FixtureCase> {
@@ -75,6 +71,7 @@ fn load_fixture_case(case_dir: &Path) -> std::io::Result<FixtureCase> {
         })?;
 
     Ok(FixtureCase {
+        case_dir: case_dir.to_path_buf(),
         name: case_dir
             .file_name()
             .and_then(|s| s.to_str())
@@ -90,6 +87,7 @@ fn load_fixture_case(case_dir: &Path) -> std::io::Result<FixtureCase> {
 }
 
 struct FixtureCase {
+    case_dir: PathBuf,
     name: String,
     client_hello: Vec<u8>,
     private_key: String,
@@ -99,21 +97,33 @@ struct FixtureCase {
     expected_unix_time: u32,
 }
 
-fn run_fixture_case(case: &FixtureCase) -> std::io::Result<()> {
-    let record = parse_client_hello_record_bytes(&case.client_hello)?;
+fn run_fixture_case(case: &FixtureCase) -> Result<(), String> {
+    let label = format!("{} ({})", case.name, case.case_dir.display());
 
-    let mut rd = Reader::init(&record.handshake_payload);
-    let hello = ClientHelloPayload::read(&mut rd).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("ClientHello parse failed for fixture {}: {e:?}", case.name),
-        )
+    let record = parse_client_hello_record_bytes(&case.client_hello).map_err(|err| {
+        format!("{label}: failed to parse client_hello.bin as TLS ClientHello record: {err}")
     })?;
 
-    let short_id = parse_short_id_hex(&case.expected_short_id_hex)?;
-    let expected_version = parse_reality_client_version(&case.expected_client_version)?;
+    let mut rd = Reader::init(&record.handshake_payload);
+    let hello = ClientHelloPayload::read(&mut rd)
+        .map_err(|err| format!("{label}: failed to decode ClientHello payload: {err:?}"))?;
+
+    let configured_short_id = parse_short_id_hex(&case.expected_short_id_hex).map_err(|err| {
+        format!(
+            "{label}: expected_short_id.hex is invalid: {err} (value={:?})",
+            case.expected_short_id_hex
+        )
+    })?;
+    let expected_version =
+        parse_reality_client_version(&case.expected_client_version).map_err(|err| {
+            format!(
+                "{label}: expected_client_version.txt is invalid: {err} (value={:?})",
+                case.expected_client_version
+            )
+        })?;
+
     let server_names = vec![case.expected_sni.clone()];
-    let short_ids = vec![short_id];
+    let short_ids = vec![configured_short_id];
 
     let inspect_cfg = RealityInspectConfig {
         private_key: &case.private_key,
@@ -125,36 +135,52 @@ fn run_fixture_case(case: &FixtureCase) -> std::io::Result<()> {
         now_unix_ms: None,
     };
 
-    let result = inspect_reality_client_hello(&hello, &record.handshake_message, inspect_cfg)?;
+    let result = inspect_reality_client_hello(&hello, &record.handshake_message, inspect_cfg)
+        .map_err(|err| format!("{label}: REALITY inspect failed: {err}"))?;
 
-    match result {
-        RealityDecision::Accepted(accepted) => {
-            assert_eq!(
-                accepted.sni.as_deref(),
-                Some(case.expected_sni.as_str()),
-                "fixture {}",
-                case.name
-            );
-            assert_eq!(
-                accepted.client.client_version, expected_version,
-                "fixture {}",
-                case.name
-            );
-            assert_eq!(
-                accepted.client.unix_time, case.expected_unix_time,
-                "fixture {}",
-                case.name
-            );
-            Ok(())
+    let accepted = match result {
+        RealityDecision::Accepted(accepted) => accepted,
+        RealityDecision::Fallback => {
+            return Err(format!(
+                "{label}: REALITY inspect returned Fallback (auth/key mismatch, shortId, SNI, or policy failure)"
+            ));
         }
-        RealityDecision::Fallback => Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "fixture {}: inspect_reality_client_hello returned Fallback",
-                case.name
-            ),
-        )),
+    };
+
+    let sni = accepted
+        .sni
+        .as_deref()
+        .ok_or_else(|| format!("{label}: decrypted ClientHello missing SNI"))?;
+    if sni != case.expected_sni {
+        return Err(format!(
+            "{label}: SNI mismatch: expected {:?}, got {:?}",
+            case.expected_sni, sni
+        ));
     }
+
+    let short_id_hex = format_reality_short_id_hex(&accepted.client.short_id);
+    if short_id_hex != case.expected_short_id_hex {
+        return Err(format!(
+            "{label}: short_id mismatch: expected {:?}, got {:?}",
+            case.expected_short_id_hex, short_id_hex
+        ));
+    }
+
+    if accepted.client.client_version != expected_version {
+        return Err(format!(
+            "{label}: client_version mismatch: expected {:?}, got {:?}",
+            expected_version, accepted.client.client_version
+        ));
+    }
+
+    if accepted.client.unix_time != case.expected_unix_time {
+        return Err(format!(
+            "{label}: unix_time mismatch: expected {}, got {}",
+            case.expected_unix_time, accepted.client.unix_time
+        ));
+    }
+
+    Ok(())
 }
 
 #[test]
@@ -170,30 +196,28 @@ fn reality_fixture_readme_and_directory_exist() {
 
 #[test]
 fn discover_fixture_cases_returns_empty_when_no_cases_present() {
-    let cases = discover_fixture_cases();
-    assert!(
-        cases.is_empty(),
-        "expected no complete fixture cases in a fresh checkout, found: {:?}",
-        cases
-    );
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let cases = discover_fixture_cases(temp.path()).expect("discover cases");
+    assert!(cases.is_empty());
 }
 
 #[test]
-#[ignore = "requires real Xray REALITY client fixtures; see tests/fixtures/reality/README.md"]
 fn inspect_reality_client_hello_from_xray_fixture() {
-    let cases = discover_fixture_cases();
+    let cases = discover_fixture_cases(&fixture_root()).expect("discover cases");
     if cases.is_empty() {
-        eprintln!(
-            "no complete fixture cases under {}; add a subdirectory with required files (see README.md)",
-            fixture_root().display()
-        );
-        return;
+        panic!("no fixture cases found; see tests/fixtures/reality/README.md");
     }
 
     for case_dir in cases {
-        let case = load_fixture_case(&case_dir)
-            .unwrap_or_else(|e| panic!("failed to load fixture {}: {e}", case_dir.display()));
-        run_fixture_case(&case)
-            .unwrap_or_else(|e| panic!("fixture case {} failed: {e}", case.name));
+        eprintln!("running fixture case: {}", case_dir.display());
+
+        let case = load_fixture_case(&case_dir).unwrap_or_else(|err| {
+            panic!(
+                "failed to load fixture {}: {err}",
+                case_dir.file_name().unwrap_or_default().to_string_lossy()
+            );
+        });
+
+        run_fixture_case(&case).unwrap_or_else(|err| panic!("{err}"));
     }
 }

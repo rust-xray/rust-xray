@@ -1,25 +1,56 @@
 /// A macro which defines an enum type.
 macro_rules! enum_builder {
+    ($(#[$comment:meta])* @U8 @WithDefault $($enum:tt)+) => {
+        enum_builder!(u8: @WithDefault $(#[$comment])* $($enum)+);
+    };
     ($(#[$comment:meta])* @U8 $($enum:tt)+) => {
         enum_builder!(u8: $(#[$comment])* $($enum)+);
+    };
+    ($(#[$comment:meta])* @U16 @WithDefault $($enum:tt)+) => {
+        enum_builder!(u16: @WithDefault $(#[$comment])* $($enum)+);
     };
     ($(#[$comment:meta])* @U16 $($enum:tt)+) => {
         enum_builder!(u16: $(#[$comment])* $($enum)+);
     };
     (
+        $uint:ty: @WithDefault
+        $(#[$comment:meta])*
+        $enum_vis:vis enum $enum_name:ident
+        { $( $(#[$var_attrs:meta])* $enum_var: ident => $enum_val: expr ),* $(,)? }
+    ) => {
+        $(#[$comment])*
+        #[non_exhaustive]
+        #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
+        $enum_vis enum $enum_name {
+            $( $(#[$var_attrs])* $enum_var),*
+            ,Unknown($uint)
+        }
+
+        enum_builder!(@impls $uint, $enum_vis, $enum_name, $( $enum_var => $enum_val ),*);
+    };
+    (
         $uint:ty:
         $(#[$comment:meta])*
         $enum_vis:vis enum $enum_name:ident
-        { $( $enum_var: ident => $enum_val: expr ),* $(,)? }
+        { $( $(#[$var_attrs:meta])* $enum_var: ident => $enum_val: expr ),* $(,)? }
     ) => {
         $(#[$comment])*
         #[non_exhaustive]
         #[derive(Debug, PartialEq, Eq, Clone, Copy)]
         $enum_vis enum $enum_name {
-            $( $enum_var),*
+            $( $(#[$var_attrs])* $enum_var),*
             ,Unknown($uint)
         }
 
+        enum_builder!(@impls $uint, $enum_vis, $enum_name, $( $enum_var => $enum_val ),*);
+    };
+    (
+        @impls
+        $uint:ty,
+        $enum_vis:vis,
+        $enum_name:ident,
+        $( $enum_var: ident => $enum_val: expr ),* $(,)?
+    ) => {
         impl $enum_name {
             // NOTE(allow) generated irrespective if there are callers
             #[allow(dead_code)]

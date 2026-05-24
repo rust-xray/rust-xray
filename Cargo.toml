@@ -24,4 +24,6 @@ rcgen = "0.13"
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 subtle = "2"
 
+[dev-dependencies]
+tempfile = "3"
 

@@ -1,6 +1,7 @@
 mod auth;
 mod certificate;
 mod decision;
+mod fixture;
 pub mod handshake;
 mod server;
 mod session;
@@ -13,6 +14,12 @@ pub use auth::RealityAuthResult;
 pub use certificate::{patch_reality_certificate_der, RealityCertificatePatchInput};
 pub use decision::{
     inspect_reality_client_hello, RealityAccepted, RealityDecision, RealityInspectConfig,
+};
+pub use fixture::{
+    decode_reality_fixture_client_hello, format_reality_client_version,
+    format_reality_short_id_hex, reality_fixture_expected_metadata,
+    write_reality_fixture_expected_files, RealityFixtureExpectedMetadata,
+    RealityFixtureSessionResult,
 };
 pub use handshake::{
     extract_observed_server_hello, fetch_dest_handshake, generate_partial_tls13_handshake,

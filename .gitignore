@@ -1,2 +1,5 @@
 /target
 .idea
+
+# Local REALITY fixture captures (private keys; do not commit)
+tests/fixtures/reality/local-*/

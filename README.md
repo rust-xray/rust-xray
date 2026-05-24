@@ -146,7 +146,7 @@ Developer documentation: **[docs/reality-accepted-path.md](docs/reality-accepted
 ### Tests
 
 289+ unit tests: config, TLS, REALITY auth/policy, TLS 1.3 primitives, VLESS,
-freedom outbound, cert patch stub, stream adapter. One integration test ignored.
+freedom outbound, cert patch stub, stream adapter. REALITY fixture interop test (`basic-xray`).
 
 ## Policy validation matrix
 
@@ -182,6 +182,20 @@ cargo build
 cargo test
 cargo clippy --all-targets
 ```
+
+With `make` installed, the same workflow is available as Makefile targets:
+
+```bash
+make test          # cargo test
+make build         # cargo build
+make fixture-test  # REALITY fixture integration test
+make fixture-decode       # decode tests/fixtures/reality/basic-xray
+make fixture-decode-write # decode + write expected_* (--force)
+make capture-clienthello  # TCP captor → /tmp/client_hello.bin
+```
+
+Fixture capture details: **[tests/fixtures/reality/README.md](tests/fixtures/reality/README.md)**.
+Semi-automated setup (requires exported keys): `bash scripts/create_reality_fixture.sh`.
 
 Release-сборка:
 

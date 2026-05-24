@@ -252,7 +252,7 @@ mod tests {
         let cert = generate_reality_ephemeral_ed25519_certificate(Some("example.com"))
             .expect("valid ephemeral certificate");
         let certificate_der = cert.der.clone();
-        let message = build_tls13_certificate_message(&[certificate_der.clone()])
+        let message = build_tls13_certificate_message(std::slice::from_ref(&certificate_der))
             .expect("valid certificate message");
 
         let certificate_list_len =

@@ -79,12 +79,7 @@ pub struct VlessAuthenticatedClient {
 }
 
 pub fn is_supported_vless_flow(flow: Option<&str>) -> bool {
-    match flow {
-        None => true,
-        Some("") => true,
-        Some("xtls-rprx-vision") => true,
-        _ => false,
-    }
+    matches!(flow, None | Some("") | Some("xtls-rprx-vision"))
 }
 
 pub fn authenticate_vless_client(
