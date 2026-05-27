@@ -195,4 +195,28 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert_eq!(cert, original);
     }
+
+    #[test]
+    fn patch_reality_certificate_der_with_mode_mldsa65_does_not_mutate_cert_der() {
+        let original = vec![0x5a; 512];
+        let mut cert = original.clone();
+        let public_key = [0x31; 32];
+        let auth_key = [0x42; 32];
+        let client_hello = [0x01, 0x02, 0x03, 0x04];
+        let server_hello = [0x05, 0x06, 0x07, 0x08];
+
+        let err = patch_reality_certificate_der_with_mode(RealityCertificatePatchInput {
+            cert_der: &mut cert,
+            ed25519_public_key: &public_key,
+            auth_key: &auth_key,
+            mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
+                client_hello_original: &client_hello,
+                server_hello_original: &server_hello,
+            },
+        })
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(cert, original);
+    }
 }

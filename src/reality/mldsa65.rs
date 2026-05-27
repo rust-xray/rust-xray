@@ -24,7 +24,7 @@ impl Mldsa65Seed {
 
 impl std::fmt::Debug for Mldsa65Seed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Mldsa65Seed(<redacted>)")
+        f.write_str("Mldsa65Seed(redacted)")
     }
 }
 
@@ -39,7 +39,7 @@ impl Mldsa65VerifyKey {
 
 impl std::fmt::Debug for Mldsa65VerifyKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Mldsa65VerifyKey(<redacted>)")
+        f.write_str("Mldsa65VerifyKey(redacted)")
     }
 }
 
@@ -199,8 +199,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let debug = format!("{seed:?}");
+        assert_eq!(debug, "Mldsa65Seed(redacted)");
         assert!(debug.contains("redacted"));
         assert!(!debug.contains(VALID_SEED_B64));
+        assert!(!debug.contains("0, 1, 2"));
     }
 
     #[test]
@@ -257,8 +259,17 @@ mod tests {
         let verify_b64 = b64url_no_pad(&vec![0x42; MLDSA65_VERIFY_KEY_LEN]);
         let verify = decode_mldsa65_verify_key(&verify_b64).unwrap();
         let debug = format!("{verify:?}");
+        assert_eq!(debug, "Mldsa65VerifyKey(redacted)");
         assert!(debug.contains("redacted"));
         assert!(!debug.contains(&verify_b64));
+        assert!(!debug.contains("66"));
+    }
+
+    #[test]
+    fn decode_mldsa65_verify_key_rejects_empty_string() {
+        let err = decode_mldsa65_verify_key("").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("must not be empty"));
     }
 
     #[test]
@@ -286,5 +297,36 @@ mod tests {
         let verify_b64 = b64url_no_pad(&vec![0x01; MLDSA65_VERIFY_KEY_LEN]);
         let verify = decode_mldsa65_verify_key(&verify_b64).unwrap();
         assert_eq!(verify.as_bytes().len(), MLDSA65_VERIFY_KEY_LEN);
+    }
+
+    #[test]
+    fn build_reality_mldsa65_message_matches_manual_hmac() {
+        let auth_key = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x00, 0x01, 0x02, 0x03,
+            0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x00, 0x01,
+        ];
+        let ed25519_public_key = [
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x10, 0x11, 0x12, 0x13,
+            0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x10, 0x11,
+        ];
+        let client_hello_original = [0x01, 0x02, 0x03, 0x04];
+        let server_hello_original = [0x02, 0x03, 0x04, 0x05];
+
+        let actual = build_reality_mldsa65_message(
+            &auth_key,
+            &ed25519_public_key,
+            &client_hello_original,
+            &server_hello_original,
+        );
+
+        let mut mac = Hmac::<Sha512>::new_from_slice(&auth_key).expect("valid HMAC key");
+        mac.update(&ed25519_public_key);
+        mac.update(&client_hello_original);
+        mac.update(&server_hello_original);
+        let expected: [u8; 64] = mac.finalize().into_bytes().into();
+
+        assert_eq!(actual, expected);
     }
 }
