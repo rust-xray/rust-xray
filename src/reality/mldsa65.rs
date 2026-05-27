@@ -1,4 +1,6 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use hmac::{Hmac, Mac};
+use sha2::Sha512;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const MLDSA65_SEED_LEN: usize = 32;
@@ -108,6 +110,20 @@ pub fn decode_mldsa65_seed(
                 ),
             )
         })
+}
+
+pub fn build_reality_mldsa65_message(
+    auth_key: &[u8; 32],
+    ed25519_public_key: &[u8; 32],
+    client_hello_original: &[u8],
+    server_hello_original: &[u8],
+) -> [u8; 64] {
+    let mut mac = Hmac::<Sha512>::new_from_slice(auth_key)
+        .expect("HMAC-SHA512 accepts 32-byte REALITY auth keys");
+    mac.update(ed25519_public_key);
+    mac.update(client_hello_original);
+    mac.update(server_hello_original);
+    mac.finalize().into_bytes().into()
 }
 
 /// Stub for future REALITY ML-DSA-65 certificate extension signing.

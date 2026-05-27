@@ -63,6 +63,21 @@ answer whether Rust-derived ML-DSA-65 key encoding is byte-compatible with
 This is not runtime integration. The accepted REALITY path, certificate patch
 behavior, and ML-DSA-65 certificate extension signing remain unchanged.
 
+## Offline sign/verify check
+
+The offline message helper builds the REALITY ML-DSA-65 message as
+`HMAC-SHA512(auth_key, ed25519_public_key || raw ClientHello || raw ServerHello)`.
+This produces the 64-byte digest that upstream signs before embedding the
+ML-DSA-65 signature in the certificate extension.
+
+Signing and verification helpers are available only with the
+`reality-mldsa65-crypto` feature. They are test/compatibility tools for checking
+RustCrypto behavior against upstream-derived seed and verify-key fixtures.
+
+Runtime certificate patching does **not** use this code yet.
+`RealityCertificatePatchMode::HmacPlusMldsa65` and the live-safe certificate
+extension signing API still return `Unsupported`.
+
 ## Non-goals (hard constraints for follow-up work)
 
 The following must **not** change until explicitly scoped and tested:
