@@ -33,9 +33,9 @@ pub use handshake::{
     PatchedRealityHandshake, RealityDestHandshake, RealityObservedServerHello,
 };
 pub use mldsa65::{
-    decode_mldsa65_seed, sign_reality_cert_extension_stub, Mldsa65Seed,
-    MLDSA65_CERT_EXTENSION_VALUE_LEN, MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET, MLDSA65_SEED_LEN,
-    MLDSA65_VERIFY_KEY_LEN,
+    decode_mldsa65_seed, decode_mldsa65_verify_key, sign_reality_cert_extension_stub, Mldsa65Seed,
+    Mldsa65VerifyKey, MLDSA65_CERT_EXTENSION_VALUE_LEN, MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET,
+    MLDSA65_SEED_LEN, MLDSA65_VERIFY_KEY_LEN,
 };
 pub use server::handle_accepted_reality_client;
 pub use session::{

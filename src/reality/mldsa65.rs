@@ -25,6 +25,50 @@ impl std::fmt::Debug for Mldsa65Seed {
     }
 }
 
+#[derive(Clone)]
+pub struct Mldsa65VerifyKey(Vec<u8>);
+
+impl Mldsa65VerifyKey {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Mldsa65VerifyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Mldsa65VerifyKey(<redacted>)")
+    }
+}
+
+pub fn decode_mldsa65_verify_key(value: &str) -> std::io::Result<Mldsa65VerifyKey> {
+    if value.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "mldsa65Verify must not be empty",
+        ));
+    }
+
+    let decoded = URL_SAFE_NO_PAD.decode(value).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid mldsa65Verify base64: {e}"),
+        )
+    })?;
+
+    if decoded.len() != MLDSA65_VERIFY_KEY_LEN {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "invalid mldsa65Verify length: expected {} bytes, got {}",
+                MLDSA65_VERIFY_KEY_LEN,
+                decoded.len()
+            ),
+        ));
+    }
+
+    Ok(Mldsa65VerifyKey(decoded))
+}
+
 pub fn decode_mldsa65_seed(
     seed: Option<&str>,
     private_key: &str,
@@ -183,5 +227,45 @@ mod tests {
         let err = decode_mldsa65_seed(Some(TEST_PRIVATE_KEY), TEST_PRIVATE_KEY).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("must not equal privateKey"));
+    }
+
+    fn b64url_no_pad(bytes: &[u8]) -> String {
+        URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    #[test]
+    fn mldsa65_verify_key_debug_does_not_expose_bytes() {
+        let verify_b64 = b64url_no_pad(&vec![0x42; MLDSA65_VERIFY_KEY_LEN]);
+        let verify = decode_mldsa65_verify_key(&verify_b64).unwrap();
+        let debug = format!("{verify:?}");
+        assert!(debug.contains("redacted"));
+        assert!(!debug.contains(&verify_b64));
+    }
+
+    #[test]
+    fn decode_mldsa65_verify_key_rejects_invalid_base64() {
+        let err = decode_mldsa65_verify_key("not-valid-base64!!!").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("invalid mldsa65Verify base64"));
+    }
+
+    #[test]
+    fn decode_mldsa65_verify_key_rejects_wrong_lengths() {
+        let verify_1951 = b64url_no_pad(&vec![0x01; MLDSA65_VERIFY_KEY_LEN - 1]);
+        let err = decode_mldsa65_verify_key(&verify_1951).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("expected 1952 bytes, got 1951"));
+
+        let verify_1953 = b64url_no_pad(&vec![0x01; MLDSA65_VERIFY_KEY_LEN + 1]);
+        let err = decode_mldsa65_verify_key(&verify_1953).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("expected 1952 bytes, got 1953"));
+    }
+
+    #[test]
+    fn decode_mldsa65_verify_key_accepts_1952_bytes() {
+        let verify_b64 = b64url_no_pad(&vec![0x01; MLDSA65_VERIFY_KEY_LEN]);
+        let verify = decode_mldsa65_verify_key(&verify_b64).unwrap();
+        assert_eq!(verify.as_bytes().len(), MLDSA65_VERIFY_KEY_LEN);
     }
 }
