@@ -5,6 +5,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const MLDSA65_SEED_LEN: usize = 32;
 pub const MLDSA65_VERIFY_KEY_LEN: usize = 1952;
+pub const MLDSA65_SIGNATURE_LEN: usize = 3309;
 pub const MLDSA65_CERT_EXTENSION_VALUE_LEN: usize = 3309;
 pub const MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET: usize = 126;
 
@@ -157,6 +158,7 @@ mod tests {
     fn mldsa65_constants_match_expected_lengths() {
         assert_eq!(MLDSA65_SEED_LEN, 32);
         assert_eq!(MLDSA65_VERIFY_KEY_LEN, 1952);
+        assert_eq!(MLDSA65_SIGNATURE_LEN, 3309);
         assert_eq!(MLDSA65_CERT_EXTENSION_VALUE_LEN, 3309);
     }
 
@@ -164,6 +166,7 @@ mod tests {
     fn mldsa65_extension_constants_match_upstream_layout() {
         assert_eq!(MLDSA65_SEED_LEN, 32);
         assert_eq!(MLDSA65_VERIFY_KEY_LEN, 1952);
+        assert_eq!(MLDSA65_SIGNATURE_LEN, MLDSA65_CERT_EXTENSION_VALUE_LEN);
         assert_eq!(MLDSA65_CERT_EXTENSION_VALUE_LEN, 3309);
         assert_eq!(MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET, 126);
     }

@@ -78,6 +78,20 @@ Runtime certificate patching does **not** use this code yet.
 `RealityCertificatePatchMode::HmacPlusMldsa65` and the live-safe certificate
 extension signing API still return `Unsupported`.
 
+## Offline certificate DER patcher
+
+The offline certificate patcher first applies the legacy REALITY HMAC tail patch
+with `patch_reality_certificate_der`, preserving compatibility with the existing
+HMAC-only certificate behavior. It then builds the ML-DSA-65 message as
+`HMAC-SHA512(auth_key, ed25519_public_key || raw ClientHello || raw ServerHello)`
+and writes the resulting ML-DSA-65 signature into the fixed REALITY certificate
+extension value at DER offset `126`.
+
+This patcher is an offline/test-only API available only with the
+`reality-mldsa65-crypto` feature. The live
+`RealityCertificatePatchMode::HmacPlusMldsa65` path is still not enabled and may
+continue to return `Unsupported`.
+
 ## Non-goals (hard constraints for follow-up work)
 
 The following must **not** change until explicitly scoped and tested:

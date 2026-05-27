@@ -2,6 +2,15 @@
 
 use ml_dsa::{Keypair, MlDsa65, Signature, SignatureEncoding, Signer, SigningKey, Verifier};
 
+pub struct RealityMldsa65CertPatchInput<'a> {
+    pub cert_der: &'a mut [u8],
+    pub auth_key: &'a [u8; 32],
+    pub ed25519_public_key: &'a [u8; 32],
+    pub client_hello_original: &'a [u8],
+    pub server_hello_original: &'a [u8],
+    pub seed: &'a crate::reality::Mldsa65Seed,
+}
+
 pub struct Mldsa65DerivedKey {
     pub verify_key_bytes: Vec<u8>,
     pub signing_key_bytes: Vec<u8>,
@@ -84,4 +93,59 @@ pub fn verify_reality_mldsa65_signature_for_test(
             "ML-DSA-65 signature verification failed",
         )
     })
+}
+
+pub fn patch_reality_certificate_der_with_mldsa65_for_test(
+    input: RealityMldsa65CertPatchInput<'_>,
+) -> std::io::Result<()> {
+    if input.cert_der.len() < 64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "REALITY certificate DER too short for Ed25519 signature patch: {} bytes (need >= 64)",
+                input.cert_der.len()
+            ),
+        ));
+    }
+
+    let extension_end = crate::reality::MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET
+        + crate::reality::MLDSA65_SIGNATURE_LEN;
+    if input.cert_der.len() < extension_end {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "REALITY certificate DER too short for ML-DSA-65 extension patch: {} bytes (need >= {extension_end})",
+                input.cert_der.len()
+            ),
+        ));
+    }
+
+    crate::reality::patch_reality_certificate_der(
+        input.cert_der,
+        input.ed25519_public_key,
+        input.auth_key,
+    )?;
+
+    let message = crate::reality::build_reality_mldsa65_message(
+        input.auth_key,
+        input.ed25519_public_key,
+        input.client_hello_original,
+        input.server_hello_original,
+    );
+    let signature = sign_reality_mldsa65_message_for_test(input.seed, &message)?;
+    if signature.as_bytes().len() != crate::reality::MLDSA65_SIGNATURE_LEN {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "invalid ML-DSA-65 signature length: expected {} bytes, got {}",
+                crate::reality::MLDSA65_SIGNATURE_LEN,
+                signature.as_bytes().len()
+            ),
+        ));
+    }
+
+    input.cert_der[crate::reality::MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET..extension_end]
+        .copy_from_slice(signature.as_bytes());
+
+    Ok(())
 }
