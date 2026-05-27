@@ -155,7 +155,10 @@ fn is_tcp_compatible_network(network: Option<&str>) -> bool {
 
 pub fn parse_inbound_port(port: Option<&InboundPortValue>) -> std::io::Result<u16> {
     let port = port.ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "inbound port is required")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "inbound.port is required for REALITY inbound",
+        )
     })?;
 
     match port {
@@ -164,7 +167,7 @@ pub fn parse_inbound_port(port: Option<&InboundPortValue>) -> std::io::Result<u1
             if value.contains('-') {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
-                    "port ranges are not supported for REALITY inbound",
+                    format!("port ranges are not supported for REALITY inbound: {value}"),
                 ));
             }
             value.parse::<u16>().map_err(|_| {
@@ -223,7 +226,7 @@ fn validate_vless_decryption(decryption: Option<&str>) -> std::io::Result<String
         Some(value) if eq_ignore_ascii_case(value, "none") => Ok("none".to_string()),
         Some(value) => Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            format!("unsupported VLESS inbound decryption: {value:?}; only \"none\" is supported"),
+            format!("unsupported VLESS decryption: {value}; only 'none' is supported"),
         )),
     }
 }
@@ -353,18 +356,16 @@ fn normalize_dest_addr(addr: &str) -> std::io::Result<String> {
     Ok(format!("{addr}:{REALITY_DEFAULT_DEST_PORT}"))
 }
 
-fn parse_dest_target_value(value: &Value) -> std::io::Result<String> {
+fn parse_dest_target_value(value: &Value, field: &str) -> std::io::Result<String> {
     match value {
         Value::String(addr) => normalize_dest_addr(addr),
-        Value::Number(number) => Err(std::io::Error::new(
+        Value::Number(_) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!(
-                "numeric dest/target ({number}) is not supported yet; use a string like \"example.com:443\""
-            ),
+            format!("numeric realitySettings.{field} is not supported"),
         )),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "dest/target must be a JSON string",
+            format!("realitySettings.{field} must be a JSON string"),
         )),
     }
 }
@@ -373,13 +374,13 @@ pub fn reality_dest_addr(settings: &RealitySettingsObject) -> std::io::Result<St
     match (&settings.dest, &settings.target) {
         (Some(_), Some(_)) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "realitySettings must not set both dest and target; target is an alias for dest",
+            "realitySettings.dest and realitySettings.target are mutually exclusive",
         )),
-        (Some(dest), None) => parse_dest_target_value(dest),
-        (None, Some(target)) => parse_dest_target_value(target),
+        (Some(dest), None) => parse_dest_target_value(dest, "dest"),
+        (None, Some(target)) => parse_dest_target_value(target, "target"),
         (None, None) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "realitySettings dest or target is required",
+            "realitySettings.dest or realitySettings.target is required",
         )),
     }
 }
@@ -389,7 +390,7 @@ pub fn reality_private_key(settings: &RealitySettingsObject) -> std::io::Result<
         Some(key) if !key.is_empty() => Ok(key),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "realitySettings privateKey is required",
+            "realitySettings.privateKey is required",
         )),
     }
 }
@@ -406,7 +407,7 @@ pub fn reality_server_names(settings: &RealitySettingsObject) -> std::io::Result
         if server_name == "*" {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "realitySettings.serverNames wildcard \"*\" is not supported",
+                "wildcard realitySettings.serverNames are not supported",
             ));
         }
     }
@@ -464,6 +465,7 @@ pub fn first_reality_inbound_runtime(
 
     let private_key = reality_private_key(settings)?.to_owned();
     crate::reality::validate_reality_private_key_b64(&private_key)?;
+    crate::vless::validate_vless_client_flows(&vless_clients)?;
     crate::vless::build_vless_clients(&vless_clients).map(|_| ())?;
 
     Ok(RealityInboundRuntime {
@@ -848,12 +850,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_port_ranges_with_clear_error() {
+    fn rejects_port_range() {
         let inbound: InboundObject =
-            serde_json::from_str(r#"{"listen":"127.0.0.1","port":"443-444"}"#).unwrap();
+            serde_json::from_str(r#"{"listen":"127.0.0.1","port":"10000-20000"}"#).unwrap();
         let err = inbound_listen_addr(&inbound).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert!(err.to_string().contains("port ranges are not supported"));
+        assert_eq!(
+            err.to_string(),
+            "port ranges are not supported for REALITY inbound: 10000-20000"
+        );
     }
 
     #[test]
@@ -1153,7 +1158,190 @@ mod tests {
     }
 
     #[test]
-    fn preserves_unknown_fields_in_extra_for_realistic_config() {
+    fn rejects_both_dest_and_target() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "dest": "a.example.com:443",
+            "target": "b.example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": "abc",
+            "shortIds": [""]
+        }))
+        .unwrap();
+        let err = reality_dest_addr(&settings).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            "realitySettings.dest and realitySettings.target are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_dest_and_target() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "serverNames": ["example.com"],
+            "privateKey": "abc",
+            "shortIds": [""]
+        }))
+        .unwrap();
+        let err = reality_dest_addr(&settings).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            "realitySettings.dest or realitySettings.target is required"
+        );
+    }
+
+    #[test]
+    fn accepts_empty_short_id() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": "abc",
+            "shortIds": [""]
+        }))
+        .unwrap();
+        assert_eq!(
+            reality_short_ids(&settings).unwrap(),
+            vec![Vec::<u8>::new()]
+        );
+    }
+
+    #[test]
+    fn preserves_client_flow_vision() {
+        let json = format!(
+            r#"{{
+            "inbounds": [{{
+                "port": 443,
+                "protocol": "vless",
+                "settings": {{
+                    "clients": [{{
+                        "id": "00000000-0000-0000-0000-000000000001",
+                        "flow": "xtls-rprx-vision"
+                    }}],
+                    "decryption": "none"
+                }},
+                "streamSettings": {{
+                    "security": "reality",
+                    "realitySettings": {{
+                        "dest": "example.com:443",
+                        "serverNames": ["example.com"],
+                        "privateKey": "{TEST_REALITY_PRIVATE_KEY}",
+                        "shortIds": [""]
+                    }}
+                }}
+            }}]
+        }}"#
+        );
+        let config: XrayConfig = serde_json::from_str(&json).unwrap();
+        let settings = inbound_vless_settings(&config.inbounds[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            settings.clients[0].flow.as_deref(),
+            Some("xtls-rprx-vision")
+        );
+
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err
+            .to_string()
+            .contains("xtls-rprx-vision is parsed but runtime support is not implemented yet"));
+    }
+
+    #[test]
+    fn missing_flow_is_empty_or_none() {
+        let json = format!(
+            r#"{{
+            "inbounds": [{{
+                "port": 443,
+                "protocol": "vless",
+                "settings": {{
+                    "clients": [{{"id": "00000000-0000-0000-0000-000000000001"}}],
+                    "decryption": "none"
+                }},
+                "streamSettings": {{
+                    "security": "reality",
+                    "realitySettings": {{
+                        "dest": "example.com:443",
+                        "serverNames": ["example.com"],
+                        "privateKey": "{TEST_REALITY_PRIVATE_KEY}",
+                        "shortIds": [""]
+                    }}
+                }}
+            }}]
+        }}"#
+        );
+        let config: XrayConfig = serde_json::from_str(&json).unwrap();
+        let settings = inbound_vless_settings(&config.inbounds[0])
+            .unwrap()
+            .unwrap();
+        assert!(settings.clients[0].flow.is_none());
+
+        let runtime = first_reality_inbound_runtime(&config).unwrap();
+        assert!(runtime.vless_clients[0].flow.is_none());
+    }
+
+    #[test]
+    fn unknown_flow_returns_unsupported_at_runtime_validation() {
+        let json = format!(
+            r#"{{
+            "inbounds": [{{
+                "port": 443,
+                "protocol": "vless",
+                "settings": {{
+                    "clients": [{{
+                        "id": "00000000-0000-0000-0000-000000000001",
+                        "flow": "unknown-flow"
+                    }}],
+                    "decryption": "none"
+                }},
+                "streamSettings": {{
+                    "security": "reality",
+                    "realitySettings": {{
+                        "dest": "example.com:443",
+                        "serverNames": ["example.com"],
+                        "privateKey": "{TEST_REALITY_PRIVATE_KEY}",
+                        "shortIds": [""]
+                    }}
+                }}
+            }}]
+        }}"#
+        );
+        let config: XrayConfig = serde_json::from_str(&json).unwrap();
+        let settings = inbound_vless_settings(&config.inbounds[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(settings.clients[0].flow.as_deref(), Some("unknown-flow"));
+
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(err.to_string(), "unsupported VLESS flow: unknown-flow");
+    }
+
+    #[test]
+    fn vision_flow_returns_clear_unsupported_if_not_implemented() {
+        const VISION_FIXTURE: &str = include_str!(
+            "../../scripts/live_reality_smoke/xray-compatible-server-vision.fixture.json"
+        );
+        let config: XrayConfig =
+            serde_json::from_str(VISION_FIXTURE).expect("parse vision fixture");
+        let settings = inbound_vless_settings(&config.inbounds[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            settings.clients[0].flow.as_deref(),
+            Some("xtls-rprx-vision")
+        );
+
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err
+            .to_string()
+            .contains("xtls-rprx-vision is parsed but runtime support is not implemented yet"));
+    }
+
+    #[test]
+    fn preserves_unknown_fields() {
         let json = r#"{
             "log": {"loglevel": "debug"},
             "inbounds": [{

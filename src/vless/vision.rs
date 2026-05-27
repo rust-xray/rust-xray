@@ -149,7 +149,7 @@ pub fn vision_direct_copy_relay_supported() -> bool {
 pub fn unsupported_vision_relay_error() -> Error {
     Error::new(
         ErrorKind::Unsupported,
-        "xtls-rprx-vision not implemented: Vision direct-copy uplink passthrough is required after inner TLS 1.3 detection; use plain VLESS (empty flow) for REALITY smoke tests",
+        "xtls-rprx-vision is parsed but runtime support is not implemented yet",
     )
 }
 

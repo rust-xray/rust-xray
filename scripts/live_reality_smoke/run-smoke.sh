@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 CLIENT_TEMPLATE="${SCRIPT_DIR}/xray-client.template.json"
-SERVER_CONFIG="${SCRIPT_DIR}/rust-xray-server.fixture.json"
+SERVER_CONFIG="${SERVER_CONFIG:-${SCRIPT_DIR}/rust-xray-server.fixture.json}"
 GENERATED_CLIENT="/tmp/rust-xray-live-xray-client.json"
 
 if [[ ! -f "${CLIENT_TEMPLATE}" ]]; then
@@ -54,7 +54,11 @@ WARNING: Manual local smoke test only. Test keys only. Not for production.
 
 Terminal 1 — rust-xray server (from repo root):
   cd ${REPO_ROOT}
-  RUST_LOG=debug cargo run --bin rust-xray -- scripts/live_reality_smoke/rust-xray-server.fixture.json
+  RUST_LOG=debug cargo run --bin rust-xray -- ${SERVER_CONFIG}
+
+Optional: use the Xray-compatible server fixture instead:
+  SERVER_CONFIG=${SCRIPT_DIR}/xray-compatible-server.fixture.json \\
+    TEST_PUBLIC_KEY='${TEST_PUBLIC_KEY}' bash ${SCRIPT_DIR}/run-smoke.sh
 
 Terminal 2 — Xray client:
   xray run -config ${GENERATED_CLIENT}

@@ -115,9 +115,9 @@ pub fn authenticate_vless_client(
 
     if !is_supported_vless_flow(client.flow.as_deref()) {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::Unsupported,
             format!(
-                "unsupported vless flow {:?}",
+                "unsupported VLESS flow: {}",
                 client.flow.as_deref().unwrap_or("")
             ),
         ));
@@ -594,12 +594,13 @@ mod tests {
     }
 
     #[test]
-    fn authenticate_vless_client_unsupported_flow_is_invalid_input() {
+    fn authenticate_vless_client_unsupported_flow_is_unsupported() {
         let clients = vec![vless_client(None, Some("xtls-rprx-direct"))];
         let request = vless_request(USER_ID);
 
         let err = authenticate_vless_client(&request, &clients).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(err.to_string(), "unsupported VLESS flow: xtls-rprx-direct");
     }
 
     #[test]
@@ -909,7 +910,9 @@ mod handle_vless_tcp_inbound_tests {
                 .await
                 .expect_err("vision flow should be rejected before relay");
             assert_eq!(err.kind(), ErrorKind::Unsupported);
-            assert!(err.to_string().contains("xtls-rprx-vision not implemented"));
+            assert!(err
+                .to_string()
+                .contains("xtls-rprx-vision is parsed but runtime support is not implemented yet"));
         });
     }
 

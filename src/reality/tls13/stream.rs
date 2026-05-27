@@ -14,7 +14,7 @@
 use std::fmt::Write as _;
 use std::io::{self, Error, ErrorKind};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -652,7 +652,32 @@ where
     }
 }
 
-static APPLICATION_STREAM_RELAY_SPLIT_COUNT: AtomicU64 = AtomicU64::new(0);
+struct ApplicationStreamRelaySplitGuard(Arc<AtomicBool>);
+
+impl ApplicationStreamRelaySplitGuard {
+    fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    fn mark_split(&self) -> io::Result<()> {
+        if self.0.swap(true, Ordering::SeqCst) {
+            warn!(
+                stage = stages::TLS13_APPLICATION_STREAM_SPLIT,
+                "TLS application stream relay split called more than once"
+            );
+            return Err(io::Error::new(
+                ErrorKind::Other,
+                "TLS application stream relay split called more than once",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn split_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
+}
 
 struct Tls13ClientReadState {
     read_decryptor: Tls13RecordDecryptor,
@@ -948,24 +973,16 @@ impl Tls13ClientWriteState {
     }
 }
 
-fn log_application_stream_split(read_sequence: u64, write_sequence: u64, split_count: u64) {
-    info!(
+fn log_application_stream_split(read_sequence: u64, write_sequence: u64) {
+    debug!(
         stage = stages::TLS13_APPLICATION_STREAM_SPLIT,
         direction = TLS13_APPLICATION_STREAM_DIRECTION,
         read_sequence_preserved = read_sequence,
         write_sequence_preserved = write_sequence,
         read_sequence_current = read_sequence,
         write_sequence_current = write_sequence,
-        split_count,
         "split TLS application stream for bidirectional relay"
     );
-
-    if split_count > 1 {
-        warn!(
-            stage = stages::TLS13_APPLICATION_STREAM_SPLIT,
-            split_count, "TLS application stream relay split called more than once"
-        );
-    }
 }
 
 /// Client-to-server TLS 1.3 application reader with exclusive decrypt state.
@@ -1128,6 +1145,7 @@ pub struct RealityTls13ApplicationStream<S> {
     inner: S,
     read: Tls13ClientReadState,
     write: Tls13ClientWriteState,
+    relay_split_guard: ApplicationStreamRelaySplitGuard,
 }
 
 impl<S> RealityTls13ApplicationStream<S> {
@@ -1144,6 +1162,7 @@ impl<S> RealityTls13ApplicationStream<S> {
                 Arc::clone(&server_key_update_requested),
             ),
             write: Tls13ClientWriteState::new(write_encryptor, server_key_update_requested),
+            relay_split_guard: ApplicationStreamRelaySplitGuard::new(),
         }
     }
 
@@ -1182,8 +1201,8 @@ impl<S> RealityTls13ApplicationStream<S> {
     {
         let read_sequence = self.read.decrypt_sequence();
         let write_sequence = self.write.encrypt_sequence();
-        let split_count = APPLICATION_STREAM_RELAY_SPLIT_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
-        log_application_stream_split(read_sequence, write_sequence, split_count);
+        self.relay_split_guard.mark_split()?;
+        log_application_stream_split(read_sequence, write_sequence);
 
         let (read_half, write_half) = split(self.inner);
         Ok((
@@ -1644,6 +1663,51 @@ mod tests {
             assert_eq!(&buf[..read], b"split-seq-1");
             assert_eq!(reader.client_decrypt_sequence(), 2);
         });
+    }
+
+    #[test]
+    fn independent_application_streams_each_split_once_without_error() {
+        block_on(async {
+            let (_client_encryptor_a, server_decryptor_a) = client_to_server_keys();
+            let (server_encryptor_a, _client_decryptor_a) = server_to_client_keys();
+            let (_client_encryptor_b, server_decryptor_b) = client_to_server_keys();
+            let (server_encryptor_b, _client_decryptor_b) = server_to_client_keys();
+
+            let stream_a = RealityTls13ApplicationStream::new(
+                duplex(4096).1,
+                server_decryptor_a,
+                server_encryptor_a,
+            );
+            let stream_b = RealityTls13ApplicationStream::new(
+                duplex(4096).1,
+                server_decryptor_b,
+                server_encryptor_b,
+            );
+
+            stream_a.split_for_relay().expect("first stream split");
+            stream_b.split_for_relay().expect("second stream split");
+        });
+    }
+
+    #[test]
+    fn repeated_split_on_same_stream_instance_is_rejected() {
+        let (_client_encryptor, server_decryptor) = client_to_server_keys();
+        let (server_encryptor, _client_decryptor) = server_to_client_keys();
+
+        let stream =
+            RealityTls13ApplicationStream::new(duplex(4096).1, server_decryptor, server_encryptor);
+        let split_flag = stream.relay_split_guard.split_flag();
+
+        stream.split_for_relay().expect("first split succeeds");
+        assert!(split_flag.load(Ordering::SeqCst));
+
+        let err = ApplicationStreamRelaySplitGuard(split_flag)
+            .mark_split()
+            .expect_err("second split on same stream must fail");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(err
+            .to_string()
+            .contains("TLS application stream relay split called more than once"));
     }
 
     #[test]
