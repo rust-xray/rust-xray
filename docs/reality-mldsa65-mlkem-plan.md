@@ -48,6 +48,21 @@ The resulting ML-DSA-65 signature is embedded in the certificate extension value
 
 Secrets (`mldsa65Seed`, `privateKey`) must never appear in logs or `Debug` output.
 
+## Offline RustCrypto compatibility check
+
+The optional Cargo feature `reality-mldsa65-crypto` enables an offline
+RustCrypto ML-DSA-65 adapter and fixture test. The default build does **not**
+enable this feature and does not include ML-DSA crypto dependencies.
+
+The compatibility test derives a Rust ML-DSA-65 key pair from the 32-byte
+`mldsa65Seed` fixture and compares the encoded verify/public key bytes against
+the upstream Xray-core/CIRCL `mldsa65Verify` bytes. Its only purpose is to
+answer whether Rust-derived ML-DSA-65 key encoding is byte-compatible with
+`github.com/cloudflare/circl/sign/mldsa/mldsa65`.
+
+This is not runtime integration. The accepted REALITY path, certificate patch
+behavior, and ML-DSA-65 certificate extension signing remain unchanged.
+
 ## Non-goals (hard constraints for follow-up work)
 
 The following must **not** change until explicitly scoped and tested:

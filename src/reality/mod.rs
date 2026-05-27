@@ -4,6 +4,8 @@ mod decision;
 mod fixture;
 pub mod handshake;
 mod mldsa65;
+#[cfg(feature = "reality-mldsa65-crypto")]
+pub mod mldsa65_crypto;
 mod server;
 mod session;
 mod short_id;
