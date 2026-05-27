@@ -1,10 +1,13 @@
-.PHONY: test build fixture-test fixture-decode fixture-decode-write capture-clienthello
+.PHONY: test build fixture-test fixture-decode fixture-decode-write capture-clienthello live-smoke
 
 test:
 	cargo test
 
 build:
 	cargo build
+
+live-smoke:
+	bash scripts/live_reality_smoke/run-live-smoke.sh
 
 fixture-test:
 	cargo test --test reality_fixture -- --nocapture

@@ -19,7 +19,7 @@ use super::certificate::{
     build_tls13_certificate_message, build_tls13_certificate_verify_ed25519,
     generate_reality_ephemeral_ed25519_certificate,
 };
-use super::cipher_suite::{tls13_cipher_suite, Tls13CipherSuite};
+use super::cipher_suite::{resolve_tls13_cipher_suite, Tls13CipherSuite};
 use super::key_schedule::{
     compute_finished_verify_data, derive_application_traffic_secrets, derive_finished_key,
     derive_handshake_traffic_secrets, derive_traffic_key, hash_len, verify_finished_data,
@@ -130,16 +130,7 @@ impl RealityTls13ServerState {
         accepted: RealityAccepted,
         observed_server_hello: RealityObservedServerHello,
     ) -> std::io::Result<Self> {
-        let suite = tls13_cipher_suite(observed_server_hello.server_hello.cipher_suite)
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::Unsupported,
-                    format!(
-                        "unsupported destination ServerHello cipher suite: 0x{:04x}",
-                        observed_server_hello.server_hello.cipher_suite
-                    ),
-                )
-            })?;
+        let suite = resolve_tls13_cipher_suite(observed_server_hello.server_hello.cipher_suite)?;
         let transcript = TranscriptHash::new(suite.hash);
 
         Ok(Self {
@@ -751,7 +742,7 @@ mod tests {
         extract_observed_server_hello, RealityDestHandshake, RealityObservedServerHello,
     };
     use crate::reality::session::RealityClientAuth;
-    use crate::reality::tls13::cipher_suite::TLS_AES_128_GCM_SHA256;
+    use crate::reality::tls13::cipher_suite::{TLS_AES_128_CCM_SHA256, TLS_AES_128_GCM_SHA256};
     use crate::reality::tls13::hash_len;
     use crate::reality::tls13::messages::build_encrypted_extensions_empty;
     use crate::reality::tls13::transcript::Tls13HashAlgorithm;
@@ -893,12 +884,15 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_unknown_cipher_suite() {
-        let observed = valid_observed_server_hello(0x1304);
+    fn new_rejects_ccm_cipher_suite_with_explicit_message() {
+        let observed = valid_observed_server_hello(TLS_AES_128_CCM_SHA256);
         let err = RealityTls13ServerState::new(sample_accepted(), observed).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
-        assert!(err.to_string().contains("0x1304"));
+        let message = err.to_string();
+        assert!(message.contains("CCM"), "{message}");
+        assert!(message.contains("0x1304"), "{message}");
+        assert!(message.contains("TLS_AES_128_GCM_SHA256"), "{message}");
     }
 
     #[test]

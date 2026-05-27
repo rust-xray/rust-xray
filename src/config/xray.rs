@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::vless::{validate_fallback_configs, FallbackConfig};
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::warn;
@@ -43,6 +44,9 @@ pub struct VlessInboundSettings {
     pub clients: Vec<VlessClientObject>,
 
     pub decryption: Option<String>,
+
+    #[serde(default)]
+    pub fallbacks: Vec<FallbackConfig>,
 
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -129,6 +133,7 @@ pub struct RealityInboundRuntime {
     pub show: bool,
     pub vless_clients: Vec<VlessClientObject>,
     pub vless_decryption: String,
+    pub vless_fallbacks: Vec<FallbackConfig>,
 }
 
 fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
@@ -206,18 +211,6 @@ pub fn format_listen_host(listen: Option<&str>) -> std::io::Result<String> {
     }
 
     Ok(listen.to_string())
-}
-
-fn warn_unimplemented_vless_fallbacks(settings: &VlessInboundSettings) {
-    match settings.extra.get("fallbacks") {
-        Some(Value::Array(items)) if !items.is_empty() => {
-            warn!(
-                fallback_count = items.len(),
-                "VLESS fallbacks are parsed but not implemented"
-            );
-        }
-        _ => {}
-    }
 }
 
 fn validate_vless_decryption(decryption: Option<&str>) -> std::io::Result<String> {
@@ -302,8 +295,8 @@ pub fn inbound_vless_settings(
         )
     })?;
 
-    warn_unimplemented_vless_fallbacks(&settings);
     validate_vless_decryption(settings.decryption.as_deref())?;
+    validate_fallback_configs(&settings.fallbacks)?;
 
     Ok(Some(settings))
 }
@@ -450,7 +443,7 @@ pub fn first_reality_inbound_runtime(
     })?;
 
     let vless_settings = inbound_vless_settings(inbound)?;
-    let (vless_clients, vless_decryption) = match vless_settings {
+    let (vless_clients, vless_decryption, vless_fallbacks) = match vless_settings {
         Some(settings) => (
             settings.clients,
             settings
@@ -459,8 +452,9 @@ pub fn first_reality_inbound_runtime(
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
                 .unwrap_or_else(|| "none".to_string()),
+            settings.fallbacks,
         ),
-        None => (Vec::new(), "none".to_string()),
+        None => (Vec::new(), "none".to_string(), Vec::new()),
     };
 
     let private_key = reality_private_key(settings)?.to_owned();
@@ -482,6 +476,7 @@ pub fn first_reality_inbound_runtime(
         show: settings.show,
         vless_clients,
         vless_decryption,
+        vless_fallbacks,
     })
 }
 
@@ -607,6 +602,24 @@ mod tests {
     }
 
     #[test]
+    fn inbound_vless_settings_parses_fallback_dest_number() {
+        let json = r#"{
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id": "00000000-0000-0000-0000-000000000001"}],
+                "decryption": "none",
+                "fallbacks": [{"dest": 8080}]
+            }
+        }"#;
+
+        let inbound: InboundObject = serde_json::from_str(json).unwrap();
+        let settings = inbound_vless_settings(&inbound).unwrap().unwrap();
+
+        assert_eq!(settings.fallbacks.len(), 1);
+        assert_eq!(settings.fallbacks[0].dest.addr, "127.0.0.1:8080");
+    }
+
+    #[test]
     fn inbound_vless_settings_parses_clients_and_decryption() {
         let json = r#"{
             "protocol": "vless",
@@ -639,7 +652,7 @@ mod tests {
             Some("xtls-rprx-vision")
         );
         assert_eq!(settings.decryption.as_deref(), Some("none"));
-        assert!(settings.extra.contains_key("fallbacks"));
+        assert!(settings.fallbacks.is_empty());
         assert!(settings.clients[0].extra.contains_key("level"));
     }
 
@@ -1385,7 +1398,8 @@ mod tests {
         let settings = inbound_vless_settings(&config.inbounds[0])
             .unwrap()
             .unwrap();
-        assert!(settings.extra.contains_key("fallbacks"));
+        assert_eq!(settings.fallbacks.len(), 1);
+        assert_eq!(settings.fallbacks[0].dest.addr, "127.0.0.1:80");
         assert!(settings.clients[0].extra.contains_key("alterId"));
         assert!(settings.clients[0].extra.contains_key("customClientField"));
     }

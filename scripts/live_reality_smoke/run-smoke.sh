@@ -47,6 +47,9 @@ cat <<EOF
 
 Live REALITY smoke test — run these commands manually in separate terminals.
 
+For the automated compatibility/stress suite (recommended before merge):
+  bash ${SCRIPT_DIR}/run-live-smoke.sh
+
 Generated client config:
   ${GENERATED_CLIENT}
 

@@ -1,4 +1,5 @@
 pub mod config;
+pub mod fallback;
 pub mod inbound;
 pub mod protocol;
 pub(crate) mod relay_debug;
@@ -6,6 +7,11 @@ pub(crate) mod vision;
 
 pub use config::{
     build_vless_clients, validate_vless_client_flow, validate_vless_client_flows, VlessClient,
+};
+pub use fallback::{
+    build_fallback_context, build_proxy_protocol_v1, looks_like_http_request, parse_fallback_dest,
+    resolve_fallback_target, select_vless_fallback, validate_fallback_configs,
+    validate_fallback_xver, FallbackConfig, FallbackContext, FallbackDest,
 };
 pub use inbound::{
     authenticate_vless_client, handle_reality_vless_tcp_inbound, handle_vless_tcp_inbound,

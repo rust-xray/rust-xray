@@ -42,13 +42,13 @@ Accepted path **does not fallback** on failure — errors close the connection.
 | ServerHello generation | rcgen camouflage random | Unit | Runs |
 | Transcript hash | SHA-256 / SHA-384 | Unit | Runs |
 | Handshake traffic secrets | HKDF labels | Unit | Runs |
-| Encrypted EE/Cert/CV/Finished | AES-GCM records | Unit | Runs (ChaCha → `Unsupported`) |
+| Encrypted EE/Cert/CV/Finished | AES-GCM / ChaCha20 records | Unit | Runs |
 | Certificate | Ed25519 ephemeral + REALITY patch | Unit + smoke | Runs |
 | CertificateVerify | Ed25519 | Unit | Runs |
 | Server Finished | HMAC verify_data | Unit | Runs |
 | Client Finished verify | Decrypt + constant-time compare | Unit | Error if fail |
 | Application secrets | master + traffic labels | Unit | Runs |
-| App record encrypt/decrypt | AES-128/256-GCM | Unit | Runs |
+| App record encrypt/decrypt | AES-128/256-GCM, ChaCha20-Poly1305 | Unit | Runs |
 | Application stream adapter | `RealityTls13ApplicationStream` | Unit | Runs |
 | VLESS config users | JSON → `VlessClient` | Unit | Runs |
 | VLESS UUID auth | PermissionDenied | Unit | Error |
@@ -80,9 +80,21 @@ Accepted path **does not fallback** on failure — errors close the connection.
 
 Live smoke validated against **Xray-core 26.3.27** (`scripts/live_reality_smoke/`).
 
+### TLS 1.3 cipher suite matrix (REALITY accepted path)
+
+| Suite | IANA | Record crypto | Key schedule |
+|-------|------|---------------|--------------|
+| TLS_AES_128_GCM_SHA256 | 0x1301 | Supported | SHA-256 |
+| TLS_AES_256_GCM_SHA384 | 0x1302 | Supported | SHA-384 |
+| TLS_CHACHA20_POLY1305_SHA256 | 0x1303 | Supported | SHA-256 |
+| TLS_AES_128_CCM_SHA256 | 0x1304 | Rejected (`Unsupported`) | — |
+| TLS_AES_128_CCM_8_SHA256 | 0x1305 | Rejected (`Unsupported`) | — |
+
+Live smoke forces each supported suite via local mock TLS 1.3 dest targets
+(`scripts/live_reality_smoke/cipher-tls-servers.py`).
+
 ## Experimental / incomplete
 
-- ChaCha20-Poly1305 cipher suite → `Unsupported` at record crypto
 - One TLS record per `AsyncWrite` on application stream (skeleton buffering)
 - Vision splice/zero-copy beyond DIRECT MVP not implemented
 - UDP / Mux / XUDP, xhttp, grpc transports not implemented
@@ -92,7 +104,7 @@ Live smoke validated against **Xray-core 26.3.27** (`scripts/live_reality_smoke/
 | Feature | Behavior |
 |---------|----------|
 | mldsa65 cert extension | `Unsupported` |
-| ChaCha20-Poly1305 TLS 1.3 records | `Unsupported` |
+| TLS 1.3 CCM cipher suites (0x1304, 0x1305) | `Unsupported` with explicit error |
 | VLESS UDP / Mux / XUDP commands | `Unsupported` |
 | xhttp / grpc stream transports | Not implemented |
 | Routing / rules / balancers | Not implemented |
@@ -101,11 +113,10 @@ Live smoke validated against **Xray-core 26.3.27** (`scripts/live_reality_smoke/
 
 ## Remaining blockers (before calling this “production-ready”)
 
-1. **ChaCha20 destinations** — dest ServerHello may select suite that fails at record crypto.
-2. **Post-quantum REALITY** — mldsa65 / ML-KEM extensions not implemented.
-3. **UDP / Mux / XUDP** — VLESS command support missing.
-4. **Alternate transports** — xhttp, grpc not implemented.
-5. **Routing** — outbound selection, rules, balancers not implemented.
+1. **Post-quantum REALITY** — mldsa65 / ML-KEM extensions not implemented.
+2. **UDP / Mux / XUDP** — VLESS command support missing.
+3. **Alternate transports** — xhttp, grpc not implemented.
+4. **Routing** — outbound selection, rules, balancers not implemented.
 
 ## Final TODO
 
@@ -311,4 +322,4 @@ docs/reality-accepted-path.md
 - Accepted path errors do not fallback (see policy matrix above for pre-auth fallback cases).
 - Vision DIRECT MVP only — no full splice/zero-copy beyond padding + DIRECT relay.
 - UDP / Mux / XUDP, xhttp, grpc, mldsa65 / ML-KEM, routing not implemented.
-- ChaCha20-Poly1305 record crypto unsupported when dest selects that suite.
+- TLS 1.3 CCM cipher suites (0x1304, 0x1305) rejected on accepted path.

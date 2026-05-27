@@ -31,14 +31,47 @@ The private key is intentionally public for deterministic CI/fixture testing.
 | `xray-client.template.json` | Xray client template with `__TEST_PUBLIC_KEY__` placeholder |
 | `xray-client-smoke.fixture.json` | Pre-filled plain VLESS client config for the committed test key pair |
 | `xray-client-smoke.vision.fixture.json` | Vision client config (`flow: "xtls-rprx-vision"`) |
+| `rust-xray-server.raw.fixture.json` | Vision server with `streamSettings.network: "raw"` |
 | `run-smoke.sh` | Helper: checks tools, writes client config, prints 3-terminal commands |
+| `run-live-smoke.sh` | Automated compatibility/stress suite + local report |
+| `rust-xray-server.fallbacks.fixture.json` | REALITY server with VLESS `fallbacks[]` for smoke |
+| `fallback-tcp-servers.py` / `fallback-probe.py` | Local fallback target listeners and TLS trigger helper |
+| `smoke-lib.sh` | Shared helpers for `run-live-smoke.sh` |
 
-Quick start:
+Quick start (manual):
 
 ```bash
 TEST_PUBLIC_KEY='oU1MbEgszawWQJa0S_DxLsNt9G2zyE4rF-CrqvJjTmg' \
   bash scripts/live_reality_smoke/run-smoke.sh
 ```
+
+Automated live smoke (from repo root, requires [Xray-core](https://github.com/XTLS/Xray-core)):
+
+```bash
+bash scripts/live_reality_smoke/run-live-smoke.sh
+```
+
+The automated runner executes regression checks, Vision stress coverage (100 sequential
++ 50 parallel requests, 100MB download), negative/flow-mismatch cases, network alias
+(`raw` vs legacy `tcp`), HTTP (`--http1.1` / `--http2`) and TLS (`--tls-max 1.2` /
+default 1.3) modes, VLESS `fallbacks[]` routing (default, SNI/name, HTTP path, PROXY v1
+`xver=1`), then writes a local report under `/tmp/rust-xray-live-smoke-*/report.txt`
+with accepted-path counters, Vision DIRECT command counts, AES-GCM decrypt failures, and
+curl status summary.
+
+Optional environment variables for `run-live-smoke.sh`:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TEST_PUBLIC_KEY` | committed fixture public key | REALITY client `publicKey` |
+| `SMOKE_SKIP_BUILD` | `0` | Skip `cargo build --bin rust-xray` |
+| `SMOKE_SKIP_LIVE` | `0` | Skip the live suite entirely |
+| `SMOKE_WORK_DIR` | `/tmp/rust-xray-live-smoke-$$` | Logs + generated client configs |
+| `SMOKE_REPORT_PATH` | `${SMOKE_WORK_DIR}/report.txt` | Report output path |
+| `SMOKE_DOWNLOAD_10MB_URL` | Cloudflare 10MiB endpoint | 10MB regression download |
+| `SMOKE_DOWNLOAD_100MB_URL` | OVH `100Mb.dat` mirror | 100MB stress download |
+
+Manual quick start (legacy):
 
 When using `xray-client.template.json`, replace `__TEST_PUBLIC_KEY__` with the
 public key that matches `realitySettings.privateKey` in
@@ -90,7 +123,9 @@ Validated against **Xray-core 26.3.27**:
 - Default smoke fixtures use **plain VLESS** (`flow: ""`) over REALITY application traffic.
 - Vision smoke: `rust-xray-server.vision.fixture.json` + `xray-client-smoke.vision.fixture.json` (`flow: "xtls-rprx-vision"`).
 - Vision MVP uses padding framing + DIRECT copy relay (no raw splice).
-- 10MB download and bad shortId/SNI fallback smoke scenarios pass.
+- Automated `run-live-smoke.sh` covers 10MB/100MB downloads, 100 sequential + 50 parallel
+  Vision requests, wrong UUID, flow mismatch negatives, `network: raw` alias, HTTP/TLS
+  modes, openssl fallback, and bad shortId/SNI fallback.
 - Failures after REALITY accept close the connection (no fallback) — check server logs.
 
 ## Notes

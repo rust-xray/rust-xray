@@ -1,5 +1,4 @@
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
 const TLS_HANDSHAKE_CLIENT_HELLO: u8 = 0x01;
@@ -272,9 +271,9 @@ pub fn parse_client_hello_record_bytes(input: &[u8]) -> std::io::Result<TlsClien
     }
 }
 
-async fn read_next_tls_record_into(
+async fn read_next_tls_record_into<S: AsyncRead + Unpin>(
     buffer: &mut Vec<u8>,
-    stream: &mut TcpStream,
+    stream: &mut S,
 ) -> std::io::Result<()> {
     let header_start = buffer.len();
     buffer.resize(header_start + RECORD_HEADER_LEN, 0);
@@ -296,8 +295,8 @@ async fn read_next_tls_record_into(
 ///
 /// Supports TCP fragmentation, ClientHello split across multiple TLS records, and
 /// coalesced trailing bytes after the ClientHello handshake message.
-pub async fn read_client_hello_record(
-    stream: &mut TcpStream,
+pub async fn read_client_hello_record<S: AsyncRead + Unpin>(
+    stream: &mut S,
 ) -> std::io::Result<TlsClientHelloRecord> {
     let mut buffer = Vec::new();
     loop {

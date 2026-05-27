@@ -2,8 +2,9 @@ use std::io::{Error, ErrorKind};
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
-    Aes128Gcm, Aes256Gcm, Nonce,
+    Aes128Gcm, Aes256Gcm, Nonce as AesNonce,
 };
+use chacha20poly1305::{ChaCha20Poly1305, Nonce as ChaChaNonce};
 
 use crate::tls::records::{
     build_tls_record, TlsRecordContentType, TLS_LEGACY_VERSION_1_2, TLS_RECORD_APPLICATION_DATA,
@@ -77,11 +78,9 @@ fn validate_traffic_keys(suite: Tls13CipherSuite, keys: &Tls13TrafficKeys) -> st
     }
 
     match suite.aead {
-        Tls13AeadAlgorithm::ChaCha20Poly1305 => Err(Error::new(
-            ErrorKind::Unsupported,
-            "TLS 1.3 ChaCha20-Poly1305 record encryption is not implemented yet",
-        )),
-        Tls13AeadAlgorithm::Aes128Gcm | Tls13AeadAlgorithm::Aes256Gcm => {
+        Tls13AeadAlgorithm::Aes128Gcm
+        | Tls13AeadAlgorithm::Aes256Gcm
+        | Tls13AeadAlgorithm::ChaCha20Poly1305 => {
             if keys.key.len() != suite.key_len {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
@@ -217,7 +216,7 @@ fn encrypt_aes128_gcm(
     })?;
     cipher
         .encrypt(
-            Nonce::from_slice(nonce),
+            AesNonce::from_slice(nonce),
             Payload {
                 msg: plaintext,
                 aad,
@@ -245,7 +244,7 @@ fn encrypt_aes256_gcm(
     })?;
     cipher
         .encrypt(
-            Nonce::from_slice(nonce),
+            AesNonce::from_slice(nonce),
             Payload {
                 msg: plaintext,
                 aad,
@@ -273,7 +272,7 @@ fn decrypt_aes128_gcm(
     })?;
     cipher
         .decrypt(
-            Nonce::from_slice(nonce),
+            AesNonce::from_slice(nonce),
             Payload {
                 msg: ciphertext,
                 aad,
@@ -301,7 +300,7 @@ fn decrypt_aes256_gcm(
     })?;
     cipher
         .decrypt(
-            Nonce::from_slice(nonce),
+            AesNonce::from_slice(nonce),
             Payload {
                 msg: ciphertext,
                 aad,
@@ -311,6 +310,62 @@ fn decrypt_aes256_gcm(
             Error::new(
                 ErrorKind::InvalidData,
                 format!("TLS 1.3 AES-256-GCM decrypt failed: {e}"),
+            )
+        })
+}
+
+fn encrypt_chacha20_poly1305(
+    key: &[u8],
+    nonce: &[u8; TLS13_IV_LEN],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> std::io::Result<Vec<u8>> {
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|e| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("TLS 1.3 ChaCha20-Poly1305 key invalid: {e}"),
+        )
+    })?;
+    cipher
+        .encrypt(
+            ChaChaNonce::from_slice(nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|e| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("TLS 1.3 ChaCha20-Poly1305 encrypt failed: {e}"),
+            )
+        })
+}
+
+fn decrypt_chacha20_poly1305(
+    key: &[u8],
+    nonce: &[u8; TLS13_IV_LEN],
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> std::io::Result<Vec<u8>> {
+    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|e| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("TLS 1.3 ChaCha20-Poly1305 key invalid: {e}"),
+        )
+    })?;
+    cipher
+        .decrypt(
+            ChaChaNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|e| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("TLS 1.3 ChaCha20-Poly1305 decrypt failed: {e}"),
             )
         })
 }
@@ -411,10 +466,7 @@ impl Tls13RecordEncryptor {
                 encrypt_aes256_gcm(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
             }
             Tls13AeadAlgorithm::ChaCha20Poly1305 => {
-                return Err(Error::new(
-                    ErrorKind::Unsupported,
-                    "TLS 1.3 ChaCha20-Poly1305 record encryption is not implemented yet",
-                ));
+                encrypt_chacha20_poly1305(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
             }
         };
 
@@ -464,10 +516,7 @@ impl Tls13RecordEncryptor {
                 encrypt_aes256_gcm(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
             }
             Tls13AeadAlgorithm::ChaCha20Poly1305 => {
-                return Err(Error::new(
-                    ErrorKind::Unsupported,
-                    "TLS 1.3 ChaCha20-Poly1305 record encryption is not implemented yet",
-                ));
+                encrypt_chacha20_poly1305(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
             }
         };
 
@@ -521,10 +570,7 @@ impl Tls13RecordEncryptor {
                 encrypt_aes256_gcm(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
             }
             Tls13AeadAlgorithm::ChaCha20Poly1305 => {
-                return Err(Error::new(
-                    ErrorKind::Unsupported,
-                    "TLS 1.3 ChaCha20-Poly1305 record encryption is not implemented yet",
-                ));
+                encrypt_chacha20_poly1305(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
             }
         };
 
@@ -666,10 +712,15 @@ impl Tls13RecordDecryptor {
                         })?
                 }
                 Tls13AeadAlgorithm::ChaCha20Poly1305 => {
-                    return Err(Error::new(
-                        ErrorKind::Unsupported,
-                        "TLS 1.3 ChaCha20-Poly1305 record decryption is not implemented yet",
-                    ));
+                    decrypt_chacha20_poly1305(&self.keys.key, &nonce_bytes, &record.payload, &aad)
+                        .map_err(|err| {
+                        application_record_decrypt_error(
+                            err,
+                            cipher_suite,
+                            decrypt_sequence,
+                            encrypted_record_len,
+                        )
+                    })?
                 }
             };
 
@@ -862,17 +913,117 @@ mod tests {
         assert!(records[0].payload.len() > GCM_TAG_LEN);
     }
 
+    fn chacha20_keys() -> Tls13TrafficKeys {
+        Tls13TrafficKeys {
+            key: (0x30..0x50).collect(),
+            iv: (0x01..0x0d).collect(),
+        }
+    }
+
     #[test]
-    fn new_chacha20_returns_unsupported() {
+    fn encrypt_handshake_message_chacha20_works() {
+        let suite = tls13_cipher_suite(TLS_CHACHA20_POLY1305_SHA256).expect("known suite");
+        let mut encryptor =
+            Tls13RecordEncryptor::new(suite, chacha20_keys()).expect("valid encryptor");
+        let record = encryptor
+            .encrypt_handshake_message(&sample_handshake_message())
+            .expect("valid encrypted record");
+
+        let records = parse_tls_records(&record).expect("parsable record");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].content_type,
+            TlsRecordContentType::ApplicationData
+        );
+        assert!(records[0].payload.len() > GCM_TAG_LEN);
+    }
+
+    #[test]
+    fn encrypt_application_data_roundtrip_chacha20() {
+        let suite = tls13_cipher_suite(TLS_CHACHA20_POLY1305_SHA256).expect("known suite");
+        let keys = chacha20_keys();
+        let plaintext = b"chacha application payload";
+
+        let mut encryptor =
+            Tls13RecordEncryptor::new(suite, keys.clone()).expect("valid encryptor");
+        let record_bytes = encryptor
+            .encrypt_application_data(plaintext)
+            .expect("valid encrypted record");
+
+        let mut decryptor = Tls13RecordDecryptor::new(suite, keys).expect("valid decryptor");
+        let record = parse_encrypted_application_record(&record_bytes);
+        let decrypted = decryptor
+            .decrypt_application_data_record(&record)
+            .expect("valid decrypted application data");
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn chacha20_poly1305_rfc8439_aead_vector() {
+        let key = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f,
+        ];
+        let nonce = [0u8; TLS13_IV_LEN];
+        let plaintext = [
+            0x4c, 0x61, 0x64, 0x69, 0x65, 0x73, 0xa2, 0x24, 0x54, 0x58, 0x20, 0x41, 0x6d, 0x65,
+            0x73,
+        ];
+        let aad = [
+            0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x62, 0x62,
+            0x63, 0x64, 0x65, 0x66, 0x67,
+        ];
+        let expected_ciphertext = [
+            0x54, 0xd9, 0x26, 0x58, 0xc8, 0x95, 0x04, 0xf5, 0x47, 0x39, 0x7c, 0x20, 0xc2, 0x26,
+            0x3d, 0x4c, 0x0f, 0xb0, 0x17, 0xc3, 0x03, 0x10, 0xdd, 0x92, 0x5b, 0x89, 0xb2, 0xa2,
+            0x26, 0x58, 0xe0,
+        ];
+
+        let ciphertext =
+            encrypt_chacha20_poly1305(&key, &nonce, &plaintext, &aad).expect("RFC 8439 encrypt");
+        assert_eq!(ciphertext, expected_ciphertext);
+
+        let decrypted =
+            decrypt_chacha20_poly1305(&key, &nonce, &ciphertext, &aad).expect("RFC 8439 decrypt");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn chacha20_tls13_application_record_known_vector() {
         let suite = tls13_cipher_suite(TLS_CHACHA20_POLY1305_SHA256).expect("known suite");
         let keys = Tls13TrafficKeys {
-            key: vec![0x55; 32],
-            iv: vec![0x66; 12],
+            key: (0x30..0x50).collect(),
+            iv: (0x01..0x0d).collect(),
         };
+        let plaintext = b"known-vector";
 
-        let err = Tls13RecordEncryptor::new(suite, keys).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-        assert!(err.to_string().contains("ChaCha20"));
+        let mut encryptor =
+            Tls13RecordEncryptor::new(suite, keys.clone()).expect("valid encryptor");
+        let record_bytes = encryptor
+            .encrypt_application_data(plaintext)
+            .expect("valid encrypted record");
+
+        let mut decryptor = Tls13RecordDecryptor::new(suite, keys).expect("valid decryptor");
+        let record = parse_encrypted_application_record(&record_bytes);
+        let decrypted = decryptor
+            .decrypt_application_data_record(&record)
+            .expect("valid decrypted application data");
+        assert_eq!(decrypted, plaintext);
+
+        let mut reencryptor = Tls13RecordEncryptor::new(
+            suite,
+            Tls13TrafficKeys {
+                key: (0x30..0x50).collect(),
+                iv: (0x01..0x0d).collect(),
+            },
+        )
+        .expect("valid encryptor");
+        let replay = reencryptor
+            .encrypt_application_data(plaintext)
+            .expect("deterministic re-encrypt");
+        assert_eq!(record_bytes, replay);
     }
 
     #[test]
@@ -1136,19 +1287,6 @@ mod tests {
         assert!(err
             .to_string()
             .contains("unexpected inner content type: 21"));
-    }
-
-    #[test]
-    fn new_chacha20_decryptor_returns_unsupported() {
-        let suite = tls13_cipher_suite(TLS_CHACHA20_POLY1305_SHA256).expect("known suite");
-        let keys = Tls13TrafficKeys {
-            key: vec![0x55; 32],
-            iv: vec![0x66; 12],
-        };
-
-        let err = Tls13RecordDecryptor::new(suite, keys).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-        assert!(err.to_string().contains("ChaCha20"));
     }
 
     #[test]

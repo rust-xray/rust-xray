@@ -20,7 +20,8 @@ pub use certificate::{
     RealityEphemeralCertificate, SIGNATURE_SCHEME_ED25519,
 };
 pub use cipher_suite::{
-    tls13_cipher_suite, Tls13AeadAlgorithm, Tls13CipherSuite, TLS_AES_128_GCM_SHA256,
+    is_tls13_ccm_cipher_suite, resolve_tls13_cipher_suite, tls13_cipher_suite, Tls13AeadAlgorithm,
+    Tls13CipherSuite, TLS_AES_128_CCM_8_SHA256, TLS_AES_128_CCM_SHA256, TLS_AES_128_GCM_SHA256,
     TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256,
 };
 
