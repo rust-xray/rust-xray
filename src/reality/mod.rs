@@ -3,6 +3,7 @@ mod certificate;
 mod decision;
 mod fixture;
 pub mod handshake;
+mod mldsa65;
 mod server;
 mod session;
 mod short_id;
@@ -12,7 +13,11 @@ pub mod tls13;
 mod version;
 
 pub use auth::{validate_reality_private_key_b64, RealityAuthResult};
-pub use certificate::{certificate_der_has_ed25519_signature_tail, patch_reality_certificate_der};
+pub use certificate::{
+    certificate_der_has_ed25519_signature_tail, patch_reality_certificate_der,
+    patch_reality_certificate_der_with_mode, RealityCertificatePatchInput,
+    RealityCertificatePatchMode,
+};
 pub use decision::{
     inspect_reality_client_hello, RealityAccepted, RealityDecision, RealityInspectConfig,
 };
@@ -26,6 +31,11 @@ pub use handshake::{
     extract_observed_server_hello, fetch_dest_handshake, generate_partial_tls13_handshake,
     patch_reality_server_hello, prepare_reality_tls13_state, PartialTls13Handshake,
     PatchedRealityHandshake, RealityDestHandshake, RealityObservedServerHello,
+};
+pub use mldsa65::{
+    decode_mldsa65_seed, sign_reality_cert_extension_stub, Mldsa65Seed,
+    MLDSA65_CERT_EXTENSION_VALUE_LEN, MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET, MLDSA65_SEED_LEN,
+    MLDSA65_VERIFY_KEY_LEN,
 };
 pub use server::handle_accepted_reality_client;
 pub use session::{

@@ -118,7 +118,7 @@ pub struct RealitySettingsObject {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RealityInboundRuntime {
     pub tag: Option<String>,
     pub protocol: Option<String>,
@@ -131,9 +131,35 @@ pub struct RealityInboundRuntime {
     pub min_client_ver: Option<String>,
     pub max_client_ver: Option<String>,
     pub show: bool,
+    pub mldsa65_seed: Option<crate::reality::Mldsa65Seed>,
     pub vless_clients: Vec<VlessClientObject>,
     pub vless_decryption: String,
     pub vless_fallbacks: Vec<FallbackConfig>,
+}
+
+impl std::fmt::Debug for RealityInboundRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealityInboundRuntime")
+            .field("tag", &self.tag)
+            .field("protocol", &self.protocol)
+            .field("listen_addr", &self.listen_addr)
+            .field("dest_addr", &self.dest_addr)
+            .field("private_key", &"<redacted>")
+            .field("server_names", &self.server_names)
+            .field("short_ids", &self.short_ids)
+            .field("max_time_diff", &self.max_time_diff)
+            .field("min_client_ver", &self.min_client_ver)
+            .field("max_client_ver", &self.max_client_ver)
+            .field("show", &self.show)
+            .field(
+                "mldsa65_seed",
+                &self.mldsa65_seed.as_ref().map(|_| "<redacted>"),
+            )
+            .field("vless_clients", &self.vless_clients)
+            .field("vless_decryption", &self.vless_decryption)
+            .field("vless_fallbacks", &self.vless_fallbacks)
+            .finish()
+    }
 }
 
 fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
@@ -469,6 +495,13 @@ pub fn reality_short_ids(settings: &RealitySettingsObject) -> std::io::Result<Ve
         .collect()
 }
 
+pub fn reality_mldsa65_seed(
+    settings: &RealitySettingsObject,
+    private_key: &str,
+) -> std::io::Result<Option<crate::reality::Mldsa65Seed>> {
+    crate::reality::decode_mldsa65_seed(settings.mldsa65_seed.as_deref(), private_key)
+}
+
 pub fn first_reality_inbound_runtime(
     config: &XrayConfig,
 ) -> std::io::Result<RealityInboundRuntime> {
@@ -518,6 +551,7 @@ pub fn first_reality_inbound_runtime(
 
     let private_key = reality_private_key(settings)?.to_owned();
     crate::reality::validate_reality_private_key_b64(&private_key)?;
+    let mldsa65_seed = reality_mldsa65_seed(settings, &private_key)?;
     crate::vless::validate_vless_client_flows(&vless_clients)?;
     crate::vless::build_vless_clients(&vless_clients).map(|_| ())?;
 
@@ -533,6 +567,7 @@ pub fn first_reality_inbound_runtime(
         min_client_ver: settings.min_client_ver.clone(),
         max_client_ver: settings.max_client_ver.clone(),
         show: settings.show,
+        mldsa65_seed,
         vless_clients,
         vless_decryption,
         vless_fallbacks,
@@ -545,6 +580,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     const TEST_REALITY_PRIVATE_KEY: &str = "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4";
+    const TEST_MLDSA65_SEED: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+    const TEST_MLDSA65_SEED_31_BYTES: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHg";
+    const TEST_MLDSA65_SEED_33_BYTES: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g";
 
     const MINIMAL_VLESS_REALITY: &str = r#"{
         "inbounds": [{
@@ -1630,5 +1668,114 @@ mod tests {
         assert_eq!(settings.fallbacks[0].dest.addr, "127.0.0.1:80");
         assert!(settings.clients[0].extra.contains_key("alterId"));
         assert!(settings.clients[0].extra.contains_key("customClientField"));
+    }
+
+    fn minimal_reality_config_json(mldsa65_seed: Option<&str>) -> String {
+        let mldsa65_seed_field = match mldsa65_seed {
+            Some(seed) => format!(r#","mldsa65Seed": "{seed}""#),
+            None => String::new(),
+        };
+
+        format!(
+            r#"{{
+            "inbounds": [{{
+                "tag": "reality-in",
+                "listen": "127.0.0.1",
+                "port": 443,
+                "protocol": "vless",
+                "settings": {{
+                    "clients": [{{"id": "00000000-0000-0000-0000-000000000001"}}],
+                    "decryption": "none"
+                }},
+                "streamSettings": {{
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {{
+                        "dest": "www.example.com:443",
+                        "serverNames": ["www.example.com"],
+                        "privateKey": "{TEST_REALITY_PRIVATE_KEY}",
+                        "shortIds": [""]
+                        {mldsa65_seed_field}
+                    }}
+                }}
+            }}]
+        }}"#
+        )
+    }
+
+    #[test]
+    fn accepts_valid_mldsa65_seed_in_runtime() {
+        let config: XrayConfig =
+            serde_json::from_str(&minimal_reality_config_json(Some(TEST_MLDSA65_SEED))).unwrap();
+        let runtime = first_reality_inbound_runtime(&config).unwrap();
+
+        let seed = runtime.mldsa65_seed.expect("expected parsed mldsa65 seed");
+        assert_eq!(seed.as_bytes().len(), crate::reality::MLDSA65_SEED_LEN);
+    }
+
+    #[test]
+    fn rejects_invalid_mldsa65_seed_base64() {
+        let config: XrayConfig =
+            serde_json::from_str(&minimal_reality_config_json(Some("not-valid-base64!!!")))
+                .unwrap();
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("invalid mldsa65Seed base64"));
+    }
+
+    #[test]
+    fn rejects_mldsa65_seed_with_31_decoded_bytes() {
+        let config: XrayConfig = serde_json::from_str(&minimal_reality_config_json(Some(
+            TEST_MLDSA65_SEED_31_BYTES,
+        )))
+        .unwrap();
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("expected 32 bytes, got 31"));
+    }
+
+    #[test]
+    fn rejects_mldsa65_seed_with_33_decoded_bytes() {
+        let config: XrayConfig = serde_json::from_str(&minimal_reality_config_json(Some(
+            TEST_MLDSA65_SEED_33_BYTES,
+        )))
+        .unwrap();
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("expected 32 bytes, got 33"));
+    }
+
+    #[test]
+    fn empty_mldsa65_seed_is_none_in_runtime() {
+        let config: XrayConfig =
+            serde_json::from_str(&minimal_reality_config_json(Some(""))).unwrap();
+        let runtime = first_reality_inbound_runtime(&config).unwrap();
+        assert!(runtime.mldsa65_seed.is_none());
+
+        let config: XrayConfig = serde_json::from_str(&minimal_reality_config_json(None)).unwrap();
+        let runtime = first_reality_inbound_runtime(&config).unwrap();
+        assert!(runtime.mldsa65_seed.is_none());
+    }
+
+    #[test]
+    fn rejects_mldsa65_seed_equal_to_private_key() {
+        let config: XrayConfig =
+            serde_json::from_str(&minimal_reality_config_json(Some(TEST_REALITY_PRIVATE_KEY)))
+                .unwrap();
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("must not equal privateKey"));
+    }
+
+    #[test]
+    fn reality_inbound_runtime_debug_does_not_expose_mldsa65_seed() {
+        let config: XrayConfig =
+            serde_json::from_str(&minimal_reality_config_json(Some(TEST_MLDSA65_SEED))).unwrap();
+        let runtime = first_reality_inbound_runtime(&config).unwrap();
+        let debug = format!("{runtime:?}");
+
+        assert!(debug.contains("mldsa65_seed"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(TEST_MLDSA65_SEED));
     }
 }
