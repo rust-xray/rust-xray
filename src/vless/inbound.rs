@@ -461,10 +461,13 @@ where
     )
 }
 
-pub async fn handle_reality_vless_tcp_inbound(
-    stream: RealityTls13ApplicationStream<tokio::net::TcpStream>,
+pub async fn handle_reality_vless_tcp_inbound<S>(
+    stream: RealityTls13ApplicationStream<S>,
     clients: &[VlessClient],
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let prepared = prepare_vless_tcp_relay(stream, clients).await?;
 
     info!(
@@ -607,6 +610,55 @@ mod tests {
         assert!(is_supported_vless_flow(Some("")));
         assert!(is_supported_vless_flow(Some("xtls-rprx-vision")));
         assert!(!is_supported_vless_flow(Some("xtls-rprx-direct")));
+    }
+
+    #[test]
+    fn validate_flow_rejects_empty_account_with_vision_request() {
+        let err = validate_vless_flow_for_command(
+            Some(FLOW_XTLS_RPRX_VISION),
+            Some(""),
+            VlessCommand::Tcp,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn validate_flow_rejects_vision_account_with_empty_request() {
+        let err =
+            validate_vless_flow_for_command(None, Some(FLOW_XTLS_RPRX_VISION), VlessCommand::Tcp)
+                .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn validate_flow_rejects_vision_udp() {
+        let err = validate_vless_flow_for_command(
+            Some(FLOW_XTLS_RPRX_VISION),
+            Some(FLOW_XTLS_RPRX_VISION),
+            VlessCommand::Udp,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert!(err.to_string().contains("UDP"));
+    }
+
+    #[test]
+    fn validate_flow_rejects_unknown_flow() {
+        let err = validate_vless_flow_for_command(
+            Some("xtls-rprx-direct"),
+            Some("xtls-rprx-direct"),
+            VlessCommand::Tcp,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn validate_flow_empty_regression_unchanged() {
+        validate_vless_flow_for_command(None, None, VlessCommand::Tcp).unwrap();
+        validate_vless_flow_for_command(Some(""), Some(""), VlessCommand::Tcp).unwrap();
     }
 }
 
@@ -799,7 +851,7 @@ mod handle_vless_tcp_inbound_tests {
     #[test]
     fn handle_vless_tcp_inbound_udp_command_is_unsupported() {
         let data = build_vless_request_bytes(&USER_ID, 0x02, 443);
-        let mut cursor = std::io::Cursor::new(data);
+        let cursor = std::io::Cursor::new(data);
 
         let err = block_on(handle_vless_tcp_inbound(cursor, &test_clients())).unwrap_err();
 
@@ -809,7 +861,7 @@ mod handle_vless_tcp_inbound_tests {
     #[test]
     fn handle_vless_tcp_inbound_unknown_client_is_permission_denied() {
         let data = build_vless_request_bytes(&UNKNOWN_USER_ID, 0x01, 443);
-        let mut cursor = std::io::Cursor::new(data);
+        let cursor = std::io::Cursor::new(data);
 
         let err = block_on(handle_vless_tcp_inbound(cursor, &test_clients())).unwrap_err();
 
@@ -833,7 +885,7 @@ mod handle_vless_tcp_inbound_tests {
                     .expect("write outbound response");
             });
 
-            let (mut client_io, mut server_io) = duplex(8192);
+            let (mut client_io, server_io) = duplex(8192);
             let request = build_vless_request_bytes(&USER_ID, 0x01, outbound_port);
             client_io
                 .write_all(&request)
@@ -1022,7 +1074,7 @@ mod handle_vless_tcp_inbound_tests {
                     .expect("write outbound response");
             });
 
-            let (mut client_io, mut server_io) = duplex(8192);
+            let (mut client_io, server_io) = duplex(8192);
             let mut request = build_vless_request_bytes(&USER_ID, 0x01, outbound_port);
             request.extend_from_slice(initial_payload);
             client_io

@@ -26,11 +26,11 @@ The private key is intentionally public for deterministic CI/fixture testing.
 |------|---------|
 | `rust-xray-server.fixture.json` | REALITY + plain VLESS inbound (empty flow) on `127.0.0.1:24443` |
 | `xray-compatible-server.fixture.json` | Xray-style server config with log/routing/outbounds/sniffing/sockopt |
-| `xray-compatible-server-vision.fixture.json` | Xray-compatible config with `xtls-rprx-vision` (runtime validation expected to fail) |
-| `rust-xray-server.vision.fixture.json` | Same server config with `xtls-rprx-vision` (expected to fail before relay) |
+| `xray-compatible-server-vision.fixture.json` | Xray-compatible config with `xtls-rprx-vision` |
+| `rust-xray-server.vision.fixture.json` | rust-xray server config with `xtls-rprx-vision` |
 | `xray-client.template.json` | Xray client template with `__TEST_PUBLIC_KEY__` placeholder |
 | `xray-client-smoke.fixture.json` | Pre-filled plain VLESS client config for the committed test key pair |
-| `xray-client-smoke.vision.fixture.json` | Vision client config for testing explicit unsupported flow handling |
+| `xray-client-smoke.vision.fixture.json` | Vision client config (`flow: "xtls-rprx-vision"`) |
 | `run-smoke.sh` | Helper: checks tools, writes client config, prints 3-terminal commands |
 
 Quick start:
@@ -84,11 +84,14 @@ curl -x socks5h://127.0.0.1:10808 https://example.com/ -m 10 -v
 
 ## Expectations
 
-- REALITY pre-auth should accept the Xray client (`Accepted` path).
+Validated against **Xray-core 26.3.27**:
+
+- REALITY pre-auth accepts the Xray client (`Accepted` path).
 - Default smoke fixtures use **plain VLESS** (`flow: ""`) over REALITY application traffic.
-- For Vision smoke, use `rust-xray-server.vision.fixture.json` with `xray-client-smoke.vision.fixture.json` (`flow: "xtls-rprx-vision"`).
-- Vision MVP uses framed padding without raw splice/zero-copy.
-- Failures after REALITY accept may still be useful smoke signal — check server logs.
+- Vision smoke: `rust-xray-server.vision.fixture.json` + `xray-client-smoke.vision.fixture.json` (`flow: "xtls-rprx-vision"`).
+- Vision MVP uses padding framing + DIRECT copy relay (no raw splice).
+- 10MB download and bad shortId/SNI fallback smoke scenarios pass.
+- Failures after REALITY accept close the connection (no fallback) — check server logs.
 
 ## Notes
 

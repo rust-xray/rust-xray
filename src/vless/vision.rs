@@ -485,6 +485,8 @@ pub struct VisionRelayStream<S> {
     traffic: SharedTrafficState,
     write_once_uuid: Option<[u8; 16]>,
     pending_read: Vec<u8>,
+    pending_write: Vec<u8>,
+    pending_original_len: Option<usize>,
     direct_relay: Option<crate::reality::tls13::ApplicationStreamDirectRelay>,
 }
 
@@ -500,6 +502,8 @@ impl<S> VisionRelayStream<S> {
             traffic,
             write_once_uuid: Some(user_uuid),
             pending_read: Vec::new(),
+            pending_write: Vec::new(),
+            pending_original_len: None,
             direct_relay,
         }
     }
@@ -596,6 +600,36 @@ where
             return Poll::Ready(Ok(0));
         }
 
+        if !self.pending_write.is_empty() {
+            let original_len = self
+                .pending_original_len
+                .expect("pending original length while pending write buffer is non-empty");
+
+            let pending = self.pending_write.clone();
+            match Pin::new(&mut self.inner).poll_write(cx, &pending) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(Error::new(
+                        ErrorKind::WriteZero,
+                        "vision relay underlying write zero",
+                    )));
+                }
+                Poll::Ready(Ok(n)) => {
+                    let _ = self.pending_write.drain(..n);
+                    if self.pending_write.is_empty() {
+                        self.pending_original_len = None;
+                        return Poll::Ready(Ok(original_len));
+                    }
+                    return Poll::Pending;
+                }
+                Poll::Ready(Err(err)) => {
+                    self.pending_write.clear();
+                    self.pending_original_len = None;
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
         self.maybe_enable_downlink_writer_direct();
 
         let writer_direct = self
@@ -616,27 +650,32 @@ where
             padded
         };
 
-        let mut offset = 0usize;
-        while offset < padded.len() {
-            match Pin::new(&mut self.inner).poll_write(cx, &padded[offset..]) {
-                Poll::Ready(Ok(0)) => {
-                    return Poll::Ready(Err(Error::new(
-                        ErrorKind::WriteZero,
-                        "vision relay underlying write zero",
-                    )));
-                }
-                Poll::Ready(Ok(n)) => offset += n,
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                Poll::Pending => {
-                    return if offset > 0 {
-                        Poll::Ready(Ok(buf.len()))
-                    } else {
-                        Poll::Pending
-                    };
+        self.pending_write = padded;
+        self.pending_original_len = Some(buf.len());
+
+        let original_len = self.pending_original_len.expect("pending original len");
+        let pending = self.pending_write.clone();
+        match Pin::new(&mut self.inner).poll_write(cx, &pending) {
+            Poll::Ready(Ok(0)) => Poll::Ready(Err(Error::new(
+                ErrorKind::WriteZero,
+                "vision relay underlying write zero",
+            ))),
+            Poll::Ready(Ok(n)) => {
+                let _ = self.pending_write.drain(..n);
+                if self.pending_write.is_empty() {
+                    self.pending_original_len = None;
+                    Poll::Ready(Ok(original_len))
+                } else {
+                    Poll::Pending
                 }
             }
+            Poll::Ready(Err(err)) => {
+                self.pending_write.clear();
+                self.pending_original_len = None;
+                Poll::Ready(Err(err))
+            }
+            Poll::Pending => Poll::Pending,
         }
-        Poll::Ready(Ok(buf.len()))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -820,5 +859,116 @@ mod tests {
         let client_hello = [0x16, 0x03, 0x01, 0x00, 0x05, 0x01, 0x00, 0x00, 0x01];
         xtls_filter_tls(&client_hello, &mut state);
         assert!(state.is_tls);
+    }
+
+    /// Underlying writer that performs one partial write, stalls once on the next
+    /// attempt, then accepts the full remainder — simulating backpressure without
+    /// hanging the test.
+    struct PartialWriteMock {
+        data: Vec<u8>,
+        chunk_size: usize,
+        writes: usize,
+    }
+
+    impl PartialWriteMock {
+        fn new(chunk_size: usize) -> Self {
+            Self {
+                data: Vec::new(),
+                chunk_size,
+                writes: 0,
+            }
+        }
+    }
+
+    impl AsyncWrite for PartialWriteMock {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if buf.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
+
+            if self.writes == 1 {
+                self.writes += 1;
+                return Poll::Pending;
+            }
+
+            let n = if self.writes == 0 {
+                buf.len().min(self.chunk_size)
+            } else {
+                buf.len()
+            };
+            self.data.extend_from_slice(&buf[..n]);
+            self.writes += 1;
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn noop_waker() -> std::task::Waker {
+        use std::task::{RawWaker, RawWakerVTable, Waker};
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(
+            |_| RawWaker::new(std::ptr::null(), &VTABLE),
+            |_| {},
+            |_| {},
+            |_| {},
+        );
+        unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+    }
+
+    #[test]
+    fn vision_relay_write_survives_partial_write_backpressure() {
+        let traffic = new_shared_traffic_state(USER_UUID);
+        let inner = PartialWriteMock::new(7);
+        let mut relay = VisionRelayStream::new(inner, Arc::clone(&traffic), USER_UUID, None);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let payload = b"downlink-payload-for-partial-write-test";
+
+        match Pin::new(&mut relay).poll_write(&mut cx, payload) {
+            Poll::Pending => {}
+            other => panic!("expected Pending while padded frame incomplete, got {other:?}"),
+        }
+
+        assert!(
+            !relay.pending_write.is_empty(),
+            "partial write must retain pending padded bytes"
+        );
+        assert_eq!(relay.pending_original_len, Some(payload.len()));
+        let mut expected_frame = relay.inner.data.clone();
+        expected_frame.extend_from_slice(&relay.pending_write);
+
+        let mut completed = false;
+        for _ in 0..8 {
+            match Pin::new(&mut relay).poll_write(&mut cx, payload) {
+                Poll::Ready(Ok(written)) => {
+                    assert_eq!(written, payload.len());
+                    completed = true;
+                    break;
+                }
+                Poll::Pending => continue,
+                other => panic!("expected completed write, got {other:?}"),
+            }
+        }
+        assert!(
+            completed,
+            "vision relay write must complete after backpressure"
+        );
+
+        assert!(relay.pending_write.is_empty());
+        assert_eq!(
+            relay.inner.data, expected_frame,
+            "partial writes must deliver the full padded Vision frame"
+        );
     }
 }

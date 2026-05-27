@@ -62,7 +62,7 @@ async fn handle_client(mut stream: TcpStream, config: Arc<RuntimeConfig>) -> std
             return relay_fallback_with_log(
                 stream,
                 &config.reality.dest_addr,
-                &record.raw_record,
+                record.initial_client_bytes(),
                 "ClientHello parse error",
             )
             .await;
@@ -102,7 +102,7 @@ async fn handle_client(mut stream: TcpStream, config: Arc<RuntimeConfig>) -> std
             relay_fallback_with_log(
                 stream,
                 &config.reality.dest_addr,
-                &record.raw_record,
+                record.initial_client_bytes(),
                 "REALITY fallback",
             )
             .await
@@ -112,7 +112,7 @@ async fn handle_client(mut stream: TcpStream, config: Arc<RuntimeConfig>) -> std
             relay_fallback_with_log(
                 stream,
                 &config.reality.dest_addr,
-                &record.raw_record,
+                record.initial_client_bytes(),
                 "REALITY inspect error",
             )
             .await

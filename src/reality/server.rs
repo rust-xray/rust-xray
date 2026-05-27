@@ -5,7 +5,7 @@ use tokio::time::timeout;
 use tracing::{debug, info};
 
 use crate::protocol::structs::ClientHelloPayload;
-use crate::tls::TlsClientHelloRecord;
+use crate::tls::{PrefixedStream, TlsClientHelloRecord};
 use crate::vless::handle_reality_vless_tcp_inbound;
 use crate::vless::VlessClient;
 
@@ -82,6 +82,8 @@ pub async fn handle_accepted_reality_client(
         .map_err(|err| stage_error(RealityAcceptedStage::Tls13State, err))?;
 
     let cipher_suite = state.suite.name;
+
+    let client = PrefixedStream::new(client, record.trailing_bytes.clone());
 
     let tls_app_stream = complete_reality_tls13_handshake(
         client,
