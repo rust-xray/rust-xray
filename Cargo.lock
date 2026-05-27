@@ -666,6 +666,7 @@ dependencies = [
  "base64",
  "bytes",
  "ed25519-dalek",
+ "getrandom",
  "hkdf",
  "hmac",
  "rcgen",

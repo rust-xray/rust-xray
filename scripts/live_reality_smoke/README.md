@@ -86,7 +86,8 @@ curl -x socks5h://127.0.0.1:10808 https://example.com/ -m 10 -v
 
 - REALITY pre-auth should accept the Xray client (`Accepted` path).
 - Default smoke fixtures use **plain VLESS** (`flow: ""`) over REALITY application traffic.
-- `xtls-rprx-vision` is **not implemented** on the server relay path (Vision direct-copy uplink passthrough). Use the `*.vision.fixture.json` pair only to verify the server returns an explicit `Unsupported` error instead of AEAD decrypt failure.
+- For Vision smoke, use `rust-xray-server.vision.fixture.json` with `xray-client-smoke.vision.fixture.json` (`flow: "xtls-rprx-vision"`).
+- Vision MVP uses framed padding without raw splice/zero-copy.
 - Failures after REALITY accept may still be useful smoke signal — check server logs.
 
 ## Notes

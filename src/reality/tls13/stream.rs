@@ -679,6 +679,62 @@ impl ApplicationStreamRelaySplitGuard {
     }
 }
 
+/// Shared flags for Vision DIRECT / raw relay on the underlying REALITY transport.
+#[derive(Debug, Clone)]
+pub struct ApplicationStreamDirectRelay {
+    reader_direct: Arc<AtomicBool>,
+    writer_direct: Arc<AtomicBool>,
+}
+
+impl ApplicationStreamDirectRelay {
+    fn new_shared() -> (Arc<AtomicBool>, Arc<AtomicBool>) {
+        (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    pub fn from_shared(reader_direct: Arc<AtomicBool>, writer_direct: Arc<AtomicBool>) -> Self {
+        Self {
+            reader_direct,
+            writer_direct,
+        }
+    }
+
+    pub fn is_reader_enabled(&self) -> bool {
+        self.reader_direct.load(Ordering::SeqCst)
+    }
+
+    pub fn is_writer_enabled(&self) -> bool {
+        self.writer_direct.load(Ordering::SeqCst)
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.is_reader_enabled() || self.is_writer_enabled()
+    }
+
+    pub fn enable_reader(&self) {
+        if self.reader_direct.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        info!("switching REALITY application stream to raw direct relay");
+    }
+
+    pub fn enable_writer(&self) {
+        if self.writer_direct.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        info!("switching REALITY application stream writer to raw direct relay");
+    }
+}
+
+/// Reader/writer halves plus shared direct-relay control for Vision DIRECT.
+pub struct RealityTls13RelaySplit<S> {
+    pub reader: RealityTls13ClientReader<ReadHalf<S>>,
+    pub writer: RealityTls13ClientWriter<WriteHalf<S>>,
+    pub direct_relay: ApplicationStreamDirectRelay,
+}
+
 struct Tls13ClientReadState {
     read_decryptor: Tls13RecordDecryptor,
     plaintext_read_buf: BytesMut,
@@ -989,11 +1045,17 @@ fn log_application_stream_split(read_sequence: u64, write_sequence: u64) {
 pub struct RealityTls13ClientReader<S> {
     inner: S,
     read: Tls13ClientReadState,
+    direct_relay: Arc<AtomicBool>,
+    direct_mode_active: bool,
 }
 
 impl<S> RealityTls13ClientReader<S> {
     pub fn client_decrypt_sequence(&self) -> u64 {
         self.read.decrypt_sequence()
+    }
+
+    pub fn direct_relay_enabled(&self) -> bool {
+        self.direct_relay.load(Ordering::SeqCst)
     }
 
     pub fn inner(&self) -> &S {
@@ -1015,6 +1077,25 @@ where
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.as_mut().get_mut();
+
+        if this.direct_relay.load(Ordering::SeqCst) {
+            if !this.direct_mode_active {
+                if !this.read.ciphertext_read_buf.is_empty() {
+                    this.read
+                        .plaintext_read_buf
+                        .extend_from_slice(&this.read.ciphertext_read_buf);
+                    this.read.ciphertext_read_buf.clear();
+                }
+                this.direct_mode_active = true;
+            }
+            if !this.read.plaintext_read_buf.is_empty() {
+                let to_copy = this.read.plaintext_read_buf.len().min(buf.remaining());
+                buf.put_slice(&this.read.plaintext_read_buf[..to_copy]);
+                let _ = this.read.plaintext_read_buf.split_to(to_copy);
+                return Poll::Ready(Ok(()));
+            }
+            return Pin::new(&mut this.inner).poll_read(cx, buf);
+        }
 
         if this.read.plaintext_read_buf.is_empty() {
             match this.read.fill_plaintext_read_buf(&mut this.inner, cx)? {
@@ -1038,11 +1119,16 @@ where
 pub struct RealityTls13ClientWriter<S> {
     inner: S,
     write: Tls13ClientWriteState,
+    direct_relay: Arc<AtomicBool>,
 }
 
 impl<S> RealityTls13ClientWriter<S> {
     pub fn client_encrypt_sequence(&self) -> u64 {
         self.write.encrypt_sequence()
+    }
+
+    pub fn direct_relay_enabled(&self) -> bool {
+        self.direct_relay.load(Ordering::SeqCst)
     }
 
     pub fn inner(&self) -> &S {
@@ -1064,6 +1150,20 @@ where
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.as_mut().get_mut();
+        if this.direct_relay.load(Ordering::SeqCst) {
+            if !this.write.ciphertext_write_buf.is_empty() {
+                let pending = this
+                    .write
+                    .pending_write_plaintext_len
+                    .expect("pending plaintext length while encrypted write buffer is non-empty");
+                return this.write.poll_write_encrypted_record(
+                    Pin::new(&mut this.inner),
+                    cx,
+                    pending,
+                );
+            }
+            return Pin::new(&mut this.inner).poll_write(cx, buf);
+        }
         this.write.poll_write(Pin::new(&mut this.inner), cx, buf)
     }
 
@@ -1096,11 +1196,28 @@ where
 pub struct RealityTls13RelayClient<R, W> {
     reader: R,
     writer: W,
+    direct_relay: ApplicationStreamDirectRelay,
 }
 
 impl<R, W> RealityTls13RelayClient<R, W> {
-    pub fn new(reader: R, writer: W) -> Self {
-        Self { reader, writer }
+    pub fn new(reader: R, writer: W, direct_relay: ApplicationStreamDirectRelay) -> Self {
+        Self {
+            reader,
+            writer,
+            direct_relay,
+        }
+    }
+
+    pub fn enable_reader_direct_relay(&self) {
+        self.direct_relay.enable_reader();
+    }
+
+    pub fn enable_writer_direct_relay(&self) {
+        self.direct_relay.enable_writer();
+    }
+
+    pub fn direct_relay_enabled(&self) -> bool {
+        self.direct_relay.is_enabled()
     }
 }
 
@@ -1190,12 +1307,7 @@ impl<S> RealityTls13ApplicationStream<S> {
     ///
     /// Decrypt state moves into the reader; encrypt state moves into the writer.
     /// Each half owns one [`tokio::io`] socket half so only one task reads ciphertext.
-    pub fn split_for_relay(
-        self,
-    ) -> io::Result<(
-        RealityTls13ClientReader<ReadHalf<S>>,
-        RealityTls13ClientWriter<WriteHalf<S>>,
-    )>
+    pub fn split_for_relay(self) -> io::Result<RealityTls13RelaySplit<S>>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -1204,17 +1316,27 @@ impl<S> RealityTls13ApplicationStream<S> {
         self.relay_split_guard.mark_split()?;
         log_application_stream_split(read_sequence, write_sequence);
 
+        let (reader_direct, writer_direct) = ApplicationStreamDirectRelay::new_shared();
+        let direct_relay = ApplicationStreamDirectRelay::from_shared(
+            Arc::clone(&reader_direct),
+            Arc::clone(&writer_direct),
+        );
+
         let (read_half, write_half) = split(self.inner);
-        Ok((
-            RealityTls13ClientReader {
+        Ok(RealityTls13RelaySplit {
+            reader: RealityTls13ClientReader {
                 inner: read_half,
                 read: self.read,
+                direct_relay: reader_direct,
+                direct_mode_active: false,
             },
-            RealityTls13ClientWriter {
+            writer: RealityTls13ClientWriter {
                 inner: write_half,
                 write: self.write,
+                direct_relay: writer_direct,
             },
-        ))
+            direct_relay,
+        })
     }
 
     /// Reads and decrypts one client ApplicationData record.
@@ -1597,7 +1719,8 @@ mod tests {
             assert_eq!(&buf[..read], b"before-split");
             assert_eq!(stream.client_decrypt_sequence(), 1);
 
-            let (mut reader, _writer) = stream.split_for_relay().expect("split once");
+            let split = stream.split_for_relay().expect("split once");
+            let mut reader = split.reader;
             assert_eq!(reader.client_decrypt_sequence(), 1);
 
             let read = reader.read(&mut buf).await.expect("read after split");
@@ -1622,7 +1745,8 @@ mod tests {
                 RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
             assert_eq!(stream.client_decrypt_sequence(), 0);
 
-            let (mut reader, _writer) = stream.split_for_relay().expect("split");
+            let split = stream.split_for_relay().expect("split");
+            let mut reader = split.reader;
             assert_eq!(reader.client_decrypt_sequence(), 0);
 
             let mut buf = [0u8; 32];
@@ -1650,7 +1774,8 @@ mod tests {
 
             let stream =
                 RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
-            let (mut reader, _writer) = stream.split_for_relay().expect("split");
+            let split = stream.split_for_relay().expect("split");
+            let mut reader = split.reader;
 
             assert_eq!(reader.client_decrypt_sequence(), 0);
 
@@ -1708,6 +1833,85 @@ mod tests {
         assert!(err
             .to_string()
             .contains("TLS application stream relay split called more than once"));
+    }
+
+    #[test]
+    fn direct_relay_bypasses_tls_decrypt_on_reader() {
+        block_on(async {
+            let (mut client_io, server_io) = duplex(4096);
+            let (_client_encryptor, server_decryptor) = client_to_server_keys();
+            let (server_encryptor, _client_decryptor) = server_to_client_keys();
+
+            let stream =
+                RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
+            let split = stream.split_for_relay().expect("split");
+            split.direct_relay.enable_reader();
+            let mut reader = split.reader;
+
+            client_io
+                .write_all(b"raw-after-direct")
+                .await
+                .expect("write raw");
+
+            let mut buf = [0u8; 32];
+            let read = reader.read(&mut buf).await.expect("read raw");
+            assert_eq!(&buf[..read], b"raw-after-direct");
+            assert_eq!(reader.client_decrypt_sequence(), 0);
+        });
+    }
+
+    #[test]
+    fn direct_relay_bypasses_tls_encrypt_on_writer() {
+        block_on(async {
+            let (mut client_io, server_io) = duplex(4096);
+            let (_client_encryptor, server_decryptor) = client_to_server_keys();
+            let (server_encryptor, _client_decryptor) = server_to_client_keys();
+
+            let stream =
+                RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
+            let split = stream.split_for_relay().expect("split");
+            split.direct_relay.enable_writer();
+            let mut writer = split.writer;
+
+            writer.write_all(b"raw-downlink").await.expect("write raw");
+            writer.flush().await.expect("flush");
+
+            let mut client_buf = [0u8; 32];
+            let read = client_io.read(&mut client_buf).await.expect("client read");
+            assert_eq!(&client_buf[..read], b"raw-downlink");
+            assert_eq!(writer.client_encrypt_sequence(), 0);
+        });
+    }
+
+    #[test]
+    fn direct_relay_drains_buffered_ciphertext_before_raw_read() {
+        block_on(async {
+            let (mut client_io, server_io) = duplex(4096);
+            let (_client_encryptor, server_decryptor) = client_to_server_keys();
+            let (server_encryptor, _client_decryptor) = server_to_client_keys();
+
+            let stream =
+                RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
+            let split = stream.split_for_relay().expect("split");
+            let mut reader = split.reader;
+
+            reader
+                .read
+                .ciphertext_read_buf
+                .extend_from_slice(b"buffered-raw");
+            split.direct_relay.enable_reader();
+
+            let mut buf = [0u8; 32];
+            let read = reader.read(&mut buf).await.expect("read buffered raw");
+            assert_eq!(&buf[..read], b"buffered-raw");
+
+            client_io
+                .write_all(b"-from-socket")
+                .await
+                .expect("write socket");
+            let read = reader.read(&mut buf).await.expect("read socket raw");
+            assert_eq!(&buf[..read], b"-from-socket");
+        });
     }
 
     #[test]
@@ -2463,9 +2667,11 @@ mod tests {
         inner: ShutdownTrackingWriter,
     ) -> RealityTls13ClientWriter<ShutdownTrackingWriter> {
         let (write_encryptor, _) = server_to_client_keys();
+        let (_reader_direct, writer_direct) = ApplicationStreamDirectRelay::new_shared();
         RealityTls13ClientWriter {
             inner,
             write: Tls13ClientWriteState::new(write_encryptor, Arc::new(AtomicBool::new(false))),
+            direct_relay: writer_direct,
         }
     }
 

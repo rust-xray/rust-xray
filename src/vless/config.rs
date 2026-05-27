@@ -1,5 +1,5 @@
 use crate::config::VlessClientObject;
-use crate::vless::vision::vision_direct_copy_relay_supported;
+use crate::vless::vision::vision_relay_supported;
 
 #[derive(Debug, Clone)]
 pub struct VlessClient {
@@ -11,7 +11,7 @@ pub struct VlessClient {
 pub fn validate_vless_client_flow(flow: Option<&str>) -> std::io::Result<()> {
     match flow.map(str::trim).filter(|value| !value.is_empty()) {
         None => Ok(()),
-        Some("xtls-rprx-vision") if vision_direct_copy_relay_supported() => Ok(()),
+        Some("xtls-rprx-vision") if vision_relay_supported() => Ok(()),
         Some("xtls-rprx-vision") => Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "xtls-rprx-vision is parsed but runtime support is not implemented yet",
@@ -119,12 +119,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_vless_client_flow_rejects_vision_when_not_implemented() {
-        assert!(!vision_direct_copy_relay_supported());
-        let err = validate_vless_client_flow(Some("xtls-rprx-vision")).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert!(err
-            .to_string()
-            .contains("xtls-rprx-vision is parsed but runtime support is not implemented yet"));
+    fn validate_vless_client_flow_accepts_vision_when_implemented() {
+        assert!(vision_relay_supported());
+        assert!(validate_vless_client_flow(Some("xtls-rprx-vision")).is_ok());
     }
 }

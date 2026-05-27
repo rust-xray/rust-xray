@@ -1241,11 +1241,11 @@ mod tests {
             Some("xtls-rprx-vision")
         );
 
-        let err = first_reality_inbound_runtime(&config).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert!(err
-            .to_string()
-            .contains("xtls-rprx-vision is parsed but runtime support is not implemented yet"));
+        let runtime = first_reality_inbound_runtime(&config).expect("vision runtime");
+        assert_eq!(
+            runtime.vless_clients[0].flow.as_deref(),
+            Some("xtls-rprx-vision")
+        );
     }
 
     #[test]
@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn vision_flow_returns_clear_unsupported_if_not_implemented() {
+    fn vision_flow_runtime_accepts_when_implemented() {
         const VISION_FIXTURE: &str = include_str!(
             "../../scripts/live_reality_smoke/xray-compatible-server-vision.fixture.json"
         );
@@ -1333,11 +1333,11 @@ mod tests {
             Some("xtls-rprx-vision")
         );
 
-        let err = first_reality_inbound_runtime(&config).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert!(err
-            .to_string()
-            .contains("xtls-rprx-vision is parsed but runtime support is not implemented yet"));
+        let runtime = first_reality_inbound_runtime(&config).expect("vision runtime");
+        assert_eq!(
+            runtime.vless_clients[0].flow.as_deref(),
+            Some("xtls-rprx-vision")
+        );
     }
 
     #[test]
