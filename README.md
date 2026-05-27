@@ -11,76 +11,62 @@
 **Non-REALITY clients are relayed to `dest`.**
 
 **This is not a drop-in replacement for Xray-core.** Do not treat this project
-as a production Xray replacement.
+as a production Xray replacement. It is **not production-ready**.
 
-## Audit status (experiment branch)
+## Status (experiment branch)
 
-Last checked: unit tests + build green against **Xray-core 26.3.27** live smoke
-(`flow=""`, `flow="xtls-rprx-vision"`, 10MB download, bad shortId/SNI fallback).
+### Implemented and validated
 
-| Area | Status |
-|------|--------|
-| REALITY pre-auth (AEAD, policy, SNI) | **Implemented + unit tested** |
-| TLS 1.3 accepted handshake | **Implemented + unit tested** |
-| Application stream adapter | **Implemented** (`AsyncRead` / `AsyncWrite`) |
-| VLESS handoff on accepted path | **Wired + live smoke validated** |
-| REALITY cert HMAC patching | **Implemented** (Ed25519 DER patch on accepted path) |
-| Vision (`xtls-rprx-vision`) | **DIRECT MVP** — padding framing + `COMMAND_DIRECT` relay |
-| Xray-core compatibility | **Validated** (26.3.27 REALITY client smoke) |
+- REALITY pre-auth (AEAD, policy, SNI) and fallback relay to `dest` / `target` for
+  invalid REALITY clients
+- REALITY cert HMAC patch (Ed25519 DER on accepted path)
+- TLS 1.3 accepted path (handshake + application stream adapter)
+- VLESS TCP inbound, UUID auth, flow validation, freedom outbound relay
+- VLESS flow `""` and `xtls-rprx-vision` (Vision DIRECT MVP: padding + `COMMAND_DIRECT`)
+- Fragmented / coalesced TLS ClientHello parser (TCP fragmentation, multi-record)
+- VLESS custom string user ID → UUIDv5 mapping (Xray-compatible)
+- REALITY accepted-path cipher suites: AES128-GCM, AES256-GCM, ChaCha20-Poly1305
+- VLESS fallback selection: default, SNI/name, HTTP path, ALPN, PROXY v1/v2 (`xver=1|2`)
+- Transport validator: `network: "tcp"` (legacy alias) and `"raw"` for REALITY
 
-Accepted path **does not fallback** on failure — errors close the connection.
+Accepted path **does not fallback** on failure — handshake/VLESS errors close the
+connection.
 
-## Protocol coverage matrix
+### Live smoke (Xray-core 26.3.27)
 
-| Component | Coverage | Tests | Accepted-path gate |
-|-----------|----------|-------|-------------------|
-| TLS ClientHello (fragmented / multi-record) | Parse + read | Unit | N/A (pre-auth) |
-| REALITY X25519 auth | HKDF → 32-byte auth key | Unit | Fallback if fail |
-| AEAD `session_id` decrypt | AES-256-GCM | Unit | Fallback if fail |
-| shortId / time / version / SNI | Policy matrix | Unit | Fallback if fail |
-| Dest ServerHello observe | TLS 1.3 + X25519 | Unit | Error (no fallback) |
-| ServerHello generation | rcgen camouflage random | Unit | Runs |
-| Transcript hash | SHA-256 / SHA-384 | Unit | Runs |
-| Handshake traffic secrets | HKDF labels | Unit | Runs |
-| Encrypted EE/Cert/CV/Finished | AES-GCM / ChaCha20 records | Unit | Runs |
-| Certificate | Ed25519 ephemeral + REALITY patch | Unit + smoke | Runs |
-| CertificateVerify | Ed25519 | Unit | Runs |
-| Server Finished | HMAC verify_data | Unit | Runs |
-| Client Finished verify | Decrypt + constant-time compare | Unit | Error if fail |
-| Application secrets | master + traffic labels | Unit | Runs |
-| App record encrypt/decrypt | AES-128/256-GCM, ChaCha20-Poly1305 | Unit | Runs |
-| Application stream adapter | `RealityTls13ApplicationStream` | Unit | Runs |
-| VLESS config users | JSON → `VlessClient` | Unit | Runs |
-| VLESS UUID auth | PermissionDenied | Unit | Error |
-| VLESS request parser | Header + initial payload | Unit | Runs |
-| VLESS TCP command | Freedom connect + relay | Unit (mock) + smoke | Runs |
-| VLESS flow validation | `""` vs `xtls-rprx-vision` | Unit | Error if mismatch |
-| VLESS UDP / Mux | — | Unit | `Unsupported` |
-| Vision framing | Padding + DIRECT relay | Unit + smoke | Runs for vision accounts |
-| REALITY cert DER patch | HMAC-SHA512 | Unit | Runs on accepted path |
-| mldsa65 / ML-KEM | — | — | Not implemented |
-| Routing / balancers | — | — | Not implemented |
+From repo root:
 
-## What works today
+```bash
+make live-smoke
+# or: bash scripts/live_reality_smoke/run-live-smoke.sh
+```
 
-### REALITY pre-auth (production-shaped for invalid clients)
+Validated scenarios include:
 
-- X25519 keyshare extraction, HKDF-SHA256 → 32-byte auth key
-- AES-256-GCM `session_id` open (nonce = `random[20..32]`, zeroed AAD)
-- Policy: `shortId` prefix, `maxTimeDiff`, `minClientVer` / `maxClientVer`, SNI whitelist
-- Fallback TCP relay to `dest` for non-REALITY / failed auth
+- `flow=""` and `flow="xtls-rprx-vision"` against Xray-core client
+- Vision DIRECT relay, 100 sequential / 50 parallel requests, 100MB download
+- `network: "raw"` and legacy `network: "tcp"`
+- HTTP/1.1 and HTTP/2 curl modes, TLS 1.2 and 1.3 client modes
+- VLESS custom string user ID end-to-end
+- Fallback matrix (default, SNI/name, HTTP path, ALPN, PROXY v1/v2)
+- Cipher suite smoke (AES128 / AES256 / ChaCha20)
+- Negative transport configs (`xhttp`, `grpc`, `ws` + REALITY rejected at startup)
 
-### Accepted path (Xray-interoperable MVP)
+Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/README.md)**.
 
-1. Connect `dest`, forward ClientHello, observe destination ServerHello
-2. `complete_reality_tls13_handshake` — full server-side TLS 1.3 state machine
-3. `RealityTls13ApplicationStream` — decrypt client / encrypt server ApplicationData
-4. `handle_vless_tcp_inbound` — VLESS parse/auth → freedom TCP relay
-5. Vision (`xtls-rprx-vision`) — padding framing + DIRECT copy relay after server signal
+### Remaining unsupported / not implemented
 
-Live smoke validated against **Xray-core 26.3.27** (`scripts/live_reality_smoke/`).
+- UDP / Mux / XUDP VLESS runtime
+- REALITY over XHTTP / gRPC transport runtime
+- mldsa65 / ML-KEM post-quantum REALITY extensions
+- Routing, rules, balancers, full outbound ecosystem
+- Vision splice / zero-copy beyond DIRECT MVP
+- Fallback rate limits (`limitFallbackUpload` / `limitFallbackDownload`)
+- TLS 1.3 CCM cipher suites (0x1304, 0x1305)
 
-### TLS 1.3 cipher suite matrix (REALITY accepted path)
+Developer documentation: **[docs/reality-accepted-path.md](docs/reality-accepted-path.md)**.
+
+## TLS 1.3 cipher suite matrix (REALITY accepted path)
 
 | Suite | IANA | Record crypto | Key schedule |
 |-------|------|---------------|--------------|
@@ -92,71 +78,6 @@ Live smoke validated against **Xray-core 26.3.27** (`scripts/live_reality_smoke/
 
 Live smoke forces each supported suite via local mock TLS 1.3 dest targets
 (`scripts/live_reality_smoke/cipher-tls-servers.py`).
-
-## Experimental / incomplete
-
-- One TLS record per `AsyncWrite` on application stream (skeleton buffering)
-- Vision splice/zero-copy beyond DIRECT MVP not implemented
-- UDP / Mux / XUDP, xhttp, grpc transports not implemented
-
-## Explicitly Unsupported
-
-| Feature | Behavior |
-|---------|----------|
-| mldsa65 cert extension | `Unsupported` |
-| TLS 1.3 CCM cipher suites (0x1304, 0x1305) | `Unsupported` with explicit error |
-| VLESS UDP / Mux / XUDP commands | `Unsupported` |
-| xhttp / grpc stream transports | Not implemented |
-| Routing / rules / balancers | Not implemented |
-| Fallback rate limits | Not implemented |
-| Vision splice (raw TLS bypass beyond DIRECT MVP) | Not implemented |
-
-## Remaining blockers (before calling this “production-ready”)
-
-1. **Post-quantum REALITY** — mldsa65 / ML-KEM extensions not implemented.
-2. **UDP / Mux / XUDP** — VLESS command support missing.
-3. **Alternate transports** — xhttp, grpc not implemented.
-4. **Routing** — outbound selection, rules, balancers not implemented.
-
-## Final TODO
-
-- [ ] **mldsa65** — seed handling + cert extension location (upstream REALITY)
-- [ ] **X25519MLKEM768** — post-quantum key exchange / REALITY extensions
-- [ ] **Vision splice** — full zero-copy path beyond DIRECT MVP
-- [ ] **UDP / Mux / XUDP** — VLESS command support
-- [ ] **xhttp / grpc** — alternate stream transports
-- [ ] **Routing** — outbound selection, rules, balancers
-- [ ] **Real Xray fixture tests** — broader accepted-path e2e matrix
-- [ ] **Fuzzing** — TLS record parser, ClientHello, VLESS header parsers
-
-Developer documentation: **[docs/reality-accepted-path.md](docs/reality-accepted-path.md)**.
-
-## Реализовано (summary)
-
-### REALITY inbound
-
-- REALITY ClientHello auth, AEAD, policy validation (see matrix above)
-- Xray-compatible config parsing (`RealityInboundRuntime`, VLESS clients)
-- TLS ClientHello parsing (TCP fragmentation, multi-record, coalesced trailing bytes)
-- Fallback relay to `dest`/`target`
-
-### TLS 1.3 (`src/reality/tls13/`)
-
-- Transcript, key schedule, cipher suites, message builders
-- `complete_reality_tls13_handshake`, `RealityTls13ApplicationStream`
-- Ed25519 Certificate / CertificateVerify scaffold (`tls13/certificate.rs`)
-- REALITY-specific cert patch in `src/reality/certificate.rs` (HMAC-SHA512 on accepted path)
-
-### VLESS
-
-- Config users, request parser, UUID auth, flow validation, TCP inbound + freedom outbound relay
-- Vision DIRECT MVP (`src/vless/vision.rs`)
-
-### Tests
-
-420+ unit tests: config, TLS, REALITY auth/policy, TLS 1.3 primitives, VLESS, Vision,
-freedom outbound, cert patch, stream adapter. REALITY fixture interop test (`basic-xray`).
-Live smoke: Xray-core 26.3.27 (`scripts/live_reality_smoke/`).
 
 ## Policy validation matrix
 
@@ -184,20 +105,22 @@ logs may include `client_version`, `unix_time`, and shortId **prefix length** on
 - Cargo
 - Доступный TCP-адрес для `listen:port` из конфигурации
 
-## Сборка и тесты
+## Сборка, тесты и live smoke
 
 ```bash
 cargo fmt
 cargo build
 cargo test
 cargo clippy --all-targets
+make live-smoke
 ```
 
-With `make` installed, the same workflow is available as Makefile targets:
+With `make` installed:
 
 ```bash
 make test          # cargo test
 make build         # cargo build
+make live-smoke    # Xray-core compatibility/stress suite
 make fixture-test  # REALITY fixture integration test
 make fixture-decode       # decode tests/fixtures/reality/basic-xray
 make fixture-decode-write # decode + write expected_* (--force)
@@ -209,7 +132,7 @@ Semi-automated setup (requires exported keys): `bash scripts/create_reality_fixt
 
 Manual REALITY accepted-path smoke test (local Xray client + `rust-xray` server):
 **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/README.md)** —
-test-only keys, not for production.
+test-only keys, not for production. Automated runner: `make live-smoke`.
 
 Release-сборка:
 
@@ -271,6 +194,13 @@ cargo run --bin rust-xray -- ./config.json
 ## Запуск
 
 ```bash
+cargo run --bin rust-xray -- ./config.json
+make live-smoke
+```
+
+With logging:
+
+```bash
 RUST_LOG=info cargo run --bin rust-xray -- ./config.json
 ```
 
@@ -307,7 +237,7 @@ src/
 ├── protocol/
 ├── reality/
 │   ├── auth.rs, session.rs, decision.rs, sni.rs, version.rs
-│   ├── certificate.rs     # REALITY cert patch API (stub)
+│   ├── certificate.rs     # REALITY cert HMAC patch
 │   ├── handshake.rs, server.rs
 │   └── tls13/             # handshake, stream, record crypto
 ├── vless/
@@ -318,8 +248,8 @@ docs/reality-accepted-path.md
 
 ## Ограничения
 
-- **Not an Xray-core replacement.**
+- **Not an Xray-core replacement** and **not production-ready** (experiment branch).
 - Accepted path errors do not fallback (see policy matrix above for pre-auth fallback cases).
 - Vision DIRECT MVP only — no full splice/zero-copy beyond padding + DIRECT relay.
-- UDP / Mux / XUDP, xhttp, grpc, mldsa65 / ML-KEM, routing not implemented.
+- UDP / Mux / XUDP, REALITY over XHTTP/gRPC, mldsa65 / ML-KEM, routing not implemented.
 - TLS 1.3 CCM cipher suites (0x1304, 0x1305) rejected on accepted path.

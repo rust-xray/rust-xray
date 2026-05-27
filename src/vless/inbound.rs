@@ -173,6 +173,27 @@ pub fn validate_vless_flow_for_command(
     }
 }
 
+fn unsupported_vless_command_error(
+    command: VlessCommand,
+    additional_info: &[u8],
+) -> std::io::Error {
+    let message = match command {
+        VlessCommand::Udp if looks_like_xudp_request(additional_info) => {
+            "XUDP unsupported".to_string()
+        }
+        VlessCommand::Udp => "UDP unsupported".to_string(),
+        VlessCommand::Mux => "Mux unsupported".to_string(),
+        other => format!("unsupported vless command: {:?}", other),
+    };
+    std::io::Error::new(ErrorKind::Unsupported, message)
+}
+
+fn looks_like_xudp_request(additional_info: &[u8]) -> bool {
+    additional_info
+        .windows(4)
+        .any(|window| window.eq(b"xudp") || window.eq(b"XUDP"))
+}
+
 /// Writes and flushes the VLESS response header to the client stream.
 pub async fn prepare_vless_tcp_response<W: AsyncWrite + Unpin>(
     client_stream: &mut W,
@@ -359,9 +380,9 @@ where
     if inbound.request.command != VlessCommand::Tcp {
         return Err(stage_error(
             RealityAcceptedStage::Vless,
-            std::io::Error::new(
-                ErrorKind::Unsupported,
-                format!("unsupported vless command: {:?}", inbound.request.command),
+            unsupported_vless_command_error(
+                inbound.request.command,
+                &inbound.request.additional_info,
             ),
         ));
     }
@@ -856,6 +877,29 @@ mod handle_vless_tcp_inbound_tests {
         let err = block_on(handle_vless_tcp_inbound(cursor, &test_clients())).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert!(err.to_string().contains("UDP unsupported"));
+    }
+
+    #[test]
+    fn handle_vless_tcp_inbound_mux_command_is_unsupported() {
+        let data = build_vless_request_bytes(&USER_ID, 0x03, 443);
+        let cursor = std::io::Cursor::new(data);
+
+        let err = block_on(handle_vless_tcp_inbound(cursor, &test_clients())).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert!(err.to_string().contains("Mux unsupported"));
+    }
+
+    #[test]
+    fn handle_vless_tcp_inbound_xudp_marker_addons_are_rejected() {
+        let data = build_vless_request_with_addons(&USER_ID, b"xudp", 0x02, 443);
+        let cursor = std::io::Cursor::new(data);
+
+        let err = block_on(handle_vless_tcp_inbound(cursor, &test_clients())).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert!(err.to_string().contains("XUDP unsupported"));
     }
 
     #[test]

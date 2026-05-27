@@ -46,6 +46,7 @@ SERVER_XHTTP="${SCRIPT_DIR}/rust-xray-server.xhttp.fixture.json"
 SERVER_GRPC="${SCRIPT_DIR}/rust-xray-server.grpc.fixture.json"
 SERVER_WS="${SCRIPT_DIR}/rust-xray-server.ws.fixture.json"
 CLIENT_TEMPLATE="${SCRIPT_DIR}/xray-client-smoke.fixture.json"
+CLIENT_NEGATIVE_TEMPLATE="${SCRIPT_DIR}/xray-client-negative.template.json"
 SMOKE_FALLBACK_TCP_PID=""
 SMOKE_CIPHER_TLS_PID=""
 
@@ -111,6 +112,135 @@ client_config() {
     "${short_id}" \
     "${server_name}"
   printf '%s\n' "${output}"
+}
+
+negative_client_config() {
+  local suffix="$1"
+  local flow="${2:-}"
+  local mux_enabled="${3:-0}"
+  local packet_encoding="${4:-}"
+  local output="${SMOKE_WORK_DIR}/client-negative-${suffix}.json"
+  smoke_write_negative_client_config \
+    "${CLIENT_NEGATIVE_TEMPLATE}" \
+    "${output}" \
+    "${flow}" \
+    "${mux_enabled}" \
+    "${packet_encoding}"
+  printf '%s\n' "${output}"
+}
+
+run_negative_vless_phase() {
+  local name="$1"
+  local server_config="$2"
+  local client_config_path="$3"
+  local probe_mode="$4"
+  local regression_client="${5}"
+  shift 5
+  local patterns=("$@")
+  local decrypt_before
+
+  smoke_stop_stack
+  decrypt_before="$(smoke_decrypt_failure_count)"
+  smoke_start_stack "${server_config}" "${client_config_path}"
+  if [[ "${probe_mode}" == "curl-tcp" ]]; then
+    curl -sS -o /dev/null -m 10 \
+      -x "socks5h://127.0.0.1:${SMOKE_SOCKS_PORT}" \
+      "${SMOKE_QUICK_URL}" >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+  elif [[ "${probe_mode}" == "mux-cool" ]]; then
+    # Xray opens the mux carrier only after at least one proxied TCP request.
+    curl -sS -o /dev/null -m 10 \
+      -x "socks5h://127.0.0.1:${SMOKE_SOCKS_PORT}" \
+      "${SMOKE_QUICK_URL}" >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+    python3 "${SCRIPT_DIR}/vless-negative-probe.py" "${probe_mode}" "${SMOKE_SOCKS_PORT}" \
+      >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+  else
+    python3 "${SCRIPT_DIR}/vless-negative-probe.py" "${probe_mode}" "${SMOKE_SOCKS_PORT}" \
+      >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+  fi
+  sleep 0.5
+  SMOKE_CLIENT_CONFIG_FOR_REGRESSION="${regression_client}"
+  smoke_expect_vless_negative "${name}" "${decrypt_before}" "${patterns[@]}"
+  unset SMOKE_CLIENT_CONFIG_FOR_REGRESSION
+  unset SMOKE_REGRESSION_SERVER_CONFIG
+}
+
+phase_negative_udp_dns() {
+  local client
+  client="$(negative_client_config udp-dns "" 0 "")"
+  run_negative_vless_phase \
+    "negative-udp-dns" \
+    "${SERVER_EMPTY}" \
+    "${client}" \
+    "udp-dns" \
+    "${client}" \
+    "UDP unsupported" \
+    "unsupported vless command"
+}
+
+phase_negative_udp_quic() {
+  local client
+  client="$(negative_client_config udp-quic "" 0 "")"
+  run_negative_vless_phase \
+    "negative-udp-quic" \
+    "${SERVER_EMPTY}" \
+    "${client}" \
+    "udp-quic" \
+    "${client}" \
+    "UDP unsupported" \
+    "unsupported vless command"
+}
+
+phase_negative_udp_vision() {
+  local client regression_client
+  client="$(negative_client_config udp-vision "xtls-rprx-vision" 0 "")"
+  regression_client="$(client_config udp-vision-regression "xtls-rprx-vision")"
+  SMOKE_REGRESSION_SERVER_CONFIG="${SERVER_VISION}"
+  run_negative_vless_phase \
+    "negative-udp-vision" \
+    "${SERVER_VISION}" \
+    "${client}" \
+    "udp-dns" \
+    "${regression_client}" \
+    "doesn't support UDP" \
+    "UDP unsupported" \
+    "Mux unsupported"
+}
+
+phase_negative_mux() {
+  local client regression_client
+  client="$(negative_client_config mux "" 1 "")"
+  regression_client="$(client_config mux-regression "")"
+  SMOKE_REGRESSION_SERVER_CONFIG="${SERVER_EMPTY}"
+  run_negative_vless_phase \
+    "negative-mux" \
+    "${SERVER_EMPTY}" \
+    "${client}" \
+    "mux-cool" \
+    "${regression_client}" \
+    "Mux unsupported" \
+    "unsupported vless command"
+}
+
+phase_negative_xudp() {
+  local client
+  client="$(negative_client_config xudp "" 0 "xudp")"
+  run_negative_vless_phase \
+    "negative-xudp" \
+    "${SERVER_EMPTY}" \
+    "${client}" \
+    "udp-dns" \
+    "${client}" \
+    "XUDP unsupported" \
+    "UDP unsupported" \
+    "unsupported vless command"
+}
+
+run_negative_vless_phases() {
+  run_phase "negative UDP DNS via SOCKS" phase_negative_udp_dns
+  run_phase "negative UDP 443 / QUIC attempt" phase_negative_udp_quic
+  run_phase "negative UDP + Vision flow" phase_negative_udp_vision
+  run_phase "negative Mux request" phase_negative_mux
+  run_phase "negative XUDP request" phase_negative_xudp
 }
 
 phase_regression_empty_flow() {
@@ -439,6 +569,20 @@ phase_fallback_by_alpn_h2() {
   fallback_expect_hit "fallback-by-alpn-h2" 19506
 }
 
+phase_fallback_by_alpn_h2_curl() {
+  if ! curl --help all 2>&1 | grep -q -- '--http2'; then
+    SMOKE_PHASE_NAMES+=("SKIP fallback by ALPN h2 curl")
+    echo "Skipping fallback by ALPN h2 curl (curl without --http2 support)"
+    return 0
+  fi
+
+  smoke_stop_stack
+  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
+  smoke_start_server "${SERVER_FALLBACKS}"
+  curl -sk --http2 --max-time 5 "https://127.0.0.1:${SMOKE_SERVER_PORT}/" >/dev/null 2>&1 || true
+  fallback_expect_hit "fallback-by-alpn-h2-curl" 19506
+}
+
 phase_fallback_xver_proxy_v2() {
   smoke_stop_stack
   rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
@@ -456,6 +600,7 @@ run_fallback_phases() {
   run_phase "fallback by HTTP path" phase_fallback_by_http_path
   run_phase "fallback by ALPN http/1.1" phase_fallback_by_alpn_http11
   run_phase "fallback by ALPN h2" phase_fallback_by_alpn_h2
+  run_phase "fallback by ALPN h2 curl" phase_fallback_by_alpn_h2_curl
   run_phase "fallback xver=1 PROXY v1" phase_fallback_xver_proxy_v1
   run_phase "fallback xver=2 PROXY v2" phase_fallback_xver_proxy_v2
   smoke_stop_process "${SMOKE_FALLBACK_TCP_PID:-}"
@@ -537,6 +682,8 @@ main() {
   run_fallback_phases
 
   run_cipher_phases
+
+  run_negative_vless_phases
 
   echo
   smoke_write_report "${SMOKE_REPORT_PATH}"

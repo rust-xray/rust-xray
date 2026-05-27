@@ -131,6 +131,111 @@ output.write_text(json.dumps(cfg, indent=2) + "\n")
 PY
 }
 
+smoke_write_negative_client_config() {
+  local template_path="$1"
+  local output_path="$2"
+  local flow="${3:-}"
+  local mux_enabled="${4:-0}"
+  local packet_encoding="${5:-}"
+
+  SMOKE_TEMPLATE="${template_path}" \
+    SMOKE_OUTPUT="${output_path}" \
+    SMOKE_FLOW="${flow}" \
+    SMOKE_MUX_ENABLED="${mux_enabled}" \
+    SMOKE_PACKET_ENCODING="${packet_encoding}" \
+    SMOKE_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+template = Path(os.environ["SMOKE_TEMPLATE"])
+output = Path(os.environ["SMOKE_OUTPUT"])
+cfg = json.loads(template.read_text())
+
+user = cfg["outbounds"][0]["settings"]["vnext"][0]["users"][0]
+flow = os.environ["SMOKE_FLOW"]
+if flow:
+    user["flow"] = flow
+else:
+    user["flow"] = ""
+
+packet_encoding = os.environ.get("SMOKE_PACKET_ENCODING", "")
+if packet_encoding:
+    user["packetEncoding"] = packet_encoding
+elif "packetEncoding" in user:
+    del user["packetEncoding"]
+
+if os.environ.get("SMOKE_MUX_ENABLED") == "1":
+    cfg["outbounds"][0]["mux"] = {"enabled": True, "concurrency": 8}
+elif "mux" in cfg["outbounds"][0]:
+    del cfg["outbounds"][0]["mux"]
+
+cfg["outbounds"][0]["streamSettings"]["realitySettings"]["publicKey"] = os.environ[
+    "SMOKE_PUBLIC_KEY"
+]
+
+output.write_text(json.dumps(cfg, indent=2) + "\n")
+PY
+}
+
+smoke_decrypt_failure_count() {
+  grep -Ec 'AES-(128|256)-GCM decrypt failed|ChaCha20-Poly1305 decrypt failed|TLS application-stream record decrypt failed' \
+    "${SMOKE_SERVER_LOG}" || true
+}
+
+smoke_log_matches_any() {
+  local pattern
+  for pattern in "$@"; do
+    if smoke_log_contains "${pattern}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+smoke_expect_vless_negative() {
+  local name="$1"
+  local decrypt_before="$2"
+  shift 2
+  local patterns=("$@")
+
+  if ! kill -0 "${SMOKE_SERVER_PID}" 2>/dev/null; then
+    echo "error: ${name} rust-xray server is not running" >&2
+    return 1
+  fi
+
+  if smoke_log_contains "panicked at"; then
+    echo "error: ${name} rust-xray panicked" >&2
+    return 1
+  fi
+
+  local decrypt_after
+  decrypt_after="$(smoke_decrypt_failure_count)"
+  if [[ "${decrypt_after}" -gt "${decrypt_before}" ]]; then
+    echo "error: ${name} saw new AES-GCM decrypt failures" >&2
+    return 1
+  fi
+
+  if ! smoke_log_matches_any "${patterns[@]}"; then
+    echo "error: ${name} missing expected server log patterns: ${patterns[*]}" >&2
+    return 1
+  fi
+
+  if [[ -n "${SMOKE_REGRESSION_SERVER_CONFIG:-}" ]]; then
+    smoke_stop_stack
+    smoke_start_stack \
+      "${SMOKE_REGRESSION_SERVER_CONFIG}" \
+      "${SMOKE_CLIENT_CONFIG_FOR_REGRESSION:-}"
+  else
+    smoke_stop_process "${SMOKE_CLIENT_PID:-}"
+    smoke_start_client "${SMOKE_CLIENT_CONFIG_FOR_REGRESSION:-}"
+  fi
+  sleep 1
+
+  smoke_record_curl "${name}-tcp-regression" -m 20 "${SMOKE_QUICK_URL}"
+}
+
 smoke_curl_socks() {
   curl -sS -o /dev/null -w '%{http_code}' \
     -x "socks5h://127.0.0.1:${SMOKE_SOCKS_PORT}" \

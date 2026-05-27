@@ -15,6 +15,7 @@ const PROXY_V2_CMD_PROXY: u8 = 0x01;
 const PROXY_V2_AF_INET: u8 = 0x10;
 const PROXY_V2_AF_INET6: u8 = 0x20;
 const PROXY_V2_TYPE_STREAM: u8 = 0x01;
+const PROXY_V2_LOCAL_CMD: u8 = 0x00;
 
 /// Xray-compatible VLESS/Trojan fallback entry.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -298,7 +299,9 @@ fn path_prefix_match_len(fallback: &FallbackConfig, ctx: &FallbackContext) -> us
 
 fn is_better_fallback_candidate(
     candidate: &FallbackConfig,
+    candidate_index: usize,
     current_best: &FallbackConfig,
+    current_index: usize,
     ctx: &FallbackContext,
 ) -> bool {
     let candidate_score = fallback_specificity(candidate);
@@ -307,7 +310,37 @@ fn is_better_fallback_candidate(
         return candidate_score > best_score;
     }
 
-    path_prefix_match_len(candidate, ctx) > path_prefix_match_len(current_best, ctx)
+    let candidate_path = path_prefix_match_len(candidate, ctx);
+    let best_path = path_prefix_match_len(current_best, ctx);
+    if candidate_path != best_path {
+        return candidate_path > best_path;
+    }
+
+    // Xray-style config order: later duplicate keys win on equal specificity.
+    candidate_index > current_index
+}
+
+fn pick_best_fallback<'a>(
+    best: Option<(usize, &'a FallbackConfig)>,
+    candidate_index: usize,
+    candidate: &'a FallbackConfig,
+    ctx: &FallbackContext,
+) -> Option<(usize, &'a FallbackConfig)> {
+    Some(match best {
+        None => (candidate_index, candidate),
+        Some((best_index, current))
+            if is_better_fallback_candidate(
+                candidate,
+                candidate_index,
+                current,
+                best_index,
+                ctx,
+            ) =>
+        {
+            (candidate_index, candidate)
+        }
+        Some(current) => current,
+    })
 }
 
 /// Select a configured fallback using Xray-style inheritance rules.
@@ -320,34 +353,24 @@ pub fn select_vless_fallback<'a>(
     }
 
     if ctx.http_path.is_some() {
-        let mut best: Option<&FallbackConfig> = None;
-        for fallback in fallbacks {
+        let mut best: Option<(usize, &FallbackConfig)> = None;
+        for (index, fallback) in fallbacks.iter().enumerate() {
             if fallback.path.is_some() && matches_with_path(fallback, ctx) {
-                best = Some(match best {
-                    None => fallback,
-                    Some(current) if is_better_fallback_candidate(fallback, current, ctx) => {
-                        fallback
-                    }
-                    Some(current) => current,
-                });
+                best = pick_best_fallback(best, index, fallback, ctx);
             }
         }
-        if let Some(selected) = best {
+        if let Some((_, selected)) = best {
             return Some(selected);
         }
     }
 
-    let mut best: Option<&FallbackConfig> = None;
-    for fallback in fallbacks {
+    let mut best: Option<(usize, &FallbackConfig)> = None;
+    for (index, fallback) in fallbacks.iter().enumerate() {
         if !fallback.is_default() && matches_without_path(fallback, ctx) {
-            best = Some(match best {
-                None => fallback,
-                Some(current) if is_better_fallback_candidate(fallback, current, ctx) => fallback,
-                Some(current) => current,
-            });
+            best = pick_best_fallback(best, index, fallback, ctx);
         }
     }
-    if let Some(selected) = best {
+    if let Some((_, selected)) = best {
         return Some(selected);
     }
 
@@ -373,10 +396,11 @@ pub fn build_proxy_protocol_v2(
     source: SocketAddr,
     destination: SocketAddr,
 ) -> std::io::Result<Vec<u8>> {
+    let mut header = Vec::with_capacity(52);
+    header.extend_from_slice(&PROXY_V2_SIGNATURE);
+
     match (source, destination) {
         (SocketAddr::V4(src), SocketAddr::V4(dst)) => {
-            let mut header = Vec::with_capacity(28);
-            header.extend_from_slice(&PROXY_V2_SIGNATURE);
             header.push(PROXY_V2_VERSION | PROXY_V2_CMD_PROXY);
             header.push(PROXY_V2_AF_INET | PROXY_V2_TYPE_STREAM);
             header.extend_from_slice(&12u16.to_be_bytes());
@@ -387,8 +411,6 @@ pub fn build_proxy_protocol_v2(
             Ok(header)
         }
         (SocketAddr::V6(src), SocketAddr::V6(dst)) => {
-            let mut header = Vec::with_capacity(52);
-            header.extend_from_slice(&PROXY_V2_SIGNATURE);
             header.push(PROXY_V2_VERSION | PROXY_V2_CMD_PROXY);
             header.push(PROXY_V2_AF_INET6 | PROXY_V2_TYPE_STREAM);
             header.extend_from_slice(&36u16.to_be_bytes());
@@ -398,10 +420,12 @@ pub fn build_proxy_protocol_v2(
             header.extend_from_slice(&dst.port().to_be_bytes());
             Ok(header)
         }
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "PROXY protocol v2 requires matching IP versions for source and destination",
-        )),
+        _ => {
+            header.push(PROXY_V2_VERSION | PROXY_V2_LOCAL_CMD);
+            header.push(0x00);
+            header.extend_from_slice(&0u16.to_be_bytes());
+            Ok(header)
+        }
     }
 }
 
@@ -424,12 +448,7 @@ pub fn build_proxy_protocol_v1(
             src.port(),
             dst.port()
         ),
-        _ => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "PROXY protocol v1 requires matching IP versions for source and destination",
-            ))
-        }
+        _ => "PROXY UNKNOWN\r\n".to_string(),
     };
     Ok(header.into_bytes())
 }
@@ -519,6 +538,46 @@ mod tests {
     }
 
     #[test]
+    fn select_by_alpn_http11() {
+        let fallbacks = vec![
+            fallback(None, None, None, "127.0.0.1:8080", 0),
+            fallback(None, Some("http/1.1"), None, "127.0.0.1:8085", 0),
+        ];
+        let ctx = FallbackContext {
+            alpn: Some("http/1.1".to_string()),
+            ..FallbackContext::default()
+        };
+        let selected = select_vless_fallback(&fallbacks, &ctx).expect("selected");
+        assert_eq!(selected.dest.addr, "127.0.0.1:8085");
+    }
+
+    #[test]
+    fn select_duplicate_alpn_last_one_wins() {
+        let fallbacks = vec![
+            fallback(None, Some("h2"), None, "127.0.0.1:8082", 0),
+            fallback(None, Some("h2"), None, "127.0.0.1:8092", 0),
+        ];
+        let ctx = FallbackContext {
+            alpn: Some("h2".to_string()),
+            ..FallbackContext::default()
+        };
+        let selected = select_vless_fallback(&fallbacks, &ctx).expect("selected");
+        assert_eq!(selected.dest.addr, "127.0.0.1:8092");
+    }
+
+    #[test]
+    fn select_duplicate_path_last_one_wins() {
+        let fallbacks = vec![
+            fallback(None, None, Some("/smoke-path"), "127.0.0.1:8083", 0),
+            fallback(None, None, Some("/smoke-path"), "127.0.0.1:8093", 0),
+        ];
+        let request = b"GET /smoke-path/extra HTTP/1.1\r\nHost: x\r\n\r\n";
+        let ctx = build_fallback_context(None, request);
+        let selected = select_vless_fallback(&fallbacks, &ctx).expect("selected");
+        assert_eq!(selected.dest.addr, "127.0.0.1:8093");
+    }
+
+    #[test]
     fn select_by_path_with_inheritance_when_path_missing() {
         let fallbacks = vec![
             fallback(None, None, None, "127.0.0.1:8080", 0),
@@ -580,6 +639,39 @@ mod tests {
                 0x00, 0x0C, 0x7F, 0x00, 0x00, 0x01, 0x7F, 0x00, 0x00, 0x01, 0x30, 0x39, 0x5F, 0x7B,
             ]
         );
+    }
+
+    #[test]
+    fn xver_2_builds_valid_proxy_v2_header_ipv6() {
+        let header = build_proxy_protocol_v2(
+            "[::1]:12345".parse().unwrap(),
+            "[::1]:24443".parse().unwrap(),
+        )
+        .expect("proxy v2 ipv6 header");
+        assert_eq!(header.len(), 52);
+        assert_eq!(&header[..12], PROXY_V2_SIGNATURE);
+        assert_eq!(header[12], 0x21);
+        assert_eq!(header[13], 0x21);
+        assert_eq!(&header[14..16], &[0x00, 0x24]);
+    }
+
+    #[test]
+    fn xver_2_builds_unknown_family_for_mismatched_ip_versions() {
+        let header = build_proxy_protocol_v2(
+            "127.0.0.1:12345".parse().unwrap(),
+            "[::1]:24443".parse().unwrap(),
+        )
+        .expect("proxy v2 unknown header");
+        assert_eq!(header.len(), 16);
+        assert_eq!(&header[..12], PROXY_V2_SIGNATURE);
+        assert_eq!(&header[12..], &[0x20, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn validate_fallback_xver_rejects_values_above_two() {
+        let err = validate_fallback_xver(3).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("unsupported fallback xver: 3"));
     }
 
     #[test]

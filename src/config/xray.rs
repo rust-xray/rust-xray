@@ -179,9 +179,9 @@ pub fn validate_reality_transport_network(network: Option<&str>) -> std::io::Res
             std::io::ErrorKind::InvalidInput,
             "REALITY over WebSocket transport (network=ws) is not supported",
         )),
-        Some("mkcp") => Err(std::io::Error::new(
+        Some("mkcp") | Some("kcp") => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "REALITY over mKCP transport (network=mkcp) is not supported",
+            "REALITY over mKCP transport (network=mkcp/kcp) is not supported",
         )),
         Some("httpupgrade") => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -198,11 +198,24 @@ pub fn validate_reality_transport_network(network: Option<&str>) -> std::io::Res
     }
 }
 
-fn reality_transport_network(inbound: &InboundObject) -> Option<&str> {
-    inbound
-        .stream_settings
-        .as_ref()
-        .and_then(|stream| stream.network.as_deref())
+/// Validate `streamSettings.network` when `streamSettings.security` is REALITY.
+pub fn validate_reality_stream_settings(stream: &StreamSettingsObject) -> std::io::Result<()> {
+    if !is_reality_security(stream.security.as_deref()) {
+        return Ok(());
+    }
+
+    validate_reality_transport_network(stream.network.as_deref())
+}
+
+fn validate_vless_reality_inbound_stream(inbound: &InboundObject) -> std::io::Result<()> {
+    let stream = inbound.stream_settings.as_ref().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "VLESS REALITY inbound is missing streamSettings",
+        )
+    })?;
+
+    validate_reality_stream_settings(stream)
 }
 
 pub fn find_vless_reality_inbounds(config: &XrayConfig) -> Vec<&InboundObject> {
@@ -299,15 +312,12 @@ pub fn load_xray_config_from_file(path: impl AsRef<Path>) -> std::io::Result<Xra
 pub fn find_reality_inbounds(config: &XrayConfig) -> Vec<&InboundObject> {
     find_vless_reality_inbounds(config)
         .into_iter()
-        .filter(|inbound| {
-            validate_reality_transport_network(reality_transport_network(inbound)).is_ok()
-        })
+        .filter(|inbound| validate_vless_reality_inbound_stream(inbound).is_ok())
         .collect()
 }
 
 pub fn is_supported_reality_tcp_inbound(inbound: &InboundObject) -> bool {
-    is_vless_reality_inbound(inbound)
-        && validate_reality_transport_network(reality_transport_network(inbound)).is_ok()
+    is_vless_reality_inbound(inbound) && validate_vless_reality_inbound_stream(inbound).is_ok()
 }
 
 pub fn get_inbound_reality_settings(inbound: &InboundObject) -> Option<&RealitySettingsObject> {
@@ -466,8 +476,7 @@ pub fn first_reality_inbound_runtime(
     let inbounds = find_reality_inbounds(config);
     let inbound = inbounds.first().ok_or_else(|| {
         if let Some(inbound) = vless_reality_inbounds.first() {
-            if let Err(err) = validate_reality_transport_network(reality_transport_network(inbound))
-            {
+            if let Err(err) = validate_vless_reality_inbound_stream(inbound) {
                 return err;
             }
         }
@@ -533,6 +542,7 @@ pub fn first_reality_inbound_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     const TEST_REALITY_PRIVATE_KEY: &str = "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4";
 
@@ -1060,7 +1070,11 @@ mod tests {
         let cases = [
             (
                 "mkcp",
-                "REALITY over mKCP transport (network=mkcp) is not supported",
+                "REALITY over mKCP transport (network=mkcp/kcp) is not supported",
+            ),
+            (
+                "kcp",
+                "REALITY over mKCP transport (network=mkcp/kcp) is not supported",
             ),
             (
                 "httpupgrade",
@@ -1076,6 +1090,47 @@ mod tests {
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{network}");
             assert_eq!(err.to_string(), message, "{network}");
         }
+    }
+
+    #[test]
+    fn validate_reality_stream_settings_skips_non_reality_security() {
+        let stream = StreamSettingsObject {
+            network: Some("ws".to_string()),
+            security: Some("tls".to_string()),
+            reality_settings: None,
+            extra: BTreeMap::new(),
+        };
+
+        assert!(validate_reality_stream_settings(&stream).is_ok());
+    }
+
+    #[test]
+    fn validate_reality_stream_settings_rejects_xhttp_with_reality_security() {
+        let stream = StreamSettingsObject {
+            network: Some("xhttp".to_string()),
+            security: Some("reality".to_string()),
+            reality_settings: None,
+            extra: BTreeMap::new(),
+        };
+
+        let err = validate_reality_stream_settings(&stream).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(
+            err.to_string(),
+            "REALITY over XHTTP runtime is not implemented yet"
+        );
+    }
+
+    #[test]
+    fn validate_reality_stream_settings_accepts_raw_with_reality_security() {
+        let stream = StreamSettingsObject {
+            network: Some("raw".to_string()),
+            security: Some("reality".to_string()),
+            reality_settings: None,
+            extra: BTreeMap::new(),
+        };
+
+        assert!(validate_reality_stream_settings(&stream).is_ok());
     }
 
     #[test]

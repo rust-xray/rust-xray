@@ -66,6 +66,20 @@ pub fn parse_vless_request(input: &[u8]) -> std::io::Result<(VlessRequest, usize
         b => VlessCommand::Unknown(b),
     };
 
+    // Xray omits address/port on the wire for Mux (and Rvs) commands.
+    if command == VlessCommand::Mux {
+        return Ok((
+            VlessRequest {
+                version,
+                user_id,
+                command,
+                destination: VlessDestination::Domain("v1.mux.cool".to_string(), 0),
+                additional_info,
+            },
+            offset,
+        ));
+    }
+
     let port_bytes = input.get(offset..offset + 2).ok_or_else(unexpected_eof)?;
     let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
     offset += 2;
@@ -388,6 +402,25 @@ mod tests {
 
         assert_eq!(request.user_id, uuid::Uuid::from_bytes(LIVE_SMOKE_USER_ID));
         assert_eq!(initial_payload, tls_client_hello);
+    }
+
+    #[test]
+    fn parse_vless_request_mux_command_has_no_address_on_wire() {
+        let mut input = Vec::new();
+        input.push(0);
+        input.extend_from_slice(&USER_ID);
+        input.push(0);
+        input.push(0x03);
+        input.extend_from_slice(b"mux-session-bytes");
+
+        let (request, consumed) = parse_vless_request(&input).unwrap();
+
+        assert_eq!(consumed, 19);
+        assert_eq!(request.command, VlessCommand::Mux);
+        assert_eq!(
+            request.destination,
+            VlessDestination::Domain("v1.mux.cool".to_string(), 0)
+        );
     }
 
     #[test]
