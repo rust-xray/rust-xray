@@ -502,6 +502,19 @@ pub fn reality_mldsa65_seed(
     crate::reality::decode_mldsa65_seed(settings.mldsa65_seed.as_deref(), private_key)
 }
 
+pub fn validate_reality_mldsa65_runtime_gate(
+    mldsa65_seed: Option<&crate::reality::Mldsa65Seed>,
+) -> std::io::Result<()> {
+    if mldsa65_seed.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "REALITY mldsa65Seed is parsed but runtime ML-DSA-65 signing is not enabled",
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn first_reality_inbound_runtime(
     config: &XrayConfig,
 ) -> std::io::Result<RealityInboundRuntime> {
@@ -552,6 +565,7 @@ pub fn first_reality_inbound_runtime(
     let private_key = reality_private_key(settings)?.to_owned();
     crate::reality::validate_reality_private_key_b64(&private_key)?;
     let mldsa65_seed = reality_mldsa65_seed(settings, &private_key)?;
+    validate_reality_mldsa65_runtime_gate(mldsa65_seed.as_ref())?;
     crate::vless::validate_vless_client_flows(&vless_clients)?;
     crate::vless::build_vless_clients(&vless_clients).map(|_| ())?;
 
@@ -1704,13 +1718,34 @@ mod tests {
     }
 
     #[test]
-    fn accepts_valid_mldsa65_seed_in_runtime() {
+    fn rejects_valid_mldsa65_seed_at_runtime_gate() {
         let config: XrayConfig =
             serde_json::from_str(&minimal_reality_config_json(Some(TEST_MLDSA65_SEED))).unwrap();
-        let runtime = first_reality_inbound_runtime(&config).unwrap();
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
 
-        let seed = runtime.mldsa65_seed.expect("expected parsed mldsa65 seed");
-        assert_eq!(seed.as_bytes().len(), crate::reality::MLDSA65_SEED_LEN);
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains(
+            "REALITY mldsa65Seed is parsed but runtime ML-DSA-65 signing is not enabled"
+        ));
+    }
+
+    #[test]
+    fn validates_absent_mldsa65_seed_at_runtime_gate() {
+        validate_reality_mldsa65_runtime_gate(None).expect("absent seed remains old behavior");
+    }
+
+    #[test]
+    fn rejects_present_mldsa65_seed_at_runtime_gate() {
+        let seed =
+            crate::reality::decode_mldsa65_seed(Some(TEST_MLDSA65_SEED), TEST_REALITY_PRIVATE_KEY)
+                .unwrap()
+                .unwrap();
+        let err = validate_reality_mldsa65_runtime_gate(Some(&seed)).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err
+            .to_string()
+            .contains("runtime ML-DSA-65 signing is not enabled"));
     }
 
     #[test]
@@ -1769,9 +1804,32 @@ mod tests {
 
     #[test]
     fn reality_inbound_runtime_debug_does_not_expose_mldsa65_seed() {
-        let config: XrayConfig =
-            serde_json::from_str(&minimal_reality_config_json(Some(TEST_MLDSA65_SEED))).unwrap();
-        let runtime = first_reality_inbound_runtime(&config).unwrap();
+        let seed =
+            crate::reality::decode_mldsa65_seed(Some(TEST_MLDSA65_SEED), TEST_REALITY_PRIVATE_KEY)
+                .unwrap()
+                .unwrap();
+        let runtime = RealityInboundRuntime {
+            tag: Some("reality-in".to_string()),
+            protocol: Some("vless".to_string()),
+            listen_addr: "127.0.0.1:443".to_string(),
+            dest_addr: "www.example.com:443".to_string(),
+            private_key: TEST_REALITY_PRIVATE_KEY.to_string(),
+            server_names: vec!["www.example.com".to_string()],
+            short_ids: vec![Vec::new()],
+            max_time_diff: 0,
+            min_client_ver: None,
+            max_client_ver: None,
+            show: false,
+            mldsa65_seed: Some(seed),
+            vless_clients: vec![VlessClientObject {
+                id: "00000000-0000-0000-0000-000000000001".to_string(),
+                email: None,
+                flow: None,
+                extra: BTreeMap::new(),
+            }],
+            vless_decryption: "none".to_string(),
+            vless_fallbacks: Vec::new(),
+        };
         let debug = format!("{runtime:?}");
 
         assert!(debug.contains("mldsa65_seed"));
