@@ -7,6 +7,14 @@ use crate::protocol::structs::ClientHelloPayload;
 use crate::reality::extract_sni_hostname;
 
 const FALLBACK_LOCALHOST: &str = "127.0.0.1";
+const PROXY_V2_SIGNATURE: [u8; 12] = [
+    0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+];
+const PROXY_V2_VERSION: u8 = 0x20;
+const PROXY_V2_CMD_PROXY: u8 = 0x01;
+const PROXY_V2_AF_INET: u8 = 0x10;
+const PROXY_V2_AF_INET6: u8 = 0x20;
+const PROXY_V2_TYPE_STREAM: u8 = 0x01;
 
 /// Xray-compatible VLESS/Trojan fallback entry.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -140,6 +148,14 @@ pub fn validate_fallback_configs(fallbacks: &[FallbackConfig]) -> std::io::Resul
                 format!("fallbacks[{index}] xver invalid: {err}"),
             )
         })?;
+        if let Some(path) = &fallback.path {
+            if !path.starts_with('/') {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("fallbacks[{index}] path must start with '/': {path:?}"),
+                ));
+            }
+        }
         if fallback.dest.addr.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -152,11 +168,7 @@ pub fn validate_fallback_configs(fallbacks: &[FallbackConfig]) -> std::io::Resul
 
 pub fn validate_fallback_xver(xver: u8) -> std::io::Result<()> {
     match xver {
-        0 | 1 => Ok(()),
-        2 => Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "PROXY protocol v2 (xver=2) is not supported",
-        )),
+        0 | 1 | 2 => Ok(()),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unsupported fallback xver: {other}"),
@@ -261,6 +273,43 @@ fn matches_without_path(fallback: &FallbackConfig, ctx: &FallbackContext) -> boo
     fallback.path.is_none() && matches_name_alpn(fallback, ctx)
 }
 
+fn fallback_specificity(fallback: &FallbackConfig) -> u32 {
+    let mut score = 0;
+    if fallback.name.is_some() {
+        score += 1;
+    }
+    if fallback.alpn.is_some() {
+        score += 1;
+    }
+    if fallback.path.is_some() {
+        score += 2;
+    }
+    score
+}
+
+fn path_prefix_match_len(fallback: &FallbackConfig, ctx: &FallbackContext) -> usize {
+    match (fallback.path.as_deref(), ctx.http_path.as_deref()) {
+        (Some(expected), Some(path)) if path == expected || path.starts_with(expected) => {
+            expected.len()
+        }
+        _ => 0,
+    }
+}
+
+fn is_better_fallback_candidate(
+    candidate: &FallbackConfig,
+    current_best: &FallbackConfig,
+    ctx: &FallbackContext,
+) -> bool {
+    let candidate_score = fallback_specificity(candidate);
+    let best_score = fallback_specificity(current_best);
+    if candidate_score != best_score {
+        return candidate_score > best_score;
+    }
+
+    path_prefix_match_len(candidate, ctx) > path_prefix_match_len(current_best, ctx)
+}
+
 /// Select a configured fallback using Xray-style inheritance rules.
 pub fn select_vless_fallback<'a>(
     fallbacks: &'a [FallbackConfig],
@@ -271,17 +320,35 @@ pub fn select_vless_fallback<'a>(
     }
 
     if ctx.http_path.is_some() {
+        let mut best: Option<&FallbackConfig> = None;
         for fallback in fallbacks {
             if fallback.path.is_some() && matches_with_path(fallback, ctx) {
-                return Some(fallback);
+                best = Some(match best {
+                    None => fallback,
+                    Some(current) if is_better_fallback_candidate(fallback, current, ctx) => {
+                        fallback
+                    }
+                    Some(current) => current,
+                });
             }
+        }
+        if let Some(selected) = best {
+            return Some(selected);
         }
     }
 
+    let mut best: Option<&FallbackConfig> = None;
     for fallback in fallbacks {
         if !fallback.is_default() && matches_without_path(fallback, ctx) {
-            return Some(fallback);
+            best = Some(match best {
+                None => fallback,
+                Some(current) if is_better_fallback_candidate(fallback, current, ctx) => fallback,
+                Some(current) => current,
+            });
         }
+    }
+    if let Some(selected) = best {
+        return Some(selected);
     }
 
     fallbacks
@@ -300,6 +367,42 @@ pub fn resolve_fallback_target(
         return Ok((fallback.dest.addr.clone(), fallback.xver));
     }
     Ok((reality_dest.to_string(), 0))
+}
+
+pub fn build_proxy_protocol_v2(
+    source: SocketAddr,
+    destination: SocketAddr,
+) -> std::io::Result<Vec<u8>> {
+    match (source, destination) {
+        (SocketAddr::V4(src), SocketAddr::V4(dst)) => {
+            let mut header = Vec::with_capacity(28);
+            header.extend_from_slice(&PROXY_V2_SIGNATURE);
+            header.push(PROXY_V2_VERSION | PROXY_V2_CMD_PROXY);
+            header.push(PROXY_V2_AF_INET | PROXY_V2_TYPE_STREAM);
+            header.extend_from_slice(&12u16.to_be_bytes());
+            header.extend_from_slice(&src.ip().octets());
+            header.extend_from_slice(&dst.ip().octets());
+            header.extend_from_slice(&src.port().to_be_bytes());
+            header.extend_from_slice(&dst.port().to_be_bytes());
+            Ok(header)
+        }
+        (SocketAddr::V6(src), SocketAddr::V6(dst)) => {
+            let mut header = Vec::with_capacity(52);
+            header.extend_from_slice(&PROXY_V2_SIGNATURE);
+            header.push(PROXY_V2_VERSION | PROXY_V2_CMD_PROXY);
+            header.push(PROXY_V2_AF_INET6 | PROXY_V2_TYPE_STREAM);
+            header.extend_from_slice(&36u16.to_be_bytes());
+            header.extend_from_slice(&src.ip().octets());
+            header.extend_from_slice(&dst.ip().octets());
+            header.extend_from_slice(&src.port().to_be_bytes());
+            header.extend_from_slice(&dst.port().to_be_bytes());
+            Ok(header)
+        }
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "PROXY protocol v2 requires matching IP versions for source and destination",
+        )),
+    }
 }
 
 pub fn build_proxy_protocol_v1(
@@ -457,8 +560,57 @@ mod tests {
     }
 
     #[test]
-    fn xver_2_is_unsupported() {
-        let err = validate_fallback_xver(2).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+    fn xver_2_builds_valid_proxy_v2_header() {
+        assert!(validate_fallback_xver(2).is_ok());
+
+        let header = build_proxy_protocol_v2(
+            "127.0.0.1:12345".parse().unwrap(),
+            "127.0.0.1:24443".parse().unwrap(),
+        )
+        .expect("proxy v2 header");
+        assert_eq!(header.len(), 28);
+        assert_eq!(&header[..12], PROXY_V2_SIGNATURE);
+        assert_eq!(header[12], 0x21);
+        assert_eq!(header[13], 0x11);
+        assert_eq!(&header[14..16], &[0x00, 0x0C]);
+        assert_eq!(
+            header,
+            [
+                0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A, 0x21, 0x11,
+                0x00, 0x0C, 0x7F, 0x00, 0x00, 0x01, 0x7F, 0x00, 0x00, 0x01, 0x30, 0x39, 0x5F, 0x7B,
+            ]
+        );
+    }
+
+    #[test]
+    fn select_by_name_alpn_and_path_prefers_most_specific_match() {
+        let fallbacks = vec![
+            fallback(None, None, None, "127.0.0.1:8080", 0),
+            fallback(Some("named.test"), None, None, "127.0.0.1:8081", 0),
+            fallback(None, Some("h2"), None, "127.0.0.1:8082", 0),
+            fallback(None, None, Some("/secret"), "127.0.0.1:8083", 0),
+            fallback(
+                Some("named.test"),
+                Some("h2"),
+                Some("/secret"),
+                "127.0.0.1:8084",
+                0,
+            ),
+        ];
+        let ctx = FallbackContext {
+            sni: Some("named.test".to_string()),
+            alpn: Some("h2".to_string()),
+            http_path: Some("/secret/extra".to_string()),
+        };
+        let selected = select_vless_fallback(&fallbacks, &ctx).expect("selected");
+        assert_eq!(selected.dest.addr, "127.0.0.1:8084");
+    }
+
+    #[test]
+    fn validate_fallback_configs_rejects_path_without_leading_slash() {
+        let fallbacks = vec![fallback(None, None, Some("secret"), "127.0.0.1:8080", 0)];
+        let err = validate_fallback_configs(&fallbacks).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("path must start with '/'"));
     }
 }

@@ -5,7 +5,7 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::info;
 
-use crate::vless::{build_proxy_protocol_v1, validate_fallback_xver};
+use crate::vless::{build_proxy_protocol_v1, build_proxy_protocol_v2, validate_fallback_xver};
 
 const FALLBACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -46,15 +46,20 @@ pub async fn relay_fallback_with_xver(
         })??;
     info!(%dest_addr, xver, "fallback connected");
 
-    if xver == 1 {
+    if xver == 1 || xver == 2 {
         let peer = client.peer_addr()?;
         let local = client.local_addr()?;
-        let proxy_header = build_proxy_protocol_v1(peer, local)?;
+        let proxy_header = if xver == 1 {
+            build_proxy_protocol_v1(peer, local)?
+        } else {
+            build_proxy_protocol_v2(peer, local)?
+        };
         dest.write_all(&proxy_header).await?;
         info!(
             %dest_addr,
             proxy_header_len = proxy_header.len(),
-            "PROXY protocol v1 header forwarded"
+            xver,
+            "PROXY protocol header forwarded"
         );
     }
 

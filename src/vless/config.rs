@@ -1,11 +1,39 @@
 use crate::config::VlessClientObject;
 use crate::vless::vision::vision_relay_supported;
 
+const VLESS_CUSTOM_ID_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([0; 16]);
+
 #[derive(Debug, Clone)]
 pub struct VlessClient {
     pub id: uuid::Uuid,
     pub email: Option<String>,
     pub flow: Option<String>,
+}
+
+/// Parse a VLESS user id the same way as Xray-core `common/uuid.ParseString`.
+pub fn parse_vless_user_id(input: &str) -> std::io::Result<uuid::Uuid> {
+    let len = input.len();
+
+    if (32..=36).contains(&len) {
+        return input.parse::<uuid::Uuid>().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid VLESS client id: {input}"),
+            )
+        });
+    }
+
+    if len == 0 || len > 30 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid VLESS client id: {input}"),
+        ));
+    }
+
+    Ok(uuid::Uuid::new_v5(
+        &VLESS_CUSTOM_ID_NAMESPACE,
+        input.as_bytes(),
+    ))
 }
 
 pub fn validate_vless_client_flow(flow: Option<&str>) -> std::io::Result<()> {
@@ -34,12 +62,7 @@ pub fn build_vless_clients(clients: &[VlessClientObject]) -> std::io::Result<Vec
     clients
         .iter()
         .map(|client| {
-            let id = client.id.parse::<uuid::Uuid>().map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("invalid VLESS client id: {}", client.id),
-                )
-            })?;
+            let id = parse_vless_user_id(&client.id)?;
 
             Ok(VlessClient {
                 id,
@@ -81,9 +104,74 @@ mod tests {
     }
 
     #[test]
-    fn build_vless_clients_rejects_invalid_uuid() {
-        let err = build_vless_clients(&[client_object("not-a-uuid", None, None)]).unwrap_err();
+    fn parse_vless_user_id_accepts_canonical_uuid_unchanged() {
+        let id = parse_vless_user_id("00000000-0000-0000-0000-000000000001").unwrap();
+        assert_eq!(
+            id,
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_vless_user_id_accepts_dashless_uuid_unchanged() {
+        let id = parse_vless_user_id("00000000000000000000000000000001").unwrap();
+        assert_eq!(
+            id,
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_vless_user_id_maps_custom_string_like_xray() {
+        let id = parse_vless_user_id("example").unwrap();
+        assert_eq!(
+            id,
+            uuid::Uuid::parse_str("feb54431-301b-52bb-a6dd-e1e93e81bb9e").unwrap()
+        );
+
+        let id = parse_vless_user_id("not-a-uuid").unwrap();
+        assert_eq!(
+            id,
+            uuid::Uuid::parse_str("9b70e619-d7b3-55b1-b743-756ebd573b4e").unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_vless_user_id_maps_utf8_custom_string_like_xray() {
+        let id = parse_vless_user_id("我爱🍉老师1314").unwrap();
+        assert_eq!(
+            id,
+            uuid::Uuid::parse_str("5783a3e7-e373-51cd-8642-c83782b807c5").unwrap()
+        );
+        assert_eq!("我爱🍉老师1314".len(), 20);
+    }
+
+    #[test]
+    fn parse_vless_user_id_rejects_empty_and_too_long_custom_strings() {
+        for input in ["", &"a".repeat(31)] {
+            let err = parse_vless_user_id(input).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::InvalidInput,
+                "input len={}",
+                input.len()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_vless_user_id_rejects_invalid_uuid_length_strings() {
+        let err = parse_vless_user_id("00000000-0000-0000-0000-00000000000g").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn build_vless_clients_maps_custom_string_id() {
+        let clients = build_vless_clients(&[client_object("example", None, None)]).unwrap();
+        assert_eq!(
+            clients[0].id,
+            uuid::Uuid::parse_str("feb54431-301b-52bb-a6dd-e1e93e81bb9e").unwrap()
+        );
     }
 
     #[test]

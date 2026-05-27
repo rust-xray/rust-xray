@@ -8,11 +8,13 @@ import ssl
 import sys
 
 
-def probe(server_name: str, port: int) -> str:
+def probe(server_name: str, port: int, alpn: str | None = None) -> str:
     sock = socket.create_connection(("127.0.0.1", port), timeout=5)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    if alpn:
+        ctx.set_alpn_protocols([part.strip() for part in alpn.split(",") if part.strip()])
 
     tls = ctx.wrap_socket(
         sock,
@@ -46,10 +48,11 @@ def probe(server_name: str, port: int) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: fallback-probe.py <server_name> <port>", file=sys.stderr)
+    if len(sys.argv) not in (3, 4):
+        print("usage: fallback-probe.py <server_name> <port> [alpn]", file=sys.stderr)
         return 2
-    print(probe(sys.argv[1], int(sys.argv[2])))
+    alpn = sys.argv[3] if len(sys.argv) == 4 else None
+    print(probe(sys.argv[1], int(sys.argv[2]), alpn))
     return 0
 
 

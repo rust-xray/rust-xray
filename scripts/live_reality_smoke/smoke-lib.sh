@@ -70,6 +70,25 @@ smoke_start_stack() {
   smoke_start_client "${client_config}"
 }
 
+smoke_expect_server_reject() {
+  local name="$1"
+  local server_config="$2"
+  local pattern="$3"
+  local log="${SMOKE_WORK_DIR}/reject-${name}.log"
+  smoke_stop_stack
+  if RUST_LOG="${SMOKE_RUST_LOG:-info}" "${SMOKE_RUST_XRAY_BIN}" "${server_config}" >"${log}" 2>&1; then
+    echo "error: expected ${name} config to be rejected during startup" >&2
+    cat "${log}" >&2
+    return 1
+  fi
+  if ! grep -Fq "${pattern}" "${log}"; then
+    echo "error: ${name} reject log missing pattern: ${pattern}" >&2
+    cat "${log}" >&2
+    return 1
+  fi
+  return 0
+}
+
 smoke_write_client_config() {
   local template_path="$1"
   local output_path="$2"

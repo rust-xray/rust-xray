@@ -1,0 +1,29 @@
+{
+  "inbounds": [
+    {
+      "tag": "vless-reality-ws",
+      "listen": "127.0.0.1",
+      "port": 24443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "flow": ""
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "www.microsoft.com:443",
+          "serverNames": ["www.microsoft.com"],
+          "privateKey": "MKVGVTTvyEyI7hpl7vP7WKtRXLhH0JieCMHgFdn6A3s",
+          "shortIds": ["0123456789abcdef"]
+        }
+      }
+    }
+  ]
+}

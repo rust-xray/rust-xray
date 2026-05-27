@@ -41,6 +41,10 @@ SERVER_FALLBACKS="${SCRIPT_DIR}/rust-xray-server.fallbacks.fixture.json"
 SERVER_CIPHER_AES128="${SCRIPT_DIR}/rust-xray-server.cipher-aes128.fixture.json"
 SERVER_CIPHER_AES256="${SCRIPT_DIR}/rust-xray-server.cipher-aes256.fixture.json"
 SERVER_CIPHER_CHACHA="${SCRIPT_DIR}/rust-xray-server.cipher-chacha.fixture.json"
+SERVER_CUSTOM_ID="${SCRIPT_DIR}/rust-xray-server.custom-id.fixture.json"
+SERVER_XHTTP="${SCRIPT_DIR}/rust-xray-server.xhttp.fixture.json"
+SERVER_GRPC="${SCRIPT_DIR}/rust-xray-server.grpc.fixture.json"
+SERVER_WS="${SCRIPT_DIR}/rust-xray-server.ws.fixture.json"
 CLIENT_TEMPLATE="${SCRIPT_DIR}/xray-client-smoke.fixture.json"
 SMOKE_FALLBACK_TCP_PID=""
 SMOKE_CIPHER_TLS_PID=""
@@ -114,6 +118,13 @@ phase_regression_empty_flow() {
   client="$(client_config empty "" )"
   smoke_start_stack "${SERVER_EMPTY}" "${client}"
   smoke_record_curl "regression-flow-empty" -m 30 "${SMOKE_QUICK_URL}"
+}
+
+phase_regression_custom_string_id() {
+  local client
+  client="$(client_config custom-id "" "670892c1-5d1c-5856-b808-9f882e6f364e")"
+  smoke_start_stack "${SERVER_CUSTOM_ID}" "${client}"
+  smoke_record_curl "regression-custom-string-id" -m 30 "${SMOKE_QUICK_URL}"
 }
 
 phase_regression_vision_flow() {
@@ -251,6 +262,27 @@ phase_network_tcp_regression() {
   smoke_record_curl "network-alias-tcp-regression" -m 30 "${SMOKE_QUICK_URL}"
 }
 
+phase_transport_xhttp_unsupported() {
+  smoke_expect_server_reject \
+    "transport-xhttp" \
+    "${SERVER_XHTTP}" \
+    "REALITY over XHTTP runtime is not implemented yet"
+}
+
+phase_transport_grpc_unsupported() {
+  smoke_expect_server_reject \
+    "transport-grpc" \
+    "${SERVER_GRPC}" \
+    "REALITY over gRPC runtime is not implemented yet"
+}
+
+phase_transport_websocket_rejected() {
+  smoke_expect_server_reject \
+    "transport-websocket" \
+    "${SERVER_WS}" \
+    "REALITY over WebSocket transport (network=ws) is not supported"
+}
+
 phase_http_modes() {
   local client
   client="$(client_config http-modes "xtls-rprx-vision")"
@@ -285,6 +317,16 @@ fallback_trigger_tls() {
     </dev/null >/dev/null 2>&1 || true
 }
 
+fallback_trigger_tls_alpn() {
+  local server_name="$1"
+  local alpn="$2"
+  timeout 5 openssl s_client \
+    -connect "127.0.0.1:${SMOKE_SERVER_PORT}" \
+    -servername "${server_name}" \
+    -alpn "${alpn}" \
+    </dev/null >/dev/null 2>&1 || true
+}
+
 fallback_expect_hit() {
   local name="$1"
   local port="$2"
@@ -306,7 +348,14 @@ fallback_expect_hit() {
 
 fallback_tls_probe() {
   local server_name="$1"
-  python3 "${SCRIPT_DIR}/fallback-probe.py" "${server_name}" "${SMOKE_SERVER_PORT}" 2>/dev/null || true
+  local alpn="${2:-}"
+  if [[ -n "${alpn}" ]]; then
+    python3 "${SCRIPT_DIR}/fallback-probe.py" "${server_name}" "${SMOKE_SERVER_PORT}" "${alpn}" \
+      2>/dev/null || true
+  else
+    python3 "${SCRIPT_DIR}/fallback-probe.py" "${server_name}" "${SMOKE_SERVER_PORT}" \
+      2>/dev/null || true
+  fi
 }
 
 record_fallback_probe() {
@@ -364,7 +413,40 @@ phase_fallback_xver_proxy_v1() {
   smoke_start_server "${SERVER_FALLBACKS}"
   fallback_trigger_tls proxy-fallback.test
   fallback_expect_hit "fallback-xver-proxy-v1" 19504 ".proxy" &&
-    smoke_log_contains "PROXY protocol v1 header forwarded"
+    smoke_log_contains "PROXY protocol header forwarded" &&
+    smoke_log_contains "xver=1"
+}
+
+phase_fallback_by_alpn_http11() {
+  smoke_stop_stack
+  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
+  smoke_start_server "${SERVER_FALLBACKS}"
+  fallback_trigger_tls_alpn www.microsoft.com "http/1.1"
+  fallback_expect_hit "fallback-by-alpn-http11" 19505
+}
+
+phase_fallback_by_alpn_h2() {
+  if ! openssl s_client -help 2>&1 | grep -q -- '-alpn'; then
+    SMOKE_PHASE_NAMES+=("SKIP fallback by ALPN h2")
+    echo "Skipping fallback by ALPN h2 (openssl without -alpn support)"
+    return 0
+  fi
+
+  smoke_stop_stack
+  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
+  smoke_start_server "${SERVER_FALLBACKS}"
+  fallback_trigger_tls_alpn www.microsoft.com "h2"
+  fallback_expect_hit "fallback-by-alpn-h2" 19506
+}
+
+phase_fallback_xver_proxy_v2() {
+  smoke_stop_stack
+  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
+  smoke_start_server "${SERVER_FALLBACKS}"
+  fallback_trigger_tls proxy-v2-fallback.test
+  fallback_expect_hit "fallback-xver-proxy-v2" 19507 ".proxyv2" &&
+    smoke_log_contains "PROXY protocol header forwarded" &&
+    smoke_log_contains "xver=2"
 }
 
 run_fallback_phases() {
@@ -372,7 +454,10 @@ run_fallback_phases() {
   run_phase "fallback default" phase_fallback_default
   run_phase "fallback by SNI/name" phase_fallback_by_name
   run_phase "fallback by HTTP path" phase_fallback_by_http_path
+  run_phase "fallback by ALPN http/1.1" phase_fallback_by_alpn_http11
+  run_phase "fallback by ALPN h2" phase_fallback_by_alpn_h2
   run_phase "fallback xver=1 PROXY v1" phase_fallback_xver_proxy_v1
+  run_phase "fallback xver=2 PROXY v2" phase_fallback_xver_proxy_v2
   smoke_stop_process "${SMOKE_FALLBACK_TCP_PID:-}"
   SMOKE_FALLBACK_TCP_PID=""
 }
@@ -424,6 +509,7 @@ main() {
   echo "Live smoke workspace: ${SMOKE_WORK_DIR}"
 
   run_phase "regression flow=\"\"" phase_regression_empty_flow
+  run_phase "regression custom string VLESS id" phase_regression_custom_string_id
   run_phase "regression flow=xtls-rprx-vision" phase_regression_vision_flow
   run_phase "regression 10MB download" phase_regression_10mb_download
   run_phase "regression bad shortId fallback" phase_regression_bad_short_id_fallback
@@ -442,6 +528,9 @@ main() {
   run_phase "flow mismatch vision account + empty client" phase_flow_mismatch_vision_account_empty_client
   run_phase "network alias raw" phase_network_raw_alias
   run_phase "network alias tcp regression" phase_network_tcp_regression
+  run_phase "transport xhttp unsupported" phase_transport_xhttp_unsupported
+  run_phase "transport grpc unsupported" phase_transport_grpc_unsupported
+  run_phase "transport websocket+reality rejected" phase_transport_websocket_rejected
   run_phase "HTTP mode http1.1/http2" phase_http_modes
   run_phase "TLS mode 1.3/1.2" phase_tls_modes
 

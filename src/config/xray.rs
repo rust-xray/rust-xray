@@ -148,14 +148,69 @@ fn is_reality_security(security: Option<&str>) -> bool {
     security.is_some_and(|value| eq_ignore_ascii_case(value, "reality"))
 }
 
-fn is_tcp_compatible_network(network: Option<&str>) -> bool {
-    match network.map(str::trim).filter(|value| !value.is_empty()) {
-        None => true,
-        Some(value) if eq_ignore_ascii_case(value, "tcp") || eq_ignore_ascii_case(value, "raw") => {
-            true
-        }
-        _ => false,
+fn is_vless_reality_inbound(inbound: &InboundObject) -> bool {
+    inbound.stream_settings.as_ref().is_some_and(|stream| {
+        is_vless_protocol(inbound.protocol.as_deref())
+            && is_reality_security(stream.security.as_deref())
+            && stream.reality_settings.is_some()
+    })
+}
+
+/// Validate REALITY inbound `streamSettings.network`.
+///
+/// `tcp` is the legacy alias for raw TCP transport; `raw` is the explicit form.
+pub fn validate_reality_transport_network(network: Option<&str>) -> std::io::Result<()> {
+    let normalized = network
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+
+    match normalized.as_deref() {
+        None | Some("tcp") | Some("raw") => Ok(()),
+        Some("xhttp") => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "REALITY over XHTTP runtime is not implemented yet",
+        )),
+        Some("grpc") => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "REALITY over gRPC runtime is not implemented yet",
+        )),
+        Some("ws") | Some("websocket") => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "REALITY over WebSocket transport (network=ws) is not supported",
+        )),
+        Some("mkcp") => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "REALITY over mKCP transport (network=mkcp) is not supported",
+        )),
+        Some("httpupgrade") => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "REALITY over HTTPUpgrade transport (network=httpupgrade) is not supported",
+        )),
+        Some("hysteria") => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "REALITY over Hysteria transport (network=hysteria) is not supported",
+        )),
+        Some(value) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsupported REALITY transport network: {value}"),
+        )),
     }
+}
+
+fn reality_transport_network(inbound: &InboundObject) -> Option<&str> {
+    inbound
+        .stream_settings
+        .as_ref()
+        .and_then(|stream| stream.network.as_deref())
+}
+
+pub fn find_vless_reality_inbounds(config: &XrayConfig) -> Vec<&InboundObject> {
+    config
+        .inbounds
+        .iter()
+        .filter(|inbound| is_vless_reality_inbound(inbound))
+        .collect()
 }
 
 pub fn parse_inbound_port(port: Option<&InboundPortValue>) -> std::io::Result<u16> {
@@ -242,29 +297,17 @@ pub fn load_xray_config_from_file(path: impl AsRef<Path>) -> std::io::Result<Xra
 }
 
 pub fn find_reality_inbounds(config: &XrayConfig) -> Vec<&InboundObject> {
-    config
-        .inbounds
-        .iter()
+    find_vless_reality_inbounds(config)
+        .into_iter()
         .filter(|inbound| {
-            let Some(stream) = inbound.stream_settings.as_ref() else {
-                return false;
-            };
-
-            is_vless_protocol(inbound.protocol.as_deref())
-                && is_reality_security(stream.security.as_deref())
-                && is_tcp_compatible_network(stream.network.as_deref())
-                && stream.reality_settings.is_some()
+            validate_reality_transport_network(reality_transport_network(inbound)).is_ok()
         })
         .collect()
 }
 
 pub fn is_supported_reality_tcp_inbound(inbound: &InboundObject) -> bool {
-    inbound.stream_settings.as_ref().is_some_and(|stream| {
-        is_vless_protocol(inbound.protocol.as_deref())
-            && is_reality_security(stream.security.as_deref())
-            && is_tcp_compatible_network(stream.network.as_deref())
-            && stream.reality_settings.is_some()
-    })
+    is_vless_reality_inbound(inbound)
+        && validate_reality_transport_network(reality_transport_network(inbound)).is_ok()
 }
 
 pub fn get_inbound_reality_settings(inbound: &InboundObject) -> Option<&RealitySettingsObject> {
@@ -419,8 +462,15 @@ pub fn reality_short_ids(settings: &RealitySettingsObject) -> std::io::Result<Ve
 pub fn first_reality_inbound_runtime(
     config: &XrayConfig,
 ) -> std::io::Result<RealityInboundRuntime> {
+    let vless_reality_inbounds = find_vless_reality_inbounds(config);
     let inbounds = find_reality_inbounds(config);
     let inbound = inbounds.first().ok_or_else(|| {
+        if let Some(inbound) = vless_reality_inbounds.first() {
+            if let Err(err) = validate_reality_transport_network(reality_transport_network(inbound))
+            {
+                return err;
+            }
+        }
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "no supported VLESS TCP REALITY inbound found",
@@ -937,6 +987,128 @@ mod tests {
         }"#;
         let config: XrayConfig = serde_json::from_str(json).unwrap();
         assert_eq!(find_reality_inbounds(&config).len(), 1);
+        assert!(validate_reality_transport_network(Some("raw")).is_ok());
+        assert!(validate_reality_transport_network(Some("tcp")).is_ok());
+        assert!(validate_reality_transport_network(None).is_ok());
+    }
+
+    fn vless_reality_inbound_json(network: &str) -> String {
+        format!(
+            r#"{{
+            "inbounds": [{{
+                "port": 443,
+                "protocol": "vless",
+                "settings": {{"clients": [], "decryption": "none"}},
+                "streamSettings": {{
+                    "network": "{network}",
+                    "security": "reality",
+                    "realitySettings": {{
+                        "dest": "example.com:443",
+                        "serverNames": ["example.com"],
+                        "privateKey": "{TEST_REALITY_PRIVATE_KEY}",
+                        "shortIds": [""]
+                    }}
+                }}
+            }}]
+        }}"#
+        )
+    }
+
+    #[test]
+    fn validate_reality_transport_network_accepts_tcp_as_legacy_raw_alias() {
+        assert!(validate_reality_transport_network(Some("tcp")).is_ok());
+        assert!(validate_reality_transport_network(Some("TCP")).is_ok());
+    }
+
+    #[test]
+    fn validate_reality_transport_network_accepts_raw() {
+        assert!(validate_reality_transport_network(Some("raw")).is_ok());
+        assert!(validate_reality_transport_network(Some("RAW")).is_ok());
+    }
+
+    #[test]
+    fn validate_reality_transport_network_rejects_xhttp_as_unimplemented() {
+        let err = validate_reality_transport_network(Some("xhttp")).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(
+            err.to_string(),
+            "REALITY over XHTTP runtime is not implemented yet"
+        );
+    }
+
+    #[test]
+    fn validate_reality_transport_network_rejects_grpc_as_unimplemented() {
+        let err = validate_reality_transport_network(Some("grpc")).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(
+            err.to_string(),
+            "REALITY over gRPC runtime is not implemented yet"
+        );
+    }
+
+    #[test]
+    fn validate_reality_transport_network_rejects_websocket_variants() {
+        for network in ["ws", "websocket", "WebSocket"] {
+            let err = validate_reality_transport_network(Some(network)).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("WebSocket"));
+        }
+    }
+
+    #[test]
+    fn validate_reality_transport_network_rejects_mkcp_httpupgrade_and_hysteria() {
+        let cases = [
+            (
+                "mkcp",
+                "REALITY over mKCP transport (network=mkcp) is not supported",
+            ),
+            (
+                "httpupgrade",
+                "REALITY over HTTPUpgrade transport (network=httpupgrade) is not supported",
+            ),
+            (
+                "hysteria",
+                "REALITY over Hysteria transport (network=hysteria) is not supported",
+            ),
+        ];
+        for (network, message) in cases {
+            let err = validate_reality_transport_network(Some(network)).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{network}");
+            assert_eq!(err.to_string(), message, "{network}");
+        }
+    }
+
+    #[test]
+    fn first_reality_inbound_runtime_rejects_xhttp_transport() {
+        let config: XrayConfig =
+            serde_json::from_str(&vless_reality_inbound_json("xhttp")).unwrap();
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(
+            err.to_string(),
+            "REALITY over XHTTP runtime is not implemented yet"
+        );
+    }
+
+    #[test]
+    fn first_reality_inbound_runtime_rejects_grpc_transport() {
+        let config: XrayConfig = serde_json::from_str(&vless_reality_inbound_json("grpc")).unwrap();
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(
+            err.to_string(),
+            "REALITY over gRPC runtime is not implemented yet"
+        );
+    }
+
+    #[test]
+    fn first_reality_inbound_runtime_rejects_websocket_transport() {
+        let config: XrayConfig = serde_json::from_str(&vless_reality_inbound_json("ws")).unwrap();
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err
+            .to_string()
+            .contains("REALITY over WebSocket transport (network=ws) is not supported"));
     }
 
     #[test]
@@ -1144,13 +1316,14 @@ mod tests {
 
     #[test]
     fn validates_client_uuid_at_runtime() {
+        let invalid_id = "a".repeat(31);
         let json = format!(
             r#"{{
             "inbounds": [{{
                 "port": 443,
                 "protocol": "vless",
                 "settings": {{
-                    "clients": [{{"id": "not-a-uuid"}}],
+                    "clients": [{{"id": "{invalid_id}"}}],
                     "decryption": "none"
                 }},
                 "streamSettings": {{
