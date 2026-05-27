@@ -242,9 +242,21 @@ fn runtime_config_from_xray(xray: &XrayConfig) -> std::io::Result<RuntimeConfig>
     })
 }
 
+fn validate_reality_runtime_feature_gates(config: &RuntimeConfig) -> std::io::Result<()> {
+    if config.reality.mldsa65_seed.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "realitySettings.mldsa65Seed is configured, but REALITY ML-DSA-65 runtime signing is not implemented/enabled yet",
+        ));
+    }
+
+    Ok(())
+}
+
 fn load_runtime_config(path: &PathBuf) -> std::io::Result<RuntimeConfig> {
     let xray = load_xray_config_from_file(path)?;
     let config = runtime_config_from_xray(&xray)?;
+    validate_reality_runtime_feature_gates(&config)?;
 
     if config.reality.protocol.as_deref() == Some("vless") {
         info!(tag = ?config.reality.tag, "using VLESS REALITY inbound");
@@ -358,6 +370,15 @@ mod tests {
         }]
     }"#;
 
+    const TEST_MLDSA65_SEED: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+
+    fn vless_reality_config_with_mldsa65_seed(seed: &str) -> String {
+        VLESS_REALITY_CONFIG.replace(
+            r#""shortIds": [""]"#,
+            &format!(r#""shortIds": [""], "mldsa65Seed": "{seed}""#),
+        )
+    }
+
     #[test]
     fn runtime_config_from_xray_builds_vless_clients() {
         let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
@@ -370,6 +391,44 @@ mod tests {
         );
         assert_eq!(config.reality.protocol.as_deref(), Some("vless"));
         assert!(config.reality.vless_fallbacks.is_empty());
+    }
+
+    #[test]
+    fn runtime_feature_gates_accept_absent_mldsa65_seed() {
+        let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
+        let config = runtime_config_from_xray(&xray).expect("build runtime config");
+
+        assert!(config.reality.mldsa65_seed.is_none());
+        validate_reality_runtime_feature_gates(&config).expect("absent mldsa65Seed is unchanged");
+    }
+
+    #[test]
+    fn runtime_feature_gates_reject_configured_mldsa65_seed() {
+        let json = vless_reality_config_with_mldsa65_seed(TEST_MLDSA65_SEED);
+        let xray: XrayConfig = serde_json::from_str(&json).expect("parse config");
+        let config = runtime_config_from_xray(&xray).expect("build runtime config");
+
+        assert!(config.reality.mldsa65_seed.is_some());
+
+        let err = validate_reality_runtime_feature_gates(&config).unwrap_err();
+        let err_text = err.to_string();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err_text.contains("mldsa65Seed"));
+        assert!(err_text.contains("not implemented"));
+        assert!(!err_text.contains(TEST_MLDSA65_SEED));
+    }
+
+    #[test]
+    fn runtime_config_rejects_invalid_mldsa65_seed_before_feature_gate() {
+        let json = vless_reality_config_with_mldsa65_seed("not-valid-base64!!!");
+        let xray: XrayConfig = serde_json::from_str(&json).expect("parse config");
+        let err = match runtime_config_from_xray(&xray) {
+            Ok(_) => panic!("invalid mldsa65Seed should fail before runtime feature gate"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("invalid mldsa65Seed base64"));
     }
 
     fn runtime_with_fallbacks() -> RuntimeConfig {
