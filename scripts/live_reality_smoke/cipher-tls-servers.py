@@ -114,6 +114,13 @@ def serve(port: int, cipher_suite: int, suite_name: str) -> None:
                     build_server_hello_handshake(cipher_suite)
                 )
                 conn.sendall(record)
+                print(
+                    "negotiated_cipher "
+                    f"port={port} "
+                    f"suite={suite_name} "
+                    f"suite_id=0x{cipher_suite:04x}",
+                    flush=True,
+                )
             except OSError as err:
                 print(f"port {port}: connection error: {err}", file=sys.stderr, flush=True)
 

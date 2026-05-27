@@ -17,7 +17,8 @@ PROXY_V2_SIGNATURE = bytes(
 def write_hit(port: int, suffix: str = "") -> None:
     hit_dir = os.environ.get("SMOKE_FALLBACK_HIT_DIR")
     if not hit_dir:
-        return
+        print("error: SMOKE_FALLBACK_HIT_DIR is not set", file=sys.stderr)
+        raise SystemExit(1)
     path = Path(hit_dir) / f"{port}{suffix}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("ok\n", encoding="utf-8")
@@ -26,8 +27,13 @@ def write_hit(port: int, suffix: str = "") -> None:
 def serve(port: int, expect_proxy: str | None = None) -> None:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", port))
+    try:
+        listener.bind(("127.0.0.1", port))
+    except OSError as err:
+        print(f"port {port}: bind failed: {err}", file=sys.stderr, flush=True)
+        raise
     listener.listen(32)
+    print(f"started fallback dest on 127.0.0.1:{port}", flush=True)
 
     while True:
         conn, _addr = listener.accept()

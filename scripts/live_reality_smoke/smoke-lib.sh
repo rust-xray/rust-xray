@@ -30,10 +30,51 @@ smoke_wait_port() {
   return 1
 }
 
+smoke_wait_port_closed() {
+  local host="$1"
+  local port="$2"
+  local label="$3"
+  local timeout="${4:-60}"
+  local elapsed=0
+
+  while (( elapsed < timeout )); do
+    if ! (echo >/dev/tcp/"${host}"/"${port}") >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+    elapsed=$((elapsed + 1))
+  done
+
+  echo "error: timed out waiting for ${label} to close on ${host}:${port}" >&2
+  return 1
+}
+
+smoke_free_port() {
+  local port="$1"
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k "${port}/tcp" >/dev/null 2>&1 || true
+  fi
+}
+
+smoke_free_ports() {
+  local port
+  for port in "$@"; do
+    smoke_free_port "${port}"
+  done
+}
+
 smoke_stop_process() {
   local pid="${1:-}"
   if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
     kill "${pid}" >/dev/null 2>&1 || true
+    local waited=0
+    while kill -0 "${pid}" >/dev/null 2>&1 && (( waited < 40 )); do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if kill -0 "${pid}" >/dev/null 2>&1; then
+      kill -9 "${pid}" >/dev/null 2>&1 || true
+    fi
     wait "${pid}" 2>/dev/null || true
   fi
 }
@@ -43,15 +84,36 @@ smoke_stop_stack() {
   smoke_stop_process "${SMOKE_SERVER_PID:-}"
   SMOKE_CLIENT_PID=""
   SMOKE_SERVER_PID=""
+  smoke_free_port "${SMOKE_SOCKS_PORT}"
+  smoke_free_port "${SMOKE_SERVER_PORT}"
+  smoke_wait_port_closed 127.0.0.1 "${SMOKE_SERVER_PORT}" "rust-xray server" 20 || true
+}
+
+smoke_verify_server_started() {
+  if ! kill -0 "${SMOKE_SERVER_PID}" >/dev/null 2>&1; then
+    echo "error: rust-xray server process exited during startup" >&2
+    tail -20 "${SMOKE_SERVER_LOG}" >&2 || true
+    return 1
+  fi
+  if ! smoke_log_contains "REALITY listener started"; then
+    echo "error: rust-xray server log missing REALITY listener started" >&2
+    tail -20 "${SMOKE_SERVER_LOG}" >&2 || true
+    return 1
+  fi
+  return 0
 }
 
 smoke_start_server() {
   local server_config="$1"
   smoke_stop_process "${SMOKE_SERVER_PID:-}"
+  smoke_free_port "${SMOKE_SERVER_PORT}"
+  smoke_wait_port_closed 127.0.0.1 "${SMOKE_SERVER_PORT}" "rust-xray server" 20 || true
   : >>"${SMOKE_SERVER_LOG}"
   RUST_LOG="${SMOKE_RUST_LOG:-info}" "${SMOKE_RUST_XRAY_BIN}" "${server_config}" >>"${SMOKE_SERVER_LOG}" 2>&1 &
   SMOKE_SERVER_PID=$!
-  smoke_wait_port 127.0.0.1 "${SMOKE_SERVER_PORT}" "rust-xray server"
+  sleep 0.1
+  smoke_verify_server_started &&
+    smoke_wait_port 127.0.0.1 "${SMOKE_SERVER_PORT}" "rust-xray server"
 }
 
 smoke_start_client() {
@@ -286,6 +348,104 @@ smoke_log_contains() {
   grep -Fq "${pattern}" "${SMOKE_SERVER_LOG}"
 }
 
+smoke_log_line_count() {
+  local log_path="$1"
+  if [[ ! -f "${log_path}" ]]; then
+    echo 0
+    return 0
+  fi
+  wc -l <"${log_path}" | tr -d ' '
+}
+
+smoke_log_contains_since() {
+  local log_path="$1"
+  local start_line="$2"
+  local pattern="$3"
+  if [[ ! -f "${log_path}" ]]; then
+    return 1
+  fi
+  tail -n +"$((start_line + 1))" "${log_path}" | grep -Fq "${pattern}"
+}
+
+smoke_extract_server_negotiated_cipher() {
+  local log_path="$1"
+  local line suite_name suite_id
+  line="$(grep -F 'REALITY TLS 1.3 server state created' "${log_path}" | tail -1 || true)"
+  if [[ -z "${line}" ]]; then
+    echo "missing"
+    return 0
+  fi
+
+  suite_name="$(
+    printf '%s\n' "${line}" |
+      sed -n 's/.*cipher_suite="\([^"]*\)".*/\1/p' |
+      tail -1
+  )"
+  suite_id="$(
+    printf '%s\n' "${line}" |
+      sed -n 's/.*cipher_suite_id="\([^"]*\)".*/\1/p' |
+      tail -1
+  )"
+
+  if [[ -z "${suite_name}" ]]; then
+    suite_name="$(
+      printf '%s\n' "${line}" |
+        grep -oE 'cipher_suite=[^[:space:]]+' |
+        tail -1 |
+        cut -d= -f2- |
+        tr -d '"'
+    )"
+  fi
+  if [[ -z "${suite_id}" ]]; then
+    suite_id="$(
+      printf '%s\n' "${line}" |
+        grep -oE 'cipher_suite_id=0x[0-9a-fA-F]+' |
+        tail -1 |
+        cut -d= -f2-
+    )"
+  fi
+
+  if [[ -n "${suite_name}" && -n "${suite_id}" ]]; then
+    echo "${suite_name} (${suite_id})"
+    return 0
+  fi
+  if [[ -n "${suite_name}" ]]; then
+    echo "${suite_name} (unknown-id)"
+    return 0
+  fi
+  echo "unparsed"
+}
+
+smoke_extract_dest_negotiated_cipher() {
+  local log_path="$1"
+  local start_line="$2"
+  local dest_port="$3"
+  local line
+  if [[ ! -f "${log_path}" ]]; then
+    echo "missing"
+    return 0
+  fi
+  line="$(
+    tail -n +"$((start_line + 1))" "${log_path}" |
+      grep -F "negotiated_cipher port=${dest_port} " |
+      tail -1 || true
+  )"
+  if [[ -z "${line}" ]]; then
+    echo "missing"
+    return 0
+  fi
+  if [[ "${line}" =~ suite=([^[:space:]]+) ]]; then
+    local suite_name="${BASH_REMATCH[1]}"
+    if [[ "${line}" =~ suite_id=(0x[0-9a-fA-F]+) ]]; then
+      echo "${suite_name} (${BASH_REMATCH[1]})"
+      return 0
+    fi
+    echo "${suite_name} (unknown-id)"
+    return 0
+  fi
+  echo "unparsed"
+}
+
 smoke_count_log() {
   local pattern="$1"
   grep -Fc "${pattern}" "${SMOKE_SERVER_LOG}" || true
@@ -327,6 +487,15 @@ smoke_write_report() {
       echo "${SMOKE_CURL_NAMES[$idx]}: exit=${SMOKE_CURL_EXIT_CODES[$idx]} http=${SMOKE_CURL_HTTP_CODES[$idx]}"
     done
     echo
+    if ((${#SMOKE_CIPHER_DETAILS[@]} > 0)); then
+      echo "[cipher validation]"
+      echo "cipher_tls_log: ${SMOKE_CIPHER_TLS_LOG:-n/a}"
+      local cipher_idx
+      for cipher_idx in "${!SMOKE_CIPHER_DETAILS[@]}"; do
+        echo "${SMOKE_CIPHER_DETAILS[$cipher_idx]}"
+      done
+      echo
+    fi
     echo "[phase results]"
     local phase
     for phase in "${SMOKE_PHASE_NAMES[@]}"; do

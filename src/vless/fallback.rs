@@ -48,7 +48,23 @@ impl<'de> Deserialize<'de> for FallbackDest {
 pub struct FallbackContext {
     pub sni: Option<String>,
     pub alpn: Option<String>,
+    pub alpn_offers: Vec<String>,
     pub http_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackMatchKind {
+    Default,
+    Name,
+    Alpn,
+    Path,
+    Combined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedFallback<'a> {
+    pub config: &'a FallbackConfig,
+    pub kind: FallbackMatchKind,
 }
 
 impl FallbackConfig {
@@ -182,20 +198,31 @@ pub fn build_fallback_context(
     initial_bytes: &[u8],
 ) -> FallbackContext {
     let sni = hello.and_then(extract_sni_hostname);
-    let alpn = hello.and_then(extract_client_alpn);
+    let alpn_offers = hello.map(extract_client_alpn_offers).unwrap_or_default();
+    let alpn = alpn_offers.first().cloned();
     let http_path = sniff_http_request_path(initial_bytes);
     FallbackContext {
         sni,
         alpn,
+        alpn_offers,
         http_path,
     }
 }
 
-pub fn extract_client_alpn(hello: &ClientHelloPayload) -> Option<String> {
+pub fn extract_client_alpn_offers(hello: &ClientHelloPayload) -> Vec<String> {
     hello
-        .alpn_extension()?
-        .first()
-        .and_then(|name| std::str::from_utf8(name.as_ref()).ok().map(str::to_string))
+        .alpn_extension()
+        .map(|protocols| {
+            protocols
+                .iter()
+                .filter_map(|name| std::str::from_utf8(name.as_ref()).ok().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn extract_client_alpn(hello: &ClientHelloPayload) -> Option<String> {
+    extract_client_alpn_offers(hello).into_iter().next()
 }
 
 pub fn sniff_http_request_path(bytes: &[u8]) -> Option<String> {
@@ -245,10 +272,28 @@ fn name_matches(fallback: &FallbackConfig, ctx: &FallbackContext) -> bool {
 fn alpn_matches(fallback: &FallbackConfig, ctx: &FallbackContext) -> bool {
     match fallback.alpn.as_deref() {
         None => true,
-        Some(expected) => ctx
-            .alpn
-            .as_deref()
-            .is_some_and(|alpn| eq_ignore_ascii_case(alpn, expected)),
+        Some(expected) => {
+            ctx.alpn_offers
+                .iter()
+                .any(|offered| eq_ignore_ascii_case(offered, expected))
+                || ctx
+                    .alpn
+                    .as_deref()
+                    .is_some_and(|alpn| eq_ignore_ascii_case(alpn, expected))
+        }
+    }
+}
+
+fn fallback_match_kind(fallback: &FallbackConfig) -> FallbackMatchKind {
+    let has_name = fallback.name.is_some();
+    let has_alpn = fallback.alpn.is_some();
+    let has_path = fallback.path.is_some();
+    match (has_name, has_alpn, has_path) {
+        (false, false, false) => FallbackMatchKind::Default,
+        (false, false, true) => FallbackMatchKind::Path,
+        (false, true, false) => FallbackMatchKind::Alpn,
+        (true, false, false) => FallbackMatchKind::Name,
+        _ => FallbackMatchKind::Combined,
     }
 }
 
@@ -348,6 +393,13 @@ pub fn select_vless_fallback<'a>(
     fallbacks: &'a [FallbackConfig],
     ctx: &FallbackContext,
 ) -> Option<&'a FallbackConfig> {
+    select_vless_fallback_with_kind(fallbacks, ctx).map(|selected| selected.config)
+}
+
+pub fn select_vless_fallback_with_kind<'a>(
+    fallbacks: &'a [FallbackConfig],
+    ctx: &FallbackContext,
+) -> Option<SelectedFallback<'a>> {
     if fallbacks.is_empty() {
         return None;
     }
@@ -360,7 +412,10 @@ pub fn select_vless_fallback<'a>(
             }
         }
         if let Some((_, selected)) = best {
-            return Some(selected);
+            return Some(SelectedFallback {
+                config: selected,
+                kind: fallback_match_kind(selected),
+            });
         }
     }
 
@@ -371,13 +426,34 @@ pub fn select_vless_fallback<'a>(
         }
     }
     if let Some((_, selected)) = best {
-        return Some(selected);
+        return Some(SelectedFallback {
+            config: selected,
+            kind: fallback_match_kind(selected),
+        });
     }
 
     fallbacks
         .iter()
         .find(|fallback| fallback.is_default())
         .or_else(|| fallbacks.first())
+        .map(|selected| SelectedFallback {
+            config: selected,
+            kind: if selected.is_default() {
+                FallbackMatchKind::Default
+            } else {
+                fallback_match_kind(selected)
+            },
+        })
+}
+
+pub fn fallback_match_kind_label(kind: FallbackMatchKind) -> &'static str {
+    match kind {
+        FallbackMatchKind::Default => "default",
+        FallbackMatchKind::Name => "name",
+        FallbackMatchKind::Alpn => "alpn",
+        FallbackMatchKind::Path => "path",
+        FallbackMatchKind::Combined => "combined",
+    }
 }
 
 pub fn resolve_fallback_target(
@@ -385,11 +461,78 @@ pub fn resolve_fallback_target(
     reality_dest: &str,
     ctx: &FallbackContext,
 ) -> std::io::Result<(String, u8)> {
-    if let Some(fallback) = select_vless_fallback(fallbacks, ctx) {
-        validate_fallback_xver(fallback.xver)?;
-        return Ok((fallback.dest.addr.clone(), fallback.xver));
+    resolve_fallback_selection(fallbacks, reality_dest, ctx)
+        .map(|selection| (selection.dest, selection.xver))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FallbackSelection {
+    pub dest: String,
+    pub xver: u8,
+    pub kind: FallbackMatchKind,
+    pub used_configured_fallback: bool,
+    pub matched_alpn: Option<String>,
+}
+
+pub fn matching_alpn_offer(fallback: &FallbackConfig, ctx: &FallbackContext) -> Option<String> {
+    let expected = fallback.alpn.as_deref()?;
+    ctx.alpn_offers
+        .iter()
+        .find(|offered| eq_ignore_ascii_case(offered, expected))
+        .cloned()
+        .or_else(|| {
+            ctx.alpn
+                .as_ref()
+                .filter(|alpn| eq_ignore_ascii_case(alpn, expected))
+                .cloned()
+        })
+}
+
+pub fn resolve_fallback_selection(
+    fallbacks: &[FallbackConfig],
+    reality_dest: &str,
+    ctx: &FallbackContext,
+) -> std::io::Result<FallbackSelection> {
+    if fallbacks.is_empty() {
+        return Ok(FallbackSelection {
+            dest: reality_dest.to_string(),
+            xver: 0,
+            kind: FallbackMatchKind::Default,
+            used_configured_fallback: false,
+            matched_alpn: None,
+        });
     }
-    Ok((reality_dest.to_string(), 0))
+
+    let selected = select_vless_fallback_with_kind(fallbacks, ctx).or_else(|| {
+        fallbacks
+            .iter()
+            .find(|fallback| fallback.is_default())
+            .map(|config| SelectedFallback {
+                config,
+                kind: FallbackMatchKind::Default,
+            })
+            .or_else(|| {
+                fallbacks.first().map(|config| SelectedFallback {
+                    config,
+                    kind: fallback_match_kind(config),
+                })
+            })
+    });
+
+    let selected = selected.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "configured fallbacks must not be empty",
+        )
+    })?;
+    validate_fallback_xver(selected.config.xver)?;
+    Ok(FallbackSelection {
+        dest: selected.config.dest.addr.clone(),
+        xver: selected.config.xver,
+        kind: selected.kind,
+        used_configured_fallback: true,
+        matched_alpn: matching_alpn_offer(selected.config, ctx),
+    })
 }
 
 pub fn build_proxy_protocol_v2(
@@ -606,6 +749,71 @@ mod tests {
     }
 
     #[test]
+    fn select_by_alpn_matches_any_offered_protocol() {
+        let fallbacks = vec![
+            fallback(None, None, None, "127.0.0.1:8080", 0),
+            fallback(None, Some("h2"), None, "127.0.0.1:8082", 0),
+        ];
+        let ctx = FallbackContext {
+            alpn: Some("http/1.1".to_string()),
+            alpn_offers: vec!["http/1.1".to_string(), "h2".to_string()],
+            ..FallbackContext::default()
+        };
+        let selected = select_vless_fallback(&fallbacks, &ctx).expect("selected");
+        assert_eq!(selected.dest.addr, "127.0.0.1:8082");
+    }
+
+    #[test]
+    fn resolve_fallback_selection_uses_default_entry() {
+        let fallbacks = vec![
+            fallback(None, None, None, "127.0.0.1:8080", 0),
+            fallback(Some("named.test"), None, None, "127.0.0.1:8081", 0),
+        ];
+        let selection =
+            resolve_fallback_selection(&fallbacks, "example.com:443", &FallbackContext::default())
+                .expect("selection");
+        assert_eq!(selection.dest, "127.0.0.1:8080");
+        assert_eq!(selection.kind, FallbackMatchKind::Default);
+        assert!(selection.used_configured_fallback);
+    }
+
+    #[test]
+    fn resolve_fallback_selection_never_uses_reality_dest_when_fallbacks_configured() {
+        let fallbacks = vec![fallback(None, None, None, "127.0.0.1:19501", 0)];
+        let selection = resolve_fallback_selection(
+            &fallbacks,
+            "www.microsoft.com:443",
+            &FallbackContext::default(),
+        )
+        .expect("selection");
+        assert_eq!(selection.dest, "127.0.0.1:19501");
+        assert_ne!(selection.dest, "www.microsoft.com:443");
+        assert!(selection.used_configured_fallback);
+    }
+
+    #[test]
+    fn resolve_fallback_selection_without_fallbacks_uses_reality_dest() {
+        let selection =
+            resolve_fallback_selection(&[], "www.microsoft.com:443", &FallbackContext::default())
+                .expect("selection");
+        assert_eq!(selection.dest, "www.microsoft.com:443");
+        assert!(!selection.used_configured_fallback);
+    }
+
+    #[test]
+    fn matching_alpn_offer_prefers_offered_protocol() {
+        let fallbacks = vec![fallback(None, Some("h2"), None, "127.0.0.1:8082", 0)];
+        let ctx = FallbackContext {
+            alpn: Some("http/1.1".to_string()),
+            alpn_offers: vec!["http/1.1".to_string(), "h2".to_string()],
+            ..FallbackContext::default()
+        };
+        let selected = select_vless_fallback(&fallbacks, &ctx).expect("selected");
+        assert_eq!(selected.dest.addr, "127.0.0.1:8082");
+        assert_eq!(matching_alpn_offer(selected, &ctx).as_deref(), Some("h2"));
+    }
+
+    #[test]
     fn xver_1_builds_valid_proxy_v1_header() {
         let header = build_proxy_protocol_v1(
             "127.0.0.1:12345".parse().unwrap(),
@@ -692,6 +900,7 @@ mod tests {
         let ctx = FallbackContext {
             sni: Some("named.test".to_string()),
             alpn: Some("h2".to_string()),
+            alpn_offers: vec!["h2".to_string()],
             http_path: Some("/secret/extra".to_string()),
         };
         let selected = select_vless_fallback(&fallbacks, &ctx).expect("selected");

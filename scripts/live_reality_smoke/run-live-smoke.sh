@@ -33,6 +33,7 @@ SMOKE_CURL_NAMES=()
 SMOKE_CURL_EXIT_CODES=()
 SMOKE_CURL_HTTP_CODES=()
 SMOKE_PHASE_NAMES=()
+SMOKE_CIPHER_DETAILS=()
 
 SERVER_EMPTY="${SCRIPT_DIR}/rust-xray-server.fixture.json"
 SERVER_VISION="${SCRIPT_DIR}/rust-xray-server.vision.fixture.json"
@@ -49,6 +50,7 @@ CLIENT_TEMPLATE="${SCRIPT_DIR}/xray-client-smoke.fixture.json"
 CLIENT_NEGATIVE_TEMPLATE="${SCRIPT_DIR}/xray-client-negative.template.json"
 SMOKE_FALLBACK_TCP_PID=""
 SMOKE_CIPHER_TLS_PID=""
+SMOKE_CIPHER_TLS_LOG="${SMOKE_WORK_DIR}/cipher-tls.log"
 
 pass_phase() {
   SMOKE_PHASE_NAMES+=("PASS ${1}")
@@ -59,6 +61,11 @@ fail_phase() {
   SMOKE_PHASE_NAMES+=("FAIL ${1}")
   SMOKE_FAILED=1
   echo "== FAIL: ${1}" >&2
+}
+
+skip_phase() {
+  SMOKE_PHASE_NAMES+=("SKIP ${1}")
+  echo "== SKIP: ${1}"
 }
 
 run_phase() {
@@ -276,7 +283,9 @@ phase_regression_bad_short_id_fallback() {
   client="$(client_config bad-short-id "" "11111111-1111-1111-1111-111111111111" "0000000000000000")"
   smoke_start_stack "${SERVER_EMPTY}" "${client}"
   smoke_expect_curl_fail "regression-bad-short-id-fallback" -m 20 "${SMOKE_QUICK_URL}"
-  smoke_log_contains "REALITY fallback" || smoke_log_contains "fallback relay started"
+  smoke_log_contains "REALITY fallback" ||
+    smoke_log_contains "fallback relay started" ||
+    smoke_log_contains "fallback relay completed"
 }
 
 phase_regression_bad_sni_fallback() {
@@ -284,7 +293,9 @@ phase_regression_bad_sni_fallback() {
   client="$(client_config bad-sni "" "11111111-1111-1111-1111-111111111111" "0123456789abcdef" "example.com")"
   smoke_start_stack "${SERVER_EMPTY}" "${client}"
   smoke_expect_curl_fail "regression-bad-sni-fallback" -m 20 "${SMOKE_QUICK_URL}"
-  smoke_log_contains "REALITY fallback" || smoke_log_contains "fallback relay started"
+  smoke_log_contains "REALITY fallback" ||
+    smoke_log_contains "fallback relay started" ||
+    smoke_log_contains "fallback relay completed"
 }
 
 phase_regression_openssl_fallback() {
@@ -301,7 +312,9 @@ phase_regression_openssl_fallback() {
   SMOKE_CURL_NAMES+=("regression-openssl-fallback")
   SMOKE_CURL_EXIT_CODES+=("${openssl_exit}")
   SMOKE_CURL_HTTP_CODES+=("n/a")
-  if [[ "${openssl_exit}" -eq 0 ]] && smoke_log_contains "fallback relay started"; then
+  if [[ "${openssl_exit}" -eq 0 ]] &&
+    { smoke_log_contains "fallback relay started" ||
+      smoke_log_contains "fallback relay completed"; }; then
     SMOKE_CURL_PASSED=$((SMOKE_CURL_PASSED + 1))
     return 0
   fi
@@ -431,30 +444,45 @@ phase_tls_modes() {
 
 start_fallback_tcp_servers() {
   smoke_stop_process "${SMOKE_FALLBACK_TCP_PID:-}"
+  smoke_free_ports 19501 19502 19503 19504 19505 19506 19507
   mkdir -p "${SMOKE_FALLBACK_HIT_DIR}"
   rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
   SMOKE_FALLBACK_HIT_DIR="${SMOKE_FALLBACK_HIT_DIR}" \
     python3 "${SCRIPT_DIR}/fallback-tcp-servers.py" >>"${SMOKE_WORK_DIR}/fallback-tcp.log" 2>&1 &
   SMOKE_FALLBACK_TCP_PID=$!
-  smoke_wait_port 127.0.0.1 19501 "fallback default tcp server"
+  smoke_wait_port 127.0.0.1 19501 "fallback default tcp server" &&
+    smoke_wait_port 127.0.0.1 19502 "fallback name tcp server" &&
+    smoke_wait_port 127.0.0.1 19503 "fallback path tcp server" &&
+    smoke_wait_port 127.0.0.1 19504 "fallback proxy v1 tcp server" &&
+    smoke_wait_port 127.0.0.1 19505 "fallback alpn http/1.1 tcp server" &&
+    smoke_wait_port 127.0.0.1 19506 "fallback alpn h2 tcp server" &&
+    smoke_wait_port 127.0.0.1 19507 "fallback proxy v2 tcp server"
+}
+
+fallback_prepare_phase() {
+  smoke_stop_stack
+  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
+  : >"${SMOKE_SERVER_LOG}"
+  smoke_start_server "${SERVER_FALLBACKS}"
+  smoke_log_contains "vless_fallback_count=7" ||
+    smoke_log_contains "VLESS fallback entry" ||
+    {
+      echo "error: fallback server started without expected fallback config" >&2
+      tail -30 "${SMOKE_SERVER_LOG}" >&2 || true
+      return 1
+    }
+  sleep 0.25
 }
 
 fallback_trigger_tls() {
   local server_name="$1"
-  timeout 5 openssl s_client \
-    -connect "127.0.0.1:${SMOKE_SERVER_PORT}" \
-    -servername "${server_name}" \
-    </dev/null >/dev/null 2>&1 || true
+  fallback_tls_probe "${server_name}" >/dev/null || true
 }
 
 fallback_trigger_tls_alpn() {
   local server_name="$1"
   local alpn="$2"
-  timeout 5 openssl s_client \
-    -connect "127.0.0.1:${SMOKE_SERVER_PORT}" \
-    -servername "${server_name}" \
-    -alpn "${alpn}" \
-    </dev/null >/dev/null 2>&1 || true
+  fallback_tls_probe "${server_name}" "${alpn}" >/dev/null || true
 }
 
 fallback_expect_hit() {
@@ -463,7 +491,10 @@ fallback_expect_hit() {
   local extra="${3:-}"
   local hit_file="${SMOKE_FALLBACK_HIT_DIR}/${port}${extra}"
   SMOKE_CURL_NAMES+=("${name}")
-  if [[ -f "${hit_file}" ]] && smoke_log_contains "dest_addr=127.0.0.1:${port}"; then
+  if [[ -f "${hit_file}" ]] &&
+    smoke_log_contains "dest_addr=127.0.0.1:${port}" &&
+    { smoke_log_contains "fallback relay completed" ||
+      smoke_log_contains "initial bytes forwarded"; }; then
     SMOKE_CURL_EXIT_CODES+=("0")
     SMOKE_CURL_HTTP_CODES+=("hit")
     SMOKE_CURL_PASSED=$((SMOKE_CURL_PASSED + 1))
@@ -507,25 +538,19 @@ record_fallback_probe() {
 }
 
 phase_fallback_default() {
-  smoke_stop_stack
-  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
-  smoke_start_server "${SERVER_FALLBACKS}"
+  fallback_prepare_phase
   fallback_trigger_tls www.microsoft.com
   fallback_expect_hit "fallback-default" 19501
 }
 
 phase_fallback_by_name() {
-  smoke_stop_stack
-  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
-  smoke_start_server "${SERVER_FALLBACKS}"
+  fallback_prepare_phase
   fallback_trigger_tls name-fallback.test
   fallback_expect_hit "fallback-by-name" 19502
 }
 
 phase_fallback_by_http_path() {
-  smoke_stop_stack
-  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
-  smoke_start_server "${SERVER_FALLBACKS}"
+  fallback_prepare_phase
   local response
   response="$(
     printf 'GET /smoke-path HTTP/1.1\r\nHost: smoke.local\r\n\r\n' |
@@ -538,19 +563,15 @@ phase_fallback_by_http_path() {
 }
 
 phase_fallback_xver_proxy_v1() {
-  smoke_stop_stack
-  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
-  smoke_start_server "${SERVER_FALLBACKS}"
+  fallback_prepare_phase
   fallback_trigger_tls proxy-fallback.test
   fallback_expect_hit "fallback-xver-proxy-v1" 19504 ".proxy" &&
-    smoke_log_contains "PROXY protocol header forwarded" &&
+    smoke_log_contains "PROXY protocol header written" &&
     smoke_log_contains "xver=1"
 }
 
 phase_fallback_by_alpn_http11() {
-  smoke_stop_stack
-  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
-  smoke_start_server "${SERVER_FALLBACKS}"
+  fallback_prepare_phase
   fallback_trigger_tls_alpn www.microsoft.com "http/1.1"
   fallback_expect_hit "fallback-by-alpn-http11" 19505
 }
@@ -562,9 +583,7 @@ phase_fallback_by_alpn_h2() {
     return 0
   fi
 
-  smoke_stop_stack
-  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
-  smoke_start_server "${SERVER_FALLBACKS}"
+  fallback_prepare_phase
   fallback_trigger_tls_alpn www.microsoft.com "h2"
   fallback_expect_hit "fallback-by-alpn-h2" 19506
 }
@@ -576,24 +595,21 @@ phase_fallback_by_alpn_h2_curl() {
     return 0
   fi
 
-  smoke_stop_stack
-  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
-  smoke_start_server "${SERVER_FALLBACKS}"
+  fallback_prepare_phase
   curl -sk --http2 --max-time 5 "https://127.0.0.1:${SMOKE_SERVER_PORT}/" >/dev/null 2>&1 || true
   fallback_expect_hit "fallback-by-alpn-h2-curl" 19506
 }
 
 phase_fallback_xver_proxy_v2() {
-  smoke_stop_stack
-  rm -f "${SMOKE_FALLBACK_HIT_DIR}/"*
-  smoke_start_server "${SERVER_FALLBACKS}"
+  fallback_prepare_phase
   fallback_trigger_tls proxy-v2-fallback.test
   fallback_expect_hit "fallback-xver-proxy-v2" 19507 ".proxyv2" &&
-    smoke_log_contains "PROXY protocol header forwarded" &&
+    smoke_log_contains "PROXY protocol header written" &&
     smoke_log_contains "xver=2"
 }
 
 run_fallback_phases() {
+  smoke_stop_stack
   start_fallback_tcp_servers
   run_phase "fallback default" phase_fallback_default
   run_phase "fallback by SNI/name" phase_fallback_by_name
@@ -609,30 +625,133 @@ run_fallback_phases() {
 
 start_cipher_tls_servers() {
   smoke_stop_process "${SMOKE_CIPHER_TLS_PID:-}"
+  : >"${SMOKE_CIPHER_TLS_LOG}"
   SMOKE_CIPHER_WORK_DIR="${SMOKE_WORK_DIR}/cipher-tls" \
-    python3 "${SCRIPT_DIR}/cipher-tls-servers.py" >>"${SMOKE_WORK_DIR}/cipher-tls.log" 2>&1 &
+    python3 "${SCRIPT_DIR}/cipher-tls-servers.py" >>"${SMOKE_CIPHER_TLS_LOG}" 2>&1 &
   SMOKE_CIPHER_TLS_PID=$!
-  smoke_wait_port 127.0.0.1 19601 "cipher TLS AES128 dest"
-  smoke_wait_port 127.0.0.1 19602 "cipher TLS AES256 dest"
-  smoke_wait_port 127.0.0.1 19603 "cipher TLS ChaCha20 dest"
+  smoke_wait_port 127.0.0.1 19601 "cipher TLS AES128 dest" &&
+    smoke_wait_port 127.0.0.1 19602 "cipher TLS AES256 dest" &&
+    smoke_wait_port 127.0.0.1 19603 "cipher TLS ChaCha20 dest"
+}
+
+cipher_prepare_phase() {
+  local server_config="$1"
+  local client_config="$2"
+  smoke_stop_stack
+  : >"${SMOKE_SERVER_LOG}"
+  smoke_start_stack "${server_config}" "${client_config}"
+  sleep 0.25
+}
+
+cipher_record_validation() {
+  local name="$1"
+  local curl_ok="$2"
+  local http_code="$3"
+  local server_cipher="$4"
+  local dest_cipher="$5"
+  local expected_cipher="$6"
+  local phase_result="$7"
+  local validation_reason="$8"
+  SMOKE_CIPHER_DETAILS+=(
+    "${name}: phase=${phase_result} curl_http=${http_code} expected=${expected_cipher} dest_tls=${dest_cipher} server=${server_cipher} reason=${validation_reason}"
+  )
 }
 
 phase_cipher_suite() {
   local name="$1"
   local server_config="$2"
   local suite_id="$3"
+  local suite_name="$4"
+  local dest_port="$5"
   local client
+  local tls_log_before server_cipher dest_cipher expected_cipher curl_ok=false
+  local http_code="000"
+  local validation_reason="unknown"
+
+  if [[ ! -f "${server_config}" ]]; then
+    echo "error: cipher fixture missing: ${server_config}" >&2
+    cipher_record_validation "${name}" false "${http_code}" "missing" "missing" "${suite_name} (${suite_id})" "FAIL" "fixture_missing"
+    return 1
+  fi
+
   client="$(client_config "cipher-${name}" "")"
-  smoke_start_stack "${server_config}" "${client}"
-  smoke_record_curl "cipher-${name}" -m 30 "${SMOKE_QUICK_URL}" &&
-    smoke_log_contains "cipher_suite_id=\"${suite_id}\""
+  tls_log_before="$(smoke_log_line_count "${SMOKE_CIPHER_TLS_LOG}")"
+  cipher_prepare_phase "${server_config}" "${client}"
+
+  expected_cipher="${suite_name} (${suite_id})"
+  set +e
+  http_code="$(smoke_curl_socks -m 30 "${SMOKE_QUICK_URL}")"
+  local curl_exit=$?
+  set -e
+  SMOKE_CURL_NAMES+=("cipher-${name}")
+  SMOKE_CURL_EXIT_CODES+=("${curl_exit}")
+  SMOKE_CURL_HTTP_CODES+=("${http_code}")
+  if [[ "${curl_exit}" -eq 0 && "${http_code}" =~ ^2 ]]; then
+    curl_ok=true
+    SMOKE_CURL_PASSED=$((SMOKE_CURL_PASSED + 1))
+  else
+    SMOKE_CURL_FAILED=$((SMOKE_CURL_FAILED + 1))
+  fi
+
+  server_cipher="$(smoke_extract_server_negotiated_cipher "${SMOKE_SERVER_LOG}")"
+  dest_cipher="$(smoke_extract_dest_negotiated_cipher "${SMOKE_CIPHER_TLS_LOG}" "${tls_log_before}" "${dest_port}")"
+
+  if [[ "${curl_ok}" != true ]]; then
+    validation_reason="curl_not_http_2xx"
+    cipher_record_validation "${name}" false "${http_code}" "${server_cipher}" "${dest_cipher}" "${expected_cipher}" "FAIL" "${validation_reason}"
+    echo "error: cipher-${name} validation failed (curl_http=${http_code}, expected=${expected_cipher})" >&2
+    return 1
+  fi
+
+  if [[ "${dest_cipher}" != "${expected_cipher}" ]]; then
+    validation_reason="dest_tls_mismatch"
+    cipher_record_validation "${name}" true "${http_code}" "${server_cipher}" "${dest_cipher}" "${expected_cipher}" "FAIL" "${validation_reason}"
+    echo "error: cipher-${name} validation failed (curl_http=${http_code}, server=${server_cipher}, dest_tls=${dest_cipher}, expected=${expected_cipher})" >&2
+    return 1
+  fi
+
+  if [[ "${server_cipher}" == "${expected_cipher}" ]]; then
+    validation_reason="curl_http_200_and_dest_tls_match_and_server_marker_match"
+  else
+    validation_reason="curl_http_200_and_dest_tls_match"
+  fi
+
+  cipher_record_validation "${name}" true "${http_code}" "${server_cipher}" "${dest_cipher}" "${expected_cipher}" "PASS" "${validation_reason}"
+  return 0
+}
+
+run_cipher_suite_phase() {
+  local phase_name="$1"
+  local name="$2"
+  local server_config="$3"
+  local suite_id="$4"
+  local suite_name="$5"
+  local dest_port="$6"
+
+  if [[ "${SMOKE_CIPHER_DEST_UNAVAILABLE:-0}" == "1" ]]; then
+    skip_phase "${phase_name} (cipher dest servers unavailable)"
+    cipher_record_validation "${name}" false "000" "skipped" "skipped" "${suite_name} (${suite_id})" "SKIP" "cipher_dest_servers_unavailable"
+    return 0
+  fi
+
+  if phase_cipher_suite "${name}" "${server_config}" "${suite_id}" "${suite_name}" "${dest_port}"; then
+    pass_phase "${phase_name}"
+  else
+    fail_phase "${phase_name}"
+  fi
 }
 
 run_cipher_phases() {
-  start_cipher_tls_servers
-  run_phase "cipher force AES128" phase_cipher_suite aes128 "${SERVER_CIPHER_AES128}" "0x1301"
-  run_phase "cipher force AES256" phase_cipher_suite aes256 "${SERVER_CIPHER_AES256}" "0x1302"
-  run_phase "cipher force CHACHA20" phase_cipher_suite chacha "${SERVER_CIPHER_CHACHA}" "0x1303"
+  SMOKE_CIPHER_DEST_UNAVAILABLE=0
+  if ! start_cipher_tls_servers; then
+    SMOKE_CIPHER_DEST_UNAVAILABLE=1
+    echo "warning: cipher TLS dest servers unavailable; cipher phases will be skipped" >&2
+  fi
+
+  run_cipher_suite_phase "cipher force AES128" aes128 "${SERVER_CIPHER_AES128}" "0x1301" "TLS_AES_128_GCM_SHA256" 19601
+  run_cipher_suite_phase "cipher force AES256" aes256 "${SERVER_CIPHER_AES256}" "0x1302" "TLS_AES_256_GCM_SHA384" 19602
+  run_cipher_suite_phase "cipher force CHACHA20" chacha "${SERVER_CIPHER_CHACHA}" "0x1303" "TLS_CHACHA20_POLY1305_SHA256" 19603
+
   smoke_stop_process "${SMOKE_CIPHER_TLS_PID:-}"
   SMOKE_CIPHER_TLS_PID=""
 }

@@ -18,8 +18,8 @@ use rust_xray::reality::{
 };
 use rust_xray::tls::{read_client_hello_record, PrefixedStream, TlsClientHelloRecord};
 use rust_xray::vless::{
-    build_fallback_context, build_vless_clients, looks_like_http_request, resolve_fallback_target,
-    VlessClient,
+    build_fallback_context, build_vless_clients, fallback_match_kind_label,
+    looks_like_http_request, resolve_fallback_selection, VlessClient,
 };
 
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
@@ -49,20 +49,28 @@ async fn relay_vless_fallback_with_log(
     reason: &str,
 ) -> std::io::Result<()> {
     let ctx = build_fallback_context(hello, initial_client_bytes);
-    let (dest_addr, xver) = resolve_fallback_target(
+    let selection = resolve_fallback_selection(
         &config.reality.vless_fallbacks,
         &config.reality.dest_addr,
         &ctx,
     )?;
+    let dest_addr = selection.dest;
+    let xver = selection.xver;
 
-    debug!(
+    info!(
         reason,
+        fallback_count = config.reality.vless_fallbacks.len(),
+        selected_reason = fallback_match_kind_label(selection.kind),
+        used_configured_fallback = selection.used_configured_fallback,
         %dest_addr,
         xver,
         sni = ?ctx.sni,
         alpn = ?ctx.alpn,
+        alpn_offers = ?ctx.alpn_offers,
+        matched_alpn = ?selection.matched_alpn,
         http_path = ?ctx.http_path,
-        "starting VLESS fallback relay"
+        initial_bytes = initial_client_bytes.len(),
+        "VLESS fallback target selected"
     );
 
     relay_fallback_with_xver(client, &dest_addr, initial_client_bytes, xver)
@@ -263,6 +271,18 @@ fn load_runtime_config(path: &PathBuf) -> std::io::Result<RuntimeConfig> {
         "loaded REALITY inbound settings"
     );
 
+    for (index, fallback) in config.reality.vless_fallbacks.iter().enumerate() {
+        info!(
+            index,
+            name = fallback.name.as_deref().unwrap_or(""),
+            alpn = fallback.alpn.as_deref().unwrap_or(""),
+            path = fallback.path.as_deref().unwrap_or(""),
+            dest = %fallback.dest.addr,
+            xver = fallback.xver,
+            "VLESS fallback entry"
+        );
+    }
+
     Ok(config)
 }
 
@@ -312,6 +332,7 @@ async fn run() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_xray::vless::{build_fallback_context, resolve_fallback_selection, FallbackContext};
 
     const VLESS_REALITY_CONFIG: &str = r#"{
         "inbounds": [{
@@ -349,5 +370,142 @@ mod tests {
         );
         assert_eq!(config.reality.protocol.as_deref(), Some("vless"));
         assert!(config.reality.vless_fallbacks.is_empty());
+    }
+
+    fn runtime_with_fallbacks() -> RuntimeConfig {
+        let json = r#"{
+            "inbounds": [{
+                "tag": "reality-in",
+                "listen": "127.0.0.1",
+                "port": 443,
+                "protocol": "vless",
+                "settings": {
+                    "clients": [{"id": "00000000-0000-0000-0000-000000000001"}],
+                    "decryption": "none",
+                    "fallbacks": [
+                        {"dest": 19501},
+                        {"name": "name-fallback.test", "dest": 19502},
+                        {"path": "/smoke-path", "dest": 19503},
+                        {"alpn": "http/1.1", "dest": 19505},
+                        {"alpn": "h2", "dest": 19506},
+                        {"name": "proxy-fallback.test", "dest": 19504, "xver": 1},
+                        {"name": "proxy-v2-fallback.test", "dest": 19507, "xver": 2}
+                    ]
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "show": false,
+                        "dest": "www.example.com:443",
+                        "serverNames": ["www.example.com"],
+                        "privateKey": "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4",
+                        "shortIds": [""]
+                    }
+                }
+            }]
+        }"#;
+        let xray: XrayConfig = serde_json::from_str(json).expect("parse config");
+        runtime_config_from_xray(&xray).expect("build runtime config")
+    }
+
+    fn runtime_selection(config: &RuntimeConfig, ctx: &FallbackContext) -> (String, u8) {
+        let selection = resolve_fallback_selection(
+            &config.reality.vless_fallbacks,
+            &config.reality.dest_addr,
+            ctx,
+        )
+        .expect("resolve fallback");
+        (selection.dest, selection.xver)
+    }
+
+    #[test]
+    fn runtime_resolves_default_fallback_over_reality_dest() {
+        let config = runtime_with_fallbacks();
+
+        assert_eq!(
+            runtime_selection(&config, &FallbackContext::default()),
+            ("127.0.0.1:19501".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn runtime_resolves_fallback_by_sni_name() {
+        let config = runtime_with_fallbacks();
+        let ctx = FallbackContext {
+            sni: Some("name-fallback.test".to_string()),
+            ..FallbackContext::default()
+        };
+
+        assert_eq!(
+            runtime_selection(&config, &ctx),
+            ("127.0.0.1:19502".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn runtime_resolves_fallback_by_alpn_http11() {
+        let config = runtime_with_fallbacks();
+        let ctx = FallbackContext {
+            alpn: Some("http/1.1".to_string()),
+            alpn_offers: vec!["http/1.1".to_string()],
+            ..FallbackContext::default()
+        };
+
+        assert_eq!(
+            runtime_selection(&config, &ctx),
+            ("127.0.0.1:19505".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn runtime_resolves_fallback_by_alpn_h2() {
+        let config = runtime_with_fallbacks();
+        let ctx = FallbackContext {
+            alpn: Some("http/1.1".to_string()),
+            alpn_offers: vec!["http/1.1".to_string(), "h2".to_string()],
+            ..FallbackContext::default()
+        };
+
+        assert_eq!(
+            runtime_selection(&config, &ctx),
+            ("127.0.0.1:19506".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn runtime_resolves_fallback_by_plain_http_path() {
+        let config = runtime_with_fallbacks();
+        let ctx = build_fallback_context(
+            None,
+            b"GET /smoke-path/resource HTTP/1.1\r\nHost: smoke.local\r\n\r\n",
+        );
+
+        assert_eq!(
+            runtime_selection(&config, &ctx),
+            ("127.0.0.1:19503".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn runtime_resolves_fallback_xver_values() {
+        let config = runtime_with_fallbacks();
+        let proxy_v1 = FallbackContext {
+            sni: Some("proxy-fallback.test".to_string()),
+            ..FallbackContext::default()
+        };
+        let proxy_v2 = FallbackContext {
+            sni: Some("proxy-v2-fallback.test".to_string()),
+            ..FallbackContext::default()
+        };
+
+        assert_eq!(
+            runtime_selection(&config, &proxy_v1),
+            ("127.0.0.1:19504".to_string(), 1)
+        );
+        assert_eq!(
+            runtime_selection(&config, &proxy_v2),
+            ("127.0.0.1:19507".to_string(), 2)
+        );
     }
 }
