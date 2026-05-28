@@ -8,8 +8,8 @@ use tracing::{debug, error, info, warn};
 
 use rust_xray::codec::{Codec, Reader};
 use rust_xray::config::{
-    first_reality_inbound_runtime, load_xray_config_from_file, RealityInboundRuntime,
-    RealityMldsa65RuntimeMode, XrayConfig,
+    first_reality_inbound_runtime, load_xray_config_from_file, reality_mldsa65_runtime_mode,
+    RealityInboundRuntime, RealityMldsa65RuntimeMode, XrayConfig,
 };
 use rust_xray::protocol::structs::ClientHelloPayload;
 use rust_xray::proxy::relay_fallback_with_xver;
@@ -244,11 +244,15 @@ fn runtime_config_from_xray(xray: &XrayConfig) -> std::io::Result<RuntimeConfig>
 }
 
 fn validate_reality_runtime_feature_gates(config: &RuntimeConfig) -> std::io::Result<()> {
-    match config.reality.mldsa65_runtime_mode() {
+    match reality_mldsa65_runtime_mode(&config.reality) {
         RealityMldsa65RuntimeMode::Disabled => Ok(()),
-        RealityMldsa65RuntimeMode::ConfiguredButUnsupported => Err(std::io::Error::new(
+        RealityMldsa65RuntimeMode::ConfiguredButLiveRuntimeUnsupported {
+            crypto_feature_compiled,
+        } => Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "realitySettings.mldsa65Seed is configured, but REALITY ML-DSA-65 runtime signing is not implemented/enabled yet",
+            format!(
+                "realitySettings.mldsa65Seed is configured, but REALITY ML-DSA-65 live runtime signing is not implemented/enabled yet; reality-mldsa65-crypto compiled: {crypto_feature_compiled}"
+            ),
         )),
     }
 }
@@ -394,40 +398,72 @@ mod tests {
     }
 
     #[test]
-    fn runtime_feature_gates_accept_absent_mldsa65_seed() {
+    fn mldsa65_runtime_mode_without_seed_is_disabled() {
         let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
         let config = runtime_config_from_xray(&xray).expect("build runtime config");
 
         assert!(config.reality.mldsa65_seed.is_none());
         assert_eq!(
-            config.reality.mldsa65_runtime_mode(),
+            reality_mldsa65_runtime_mode(&config.reality),
             RealityMldsa65RuntimeMode::Disabled
         );
         validate_reality_runtime_feature_gates(&config).expect("absent mldsa65Seed is unchanged");
     }
 
     #[test]
-    fn runtime_feature_gates_reject_configured_mldsa65_seed() {
+    #[cfg(not(feature = "reality-mldsa65-crypto"))]
+    fn mldsa65_runtime_mode_with_seed_is_unsupported_without_crypto_feature() {
         let json = vless_reality_config_with_mldsa65_seed(TEST_MLDSA65_SEED);
         let xray: XrayConfig = serde_json::from_str(&json).expect("parse config");
         let config = runtime_config_from_xray(&xray).expect("build runtime config");
 
         assert!(config.reality.mldsa65_seed.is_some());
         assert_eq!(
-            config.reality.mldsa65_runtime_mode(),
-            RealityMldsa65RuntimeMode::ConfiguredButUnsupported
+            reality_mldsa65_runtime_mode(&config.reality),
+            RealityMldsa65RuntimeMode::ConfiguredButLiveRuntimeUnsupported {
+                crypto_feature_compiled: false,
+            }
         );
 
         let err = validate_reality_runtime_feature_gates(&config).unwrap_err();
         let err_text = err.to_string();
         assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
         assert!(err_text.contains("mldsa65Seed"));
-        assert!(err_text.contains("not implemented"));
+        assert!(err_text.contains("ML-DSA-65"));
+        assert!(err_text.contains("live runtime signing"));
+        assert!(err_text.contains("not implemented") || err_text.contains("not enabled"));
+        assert!(err_text.contains("false"));
         assert!(!err_text.contains(TEST_MLDSA65_SEED));
     }
 
     #[test]
-    fn runtime_config_rejects_invalid_mldsa65_seed_before_feature_gate() {
+    #[cfg(feature = "reality-mldsa65-crypto")]
+    fn mldsa65_runtime_mode_with_seed_is_still_unsupported_with_crypto_feature() {
+        let json = vless_reality_config_with_mldsa65_seed(TEST_MLDSA65_SEED);
+        let xray: XrayConfig = serde_json::from_str(&json).expect("parse config");
+        let config = runtime_config_from_xray(&xray).expect("build runtime config");
+
+        assert!(config.reality.mldsa65_seed.is_some());
+        assert_eq!(
+            reality_mldsa65_runtime_mode(&config.reality),
+            RealityMldsa65RuntimeMode::ConfiguredButLiveRuntimeUnsupported {
+                crypto_feature_compiled: true,
+            }
+        );
+
+        let err = validate_reality_runtime_feature_gates(&config).unwrap_err();
+        let err_text = err.to_string();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err_text.contains("mldsa65Seed"));
+        assert!(err_text.contains("ML-DSA-65"));
+        assert!(err_text.contains("live runtime signing"));
+        assert!(err_text.contains("not implemented") || err_text.contains("not enabled"));
+        assert!(err_text.contains("true"));
+        assert!(!err_text.contains(TEST_MLDSA65_SEED));
+    }
+
+    #[test]
+    fn invalid_mldsa65_seed_still_fails_before_runtime_gate() {
         let json = vless_reality_config_with_mldsa65_seed("not-valid-base64!!!");
         let xray: XrayConfig = serde_json::from_str(&json).expect("parse config");
         let err = match runtime_config_from_xray(&xray) {

@@ -140,15 +140,26 @@ pub struct RealityInboundRuntime {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RealityMldsa65RuntimeMode {
     Disabled,
-    ConfiguredButUnsupported,
+    ConfiguredButLiveRuntimeUnsupported { crypto_feature_compiled: bool },
+}
+
+pub fn reality_mldsa65_crypto_feature_compiled() -> bool {
+    cfg!(feature = "reality-mldsa65-crypto")
+}
+
+pub fn reality_mldsa65_runtime_mode(reality: &RealityInboundRuntime) -> RealityMldsa65RuntimeMode {
+    if reality.mldsa65_seed.is_none() {
+        RealityMldsa65RuntimeMode::Disabled
+    } else {
+        RealityMldsa65RuntimeMode::ConfiguredButLiveRuntimeUnsupported {
+            crypto_feature_compiled: reality_mldsa65_crypto_feature_compiled(),
+        }
+    }
 }
 
 impl RealityInboundRuntime {
     pub fn mldsa65_runtime_mode(&self) -> RealityMldsa65RuntimeMode {
-        match self.mldsa65_seed.as_ref() {
-            Some(_) => RealityMldsa65RuntimeMode::ConfiguredButUnsupported,
-            None => RealityMldsa65RuntimeMode::Disabled,
-        }
+        reality_mldsa65_runtime_mode(self)
     }
 }
 
