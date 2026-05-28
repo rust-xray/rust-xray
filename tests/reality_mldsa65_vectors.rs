@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rust_xray::reality::{
     decode_mldsa65_seed, decode_mldsa65_verify_key, sign_reality_cert_extension_stub,
-    MLDSA65_SEED_LEN, MLDSA65_VERIFY_KEY_LEN,
+    Mldsa65Seed, MLDSA65_SEED_LEN, MLDSA65_VERIFY_KEY_LEN,
 };
 use serde::Deserialize;
 
@@ -148,9 +148,11 @@ fn sign_reality_cert_extension_stub_is_unsupported_and_non_mutating() {
     let auth_key = [0x22; 32];
     let client_hello = [0x01, 0x02, 0x03];
     let server_hello = [0x04, 0x05, 0x06];
+    let mldsa65_seed = Mldsa65Seed::from_bytes([0x33; 32]);
 
     let err = sign_reality_cert_extension_stub(
         &cert_after,
+        &mldsa65_seed,
         &public_key,
         &auth_key,
         &client_hello,

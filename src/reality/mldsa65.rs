@@ -222,6 +222,7 @@ pub fn sign_reality_mldsa65_message(
 /// [`MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET`]. This placeholder does not perform signing.
 pub fn sign_reality_cert_extension_stub(
     _cert_der: &[u8],
+    _mldsa65_seed: &Mldsa65Seed,
     _ed25519_public_key: &[u8; 32],
     _auth_key: &[u8; 32],
     _client_hello_original: &[u8],
@@ -267,9 +268,11 @@ mod tests {
         let auth_key = [0x22; 32];
         let client_hello = [0x01, 0x02, 0x03];
         let server_hello = [0x04, 0x05, 0x06];
+        let mldsa65_seed = Mldsa65Seed::from_bytes([0x33; 32]);
 
         let err = sign_reality_cert_extension_stub(
             &cert_after,
+            &mldsa65_seed,
             &public_key,
             &auth_key,
             &client_hello,

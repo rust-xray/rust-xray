@@ -15,6 +15,7 @@ type HmacSha512 = Hmac<Sha512>;
 pub enum RealityCertificatePatchMode<'a> {
     HmacOnly,
     HmacPlusMldsa65 {
+        mldsa65_seed: &'a crate::reality::mldsa65::Mldsa65Seed,
         client_hello_original: &'a [u8],
         server_hello_original: &'a [u8],
     },
@@ -79,10 +80,12 @@ pub fn patch_reality_certificate_der_with_mode(
             patch_reality_certificate_der(input.cert_der, input.ed25519_public_key, input.auth_key)
         }
         RealityCertificatePatchMode::HmacPlusMldsa65 {
+            mldsa65_seed,
             client_hello_original,
             server_hello_original,
         } => crate::reality::mldsa65::sign_reality_cert_extension_stub(
             input.cert_der,
+            mldsa65_seed,
             input.ed25519_public_key,
             input.auth_key,
             client_hello_original,
@@ -94,6 +97,7 @@ pub fn patch_reality_certificate_der_with_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reality::mldsa65::Mldsa65Seed;
     use crate::reality::tls13::generate_reality_ephemeral_ed25519_certificate;
 
     fn expected_reality_cert_hmac(auth_key: &[u8; 32], public_key: &[u8; 32]) -> [u8; 64] {
@@ -180,12 +184,14 @@ mod tests {
         let auth_key = [0x22; 32];
         let client_hello = [0x01, 0x02, 0x03];
         let server_hello = [0x04, 0x05, 0x06];
+        let mldsa65_seed = Mldsa65Seed::from_bytes([0x33; 32]);
 
         let err = patch_reality_certificate_der_with_mode(RealityCertificatePatchInput {
             cert_der: &mut cert,
             ed25519_public_key: &public_key,
             auth_key: &auth_key,
             mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
+                mldsa65_seed: &mldsa65_seed,
                 client_hello_original: &client_hello,
                 server_hello_original: &server_hello,
             },
@@ -204,12 +210,14 @@ mod tests {
         let auth_key = [0x42; 32];
         let client_hello = [0x01, 0x02, 0x03, 0x04];
         let server_hello = [0x05, 0x06, 0x07, 0x08];
+        let mldsa65_seed = Mldsa65Seed::from_bytes([0x44; 32]);
 
         let err = patch_reality_certificate_der_with_mode(RealityCertificatePatchInput {
             cert_der: &mut cert,
             ed25519_public_key: &public_key,
             auth_key: &auth_key,
             mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
+                mldsa65_seed: &mldsa65_seed,
                 client_hello_original: &client_hello,
                 server_hello_original: &server_hello,
             },
