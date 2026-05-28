@@ -9,8 +9,8 @@ use rust_xray::reality::mldsa65_crypto::{
 };
 use rust_xray::reality::{
     build_reality_mldsa65_message, decode_mldsa65_seed, decode_mldsa65_verify_key,
-    patch_reality_certificate_der, Mldsa65Seed, Mldsa65Signature,
-    MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET, MLDSA65_SIGNATURE_LEN,
+    patch_reality_certificate_der, Mldsa65Seed, MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET,
+    MLDSA65_SIGNATURE_LEN,
 };
 use serde::Deserialize;
 

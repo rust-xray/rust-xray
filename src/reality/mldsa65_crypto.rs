@@ -121,5 +121,5 @@ pub fn patch_reality_certificate_der_with_mldsa65_for_test(
         input.server_hello_original,
     );
     let signature = sign_reality_mldsa65_message_for_test(input.seed, &message)?;
-    crate::reality::write_reality_mldsa65_cert_extension_signature(input.cert_der, &signature)
+    crate::reality::patch_reality_cert_der_with_mldsa65_signature(input.cert_der, &signature)
 }

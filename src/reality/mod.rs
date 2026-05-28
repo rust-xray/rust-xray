@@ -36,8 +36,8 @@ pub use handshake::{
 };
 pub use mldsa65::{
     build_reality_mldsa65_message, decode_mldsa65_seed, decode_mldsa65_verify_key,
-    sign_reality_cert_extension_stub, sign_reality_mldsa65_message,
-    write_reality_mldsa65_cert_extension_signature, Mldsa65Seed, Mldsa65Signature,
+    patch_reality_cert_der_with_mldsa65_signature, sign_reality_cert_extension,
+    sign_reality_cert_extension_stub, sign_reality_mldsa65_message, Mldsa65Seed, Mldsa65Signature,
     Mldsa65VerifyKey, MLDSA65_CERT_EXTENSION_VALUE_LEN, MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET,
     MLDSA65_SEED_LEN, MLDSA65_SIGNATURE_LEN, MLDSA65_VERIFY_KEY_LEN,
 };

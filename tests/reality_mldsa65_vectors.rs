@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rust_xray::reality::{
-    decode_mldsa65_seed, decode_mldsa65_verify_key, sign_reality_cert_extension_stub,
-    Mldsa65Seed, MLDSA65_SEED_LEN, MLDSA65_VERIFY_KEY_LEN,
+    decode_mldsa65_seed, decode_mldsa65_verify_key, sign_reality_cert_extension_stub, Mldsa65Seed,
+    MLDSA65_SEED_LEN, MLDSA65_VERIFY_KEY_LEN,
 };
 use serde::Deserialize;
 

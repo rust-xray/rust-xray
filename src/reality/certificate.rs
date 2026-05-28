@@ -83,22 +83,31 @@ pub fn patch_reality_certificate_der_with_mode(
             mldsa65_seed,
             client_hello_original,
             server_hello_original,
-        } => crate::reality::mldsa65::sign_reality_cert_extension_stub(
-            input.cert_der,
-            mldsa65_seed,
-            input.ed25519_public_key,
-            input.auth_key,
-            client_hello_original,
-            server_hello_original,
-        ),
+        } => {
+            let signature = crate::reality::mldsa65::sign_reality_cert_extension(
+                mldsa65_seed,
+                input.ed25519_public_key,
+                input.auth_key,
+                client_hello_original,
+                server_hello_original,
+            )?;
+
+            crate::reality::mldsa65::patch_reality_cert_der_with_mldsa65_signature(
+                input.cert_der,
+                &signature,
+            )
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reality::mldsa65::Mldsa65Seed;
+    use crate::reality::mldsa65::{decode_mldsa65_seed, Mldsa65Seed};
     use crate::reality::tls13::generate_reality_ephemeral_ed25519_certificate;
+
+    const TEST_PRIVATE_KEY: &str = "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4";
+    const VALID_SEED_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 
     fn expected_reality_cert_hmac(auth_key: &[u8; 32], public_key: &[u8; 32]) -> [u8; 64] {
         let mut mac = HmacSha512::new_from_slice(auth_key).expect("valid HMAC key");
@@ -176,22 +185,25 @@ mod tests {
         assert_eq!(mode_cert, legacy_cert);
     }
 
+    #[cfg(not(feature = "reality-mldsa65-crypto"))]
     #[test]
-    fn patch_reality_certificate_der_with_mode_mldsa65_returns_unsupported() {
+    fn hmac_plus_mldsa65_without_feature_returns_unsupported_and_does_not_mutate() {
         let original = vec![0xaa; 128];
         let mut cert = original.clone();
         let public_key = [0x11; 32];
         let auth_key = [0x22; 32];
         let client_hello = [0x01, 0x02, 0x03];
         let server_hello = [0x04, 0x05, 0x06];
-        let mldsa65_seed = Mldsa65Seed::from_bytes([0x33; 32]);
+        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .expect("valid seed")
+            .expect("non-empty seed");
 
         let err = patch_reality_certificate_der_with_mode(RealityCertificatePatchInput {
             cert_der: &mut cert,
             ed25519_public_key: &public_key,
             auth_key: &auth_key,
             mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
-                mldsa65_seed: &mldsa65_seed,
+                mldsa65_seed: &seed,
                 client_hello_original: &client_hello,
                 server_hello_original: &server_hello,
             },
@@ -200,24 +212,31 @@ mod tests {
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert_eq!(cert, original);
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("reality-mldsa65-crypto") || err_text.contains("ML-DSA-65"),
+            "unexpected error text: {err_text}"
+        );
+        assert!(!err_text.contains(VALID_SEED_B64));
     }
 
+    #[cfg(not(feature = "reality-mldsa65-crypto"))]
     #[test]
-    fn patch_reality_certificate_der_with_mode_mldsa65_does_not_mutate_cert_der() {
-        let original = vec![0x5a; 512];
-        let mut cert = original.clone();
+    fn hmac_plus_mldsa65_mode_requires_seed_reference() {
+        let mut cert = vec![0x5a; 512];
+        let cert_before = cert.clone();
         let public_key = [0x31; 32];
         let auth_key = [0x42; 32];
         let client_hello = [0x01, 0x02, 0x03, 0x04];
         let server_hello = [0x05, 0x06, 0x07, 0x08];
-        let mldsa65_seed = Mldsa65Seed::from_bytes([0x44; 32]);
+        let seed = Mldsa65Seed::from_bytes([0x44; 32]);
 
         let err = patch_reality_certificate_der_with_mode(RealityCertificatePatchInput {
             cert_der: &mut cert,
             ed25519_public_key: &public_key,
             auth_key: &auth_key,
             mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
-                mldsa65_seed: &mldsa65_seed,
+                mldsa65_seed: &seed,
                 client_hello_original: &client_hello,
                 server_hello_original: &server_hello,
             },
@@ -225,6 +244,65 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
-        assert_eq!(cert, original);
+        assert_eq!(cert, cert_before);
+    }
+
+    #[cfg(feature = "reality-mldsa65-crypto")]
+    #[test]
+    fn hmac_plus_mldsa65_with_feature_patches_der_at_fixed_offset() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+        use crate::reality::mldsa65_crypto::{
+            derive_mldsa65_key_from_seed_for_test, verify_reality_mldsa65_signature_for_test,
+        };
+        use crate::reality::{
+            build_reality_mldsa65_message, decode_mldsa65_verify_key,
+            MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET, MLDSA65_SIGNATURE_LEN,
+        };
+
+        let extension_end = MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_SIGNATURE_LEN;
+        let original = vec![0xaa; extension_end + 16];
+        let mut cert = original.clone();
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .expect("valid seed")
+            .expect("non-empty seed");
+
+        patch_reality_certificate_der_with_mode(RealityCertificatePatchInput {
+            cert_der: &mut cert,
+            ed25519_public_key: &public_key,
+            auth_key: &auth_key,
+            mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
+                mldsa65_seed: &seed,
+                client_hello_original: &client_hello,
+                server_hello_original: &server_hello,
+            },
+        })
+        .expect("offline ML-DSA patch");
+
+        assert_eq!(
+            &cert[..MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET],
+            &original[..MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET]
+        );
+        assert_ne!(
+            &cert[MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET..extension_end],
+            &original[MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET..extension_end]
+        );
+        assert_eq!(&cert[extension_end..], &original[extension_end..]);
+
+        let message =
+            build_reality_mldsa65_message(&auth_key, &public_key, &client_hello, &server_hello);
+        let derived = derive_mldsa65_key_from_seed_for_test(&seed).expect("derived key");
+        let verify_b64 = URL_SAFE_NO_PAD.encode(&derived.verify_key_bytes);
+        let verify_key = decode_mldsa65_verify_key(&verify_b64).expect("verify key");
+        let signature = crate::reality::Mldsa65Signature::from_bytes(
+            cert[MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET..extension_end].to_vec(),
+        )
+        .expect("patched signature bytes");
+        verify_reality_mldsa65_signature_for_test(&verify_key, &message, &signature)
+            .expect("signature verifies");
     }
 }
