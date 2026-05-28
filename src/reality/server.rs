@@ -5,6 +5,7 @@ use tokio::time::timeout;
 use tracing::{debug, info};
 
 use crate::protocol::structs::ClientHelloPayload;
+use crate::reality::Mldsa65Seed;
 use crate::tls::{PrefixedStream, TlsClientHelloRecord};
 use crate::vless::handle_reality_vless_tcp_inbound;
 use crate::vless::VlessClient;
@@ -28,6 +29,7 @@ pub async fn handle_accepted_reality_client(
     accepted: RealityAccepted,
     dest_addr: &str,
     vless_clients: &[VlessClient],
+    mldsa65_seed: Option<&Mldsa65Seed>,
 ) -> std::io::Result<()> {
     info!(
         stage = stages::ACCEPTED_START,
@@ -69,6 +71,7 @@ pub async fn handle_accepted_reality_client(
     let dest_handshake = fetch_dest_handshake(&mut dest, &record.raw_record)
         .await
         .map_err(|err| stage_error(RealityAcceptedStage::DestServerHello, err))?;
+    let server_hello_original = dest_handshake.raw_server_bytes.clone();
 
     info!(
         stage = stages::DEST_SERVER_HELLO_OBSERVED,
@@ -89,6 +92,9 @@ pub async fn handle_accepted_reality_client(
         client,
         &client_hello_payload,
         &record.handshake_message,
+        &record.raw_record,
+        &server_hello_original,
+        mldsa65_seed,
         state,
     )
     .await?;

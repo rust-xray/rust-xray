@@ -293,7 +293,9 @@ pub fn generate_partial_tls13_handshake(
 
     let transcript_hash = state.update_transcript_client_server_hello(client_handshake_message)?;
     state.derive_handshake_secrets(&transcript_hash)?;
-    let encrypted_handshake_records = state.build_encrypted_server_handshake_records()?;
+    let encrypted_handshake_records = state.build_encrypted_server_handshake_records(
+        crate::reality::RealityCertificatePatchMode::HmacOnly,
+    )?;
 
     Ok(PartialTls13Handshake {
         server_hello_record,

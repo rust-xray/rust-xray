@@ -29,6 +29,37 @@ pub struct RealityCertificatePatchInput<'a> {
     pub mode: RealityCertificatePatchMode<'a>,
 }
 
+pub fn select_reality_certificate_patch_mode<'a>(
+    mldsa65_seed: Option<&'a crate::reality::mldsa65::Mldsa65Seed>,
+    client_hello_original: &'a [u8],
+    server_hello_original: &'a [u8],
+) -> std::io::Result<RealityCertificatePatchMode<'a>> {
+    match mldsa65_seed {
+        Some(seed) => {
+            if client_hello_original.is_empty() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "REALITY ML-DSA-65 certificate patch requires non-empty ClientHello original bytes",
+                ));
+            }
+
+            if server_hello_original.is_empty() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "REALITY ML-DSA-65 certificate patch requires non-empty ServerHello original bytes",
+                ));
+            }
+
+            Ok(RealityCertificatePatchMode::HmacPlusMldsa65 {
+                mldsa65_seed: seed,
+                client_hello_original,
+                server_hello_original,
+            })
+        }
+        None => Ok(RealityCertificatePatchMode::HmacOnly),
+    }
+}
+
 /// Future live REALITY ML-DSA-65 certificate patch inputs.
 ///
 /// Holds borrowed transcript and key material for a later integration block.
@@ -322,6 +353,34 @@ mod tests {
         assert_eq!(mode_cert, legacy_cert);
     }
 
+    #[test]
+    fn hmac_only_patch_selection_without_seed_is_unchanged() {
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+
+        let mode = select_reality_certificate_patch_mode(None, &client_hello, &server_hello)
+            .expect("HMAC-only mode");
+
+        assert!(matches!(mode, RealityCertificatePatchMode::HmacOnly));
+    }
+
+    #[test]
+    fn live_patch_context_with_seed_selects_hmac_plus_mldsa65() {
+        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .expect("valid seed")
+            .expect("non-empty seed");
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+
+        let mode = select_reality_certificate_patch_mode(Some(&seed), &client_hello, &server_hello)
+            .expect("ML-DSA mode");
+
+        assert!(matches!(
+            mode,
+            RealityCertificatePatchMode::HmacPlusMldsa65 { .. }
+        ));
+    }
+
     #[cfg(not(feature = "reality-mldsa65-crypto"))]
     #[test]
     fn hmac_plus_mldsa65_without_feature_returns_unsupported_and_does_not_mutate() {
@@ -441,5 +500,40 @@ mod tests {
         .expect("patched signature bytes");
         verify_reality_mldsa65_signature_for_test(&verify_key, &message, &signature)
             .expect("signature verifies");
+    }
+
+    #[cfg(feature = "reality-mldsa65-crypto")]
+    #[test]
+    fn mldsa65_live_patch_error_does_not_fallback_to_hmac() {
+        use crate::reality::{MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET, MLDSA65_SIGNATURE_LEN};
+
+        let extension_end = MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_SIGNATURE_LEN;
+        let original = vec![0xaa; extension_end - 1];
+        let mut cert = original.clone();
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .expect("valid seed")
+            .expect("non-empty seed");
+
+        let err = patch_reality_certificate_der_with_mode(RealityCertificatePatchInput {
+            cert_der: &mut cert,
+            ed25519_public_key: &public_key,
+            auth_key: &auth_key,
+            mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
+                mldsa65_seed: &seed,
+                client_hello_original: &client_hello,
+                server_hello_original: &server_hello,
+            },
+        })
+        .unwrap_err();
+
+        let err_text = err.to_string();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert_eq!(cert, original);
+        assert!(err_text.contains("ML-DSA-65 extension patch"));
+        assert!(!err_text.contains(VALID_SEED_B64));
     }
 }

@@ -17,8 +17,9 @@ mod version;
 pub use auth::{validate_reality_private_key_b64, RealityAuthResult};
 pub use certificate::{
     certificate_der_has_ed25519_signature_tail, patch_reality_certificate_der,
-    patch_reality_certificate_der_with_mode, validate_reality_mldsa65_live_patch_context,
-    RealityCertificatePatchInput, RealityCertificatePatchMode, RealityMldsa65LivePatchContext,
+    patch_reality_certificate_der_with_mode, select_reality_certificate_patch_mode,
+    validate_reality_mldsa65_live_patch_context, RealityCertificatePatchInput,
+    RealityCertificatePatchMode, RealityMldsa65LivePatchContext,
 };
 pub use decision::{
     inspect_reality_client_hello, RealityAccepted, RealityDecision, RealityInspectConfig,

@@ -7,9 +7,12 @@ use tracing::{debug, info};
 
 use crate::protocol::structs::ClientHelloPayload;
 use crate::reality::certificate::{
-    certificate_der_has_ed25519_signature_tail, patch_reality_certificate_der,
+    certificate_der_has_ed25519_signature_tail, patch_reality_certificate_der_with_mode,
+    select_reality_certificate_patch_mode, RealityCertificatePatchInput,
+    RealityCertificatePatchMode,
 };
 use crate::reality::handshake::RealityObservedServerHello;
+use crate::reality::mldsa65::Mldsa65Seed;
 use crate::reality::stages::{self, stage_error, RealityAcceptedStage};
 use crate::reality::RealityAccepted;
 use crate::tls::records::build_handshake_record;
@@ -235,7 +238,10 @@ impl RealityTls13ServerState {
     /// TLS records for the server.
     ///
     /// Transcript is updated with plaintext handshake messages, not encrypted records.
-    pub fn build_encrypted_server_handshake_records(&mut self) -> std::io::Result<Vec<u8>> {
+    pub fn build_encrypted_server_handshake_records(
+        &mut self,
+        certificate_patch_mode: RealityCertificatePatchMode<'_>,
+    ) -> std::io::Result<Vec<u8>> {
         let server_handshake_traffic_secret = self
             .handshake_secrets
             .as_ref()
@@ -263,11 +269,12 @@ impl RealityTls13ServerState {
                 "REALITY ephemeral certificate DER lacks Ed25519 signature tail layout",
             ));
         }
-        patch_reality_certificate_der(
-            &mut cert_der,
-            &ephemeral_cert.public_key_raw,
-            &self.accepted.auth.auth_key,
-        )?;
+        patch_reality_certificate_der_with_mode(RealityCertificatePatchInput {
+            cert_der: &mut cert_der,
+            ed25519_public_key: &ephemeral_cert.public_key_raw,
+            auth_key: &self.accepted.auth.auth_key,
+            mode: certificate_patch_mode,
+        })?;
         info!(
             cert_der_len = cert_der.len(),
             cert_public_key_len = ephemeral_cert.public_key_raw.len(),
@@ -412,6 +419,9 @@ pub async fn complete_reality_tls13_handshake<S>(
     mut stream: S,
     client_hello_payload: &ClientHelloPayload,
     client_hello_message: &[u8],
+    client_hello_original: &[u8],
+    server_hello_original: &[u8],
+    mldsa65_seed: Option<&Mldsa65Seed>,
     mut state: RealityTls13ServerState,
 ) -> std::io::Result<RealityTls13ApplicationStream<S>>
 where
@@ -468,8 +478,15 @@ where
         "derived handshake traffic secrets"
     );
 
+    let certificate_patch_mode = select_reality_certificate_patch_mode(
+        mldsa65_seed,
+        client_hello_original,
+        server_hello_original,
+    )
+    .map_err(|err| stage_error(RealityAcceptedStage::ServerHandshakeRecords, err))?;
+
     let encrypted_handshake_records = state
-        .build_encrypted_server_handshake_records()
+        .build_encrypted_server_handshake_records(certificate_patch_mode)
         .map_err(|err| stage_error(RealityAcceptedStage::ServerHandshakeRecords, err))?;
 
     info!(
@@ -1134,7 +1151,7 @@ mod tests {
             .server_handshake_traffic_secret
             .clone();
         let records = state
-            .build_encrypted_server_handshake_records()
+            .build_encrypted_server_handshake_records(RealityCertificatePatchMode::HmacOnly)
             .expect("valid encrypted handshake records");
         let parsed = parse_tls_records(&records).expect("parsable encrypted records");
         assert_eq!(parsed.len(), 4);
@@ -1185,7 +1202,7 @@ mod tests {
     fn build_encrypted_server_handshake_records_non_empty() {
         let mut state = state_with_handshake_secrets();
         let records = state
-            .build_encrypted_server_handshake_records()
+            .build_encrypted_server_handshake_records(RealityCertificatePatchMode::HmacOnly)
             .expect("valid encrypted handshake records");
 
         assert!(!records.is_empty());
@@ -1195,7 +1212,7 @@ mod tests {
     fn build_encrypted_server_handshake_records_first_record_is_application_data() {
         let mut state = state_with_handshake_secrets();
         let records = state
-            .build_encrypted_server_handshake_records()
+            .build_encrypted_server_handshake_records(RealityCertificatePatchMode::HmacOnly)
             .expect("valid encrypted handshake records");
 
         assert_eq!(records[0], TLS_RECORD_APPLICATION_DATA);
@@ -1213,7 +1230,7 @@ mod tests {
         let transcript_len_before = state.transcript.len();
 
         state
-            .build_encrypted_server_handshake_records()
+            .build_encrypted_server_handshake_records(RealityCertificatePatchMode::HmacOnly)
             .expect("valid encrypted handshake records");
 
         assert!(state.transcript.len() > transcript_len_before);
@@ -1228,7 +1245,7 @@ mod tests {
             .expect("valid transcript update");
 
         let err = state
-            .build_encrypted_server_handshake_records()
+            .build_encrypted_server_handshake_records(RealityCertificatePatchMode::HmacOnly)
             .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
