@@ -180,6 +180,93 @@ pub fn patch_reality_cert_der_with_mldsa65_signature(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealityMldsa65HandshakeDataAvailability {
+    pub has_client_hello_original: bool,
+    pub client_hello_len: usize,
+    pub has_server_hello_original: bool,
+    pub server_hello_len: usize,
+    pub has_ed25519_public_key: bool,
+    pub has_auth_key: bool,
+    pub has_mldsa65_seed: bool,
+    pub cert_der_len: usize,
+    pub cert_der_has_mldsa65_patch_range: bool,
+}
+
+pub fn reality_mldsa65_handshake_data_shape(
+    client_hello_original: Option<&[u8]>,
+    server_hello_original: Option<&[u8]>,
+    ed25519_public_key: Option<&[u8; 32]>,
+    auth_key: Option<&[u8; 32]>,
+    mldsa65_seed: Option<&Mldsa65Seed>,
+    cert_der: Option<&[u8]>,
+) -> RealityMldsa65HandshakeDataAvailability {
+    let client_hello_len = client_hello_original.map_or(0, <[u8]>::len);
+    let server_hello_len = server_hello_original.map_or(0, <[u8]>::len);
+    let cert_der_len = cert_der.map_or(0, <[u8]>::len);
+    let extension_end = MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_SIGNATURE_LEN;
+
+    RealityMldsa65HandshakeDataAvailability {
+        has_client_hello_original: client_hello_len > 0,
+        client_hello_len,
+        has_server_hello_original: server_hello_len > 0,
+        server_hello_len,
+        has_ed25519_public_key: ed25519_public_key.is_some(),
+        has_auth_key: auth_key.is_some(),
+        has_mldsa65_seed: mldsa65_seed.is_some(),
+        cert_der_len,
+        cert_der_has_mldsa65_patch_range: cert_der_len >= extension_end,
+    }
+}
+
+pub fn validate_reality_mldsa65_live_handshake_data_shape(
+    shape: &RealityMldsa65HandshakeDataAvailability,
+) -> std::io::Result<()> {
+    if !shape.has_client_hello_original {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "REALITY ML-DSA-65 live handshake data requires ClientHello original bytes",
+        ));
+    }
+
+    if !shape.has_server_hello_original {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "REALITY ML-DSA-65 live handshake data requires ServerHello original bytes",
+        ));
+    }
+
+    if !shape.has_ed25519_public_key {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "REALITY ML-DSA-65 live handshake data requires Ed25519 public key",
+        ));
+    }
+
+    if !shape.has_auth_key {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "REALITY ML-DSA-65 live handshake data requires auth_key",
+        ));
+    }
+
+    if !shape.has_mldsa65_seed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "REALITY ML-DSA-65 live handshake data requires mldsa65Seed",
+        ));
+    }
+
+    if !shape.cert_der_has_mldsa65_patch_range {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "REALITY ML-DSA-65 live handshake data requires certificate DER patch range",
+        ));
+    }
+
+    Ok(())
+}
+
 /// Builds the REALITY ML-DSA-65 message and signs it with `seed`.
 pub fn sign_reality_cert_extension(
     seed: &Mldsa65Seed,
@@ -297,6 +384,197 @@ mod tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
         assert_eq!(cert_after, cert_before);
+    }
+
+    fn valid_seed() -> Mldsa65Seed {
+        decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .expect("valid seed")
+            .expect("non-empty seed")
+    }
+
+    fn full_patch_range_cert_der() -> Vec<u8> {
+        vec![0xaa; MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_SIGNATURE_LEN]
+    }
+
+    #[test]
+    fn handshake_data_shape_without_any_inputs_reports_all_missing() {
+        let shape = reality_mldsa65_handshake_data_shape(None, None, None, None, None, None);
+
+        assert!(!shape.has_client_hello_original);
+        assert_eq!(shape.client_hello_len, 0);
+        assert!(!shape.has_server_hello_original);
+        assert_eq!(shape.server_hello_len, 0);
+        assert!(!shape.has_ed25519_public_key);
+        assert!(!shape.has_auth_key);
+        assert!(!shape.has_mldsa65_seed);
+        assert_eq!(shape.cert_der_len, 0);
+        assert!(!shape.cert_der_has_mldsa65_patch_range);
+
+        let err = validate_reality_mldsa65_live_handshake_data_shape(&shape).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("ClientHello"));
+    }
+
+    #[test]
+    fn handshake_data_shape_with_valid_inputs_passes_validation() {
+        let seed = valid_seed();
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let cert_der = full_patch_range_cert_der();
+
+        let shape = reality_mldsa65_handshake_data_shape(
+            Some(&client_hello),
+            Some(&server_hello),
+            Some(&public_key),
+            Some(&auth_key),
+            Some(&seed),
+            Some(&cert_der),
+        );
+
+        assert!(shape.has_client_hello_original);
+        assert_eq!(shape.client_hello_len, client_hello.len());
+        assert!(shape.has_server_hello_original);
+        assert_eq!(shape.server_hello_len, server_hello.len());
+        assert!(shape.has_ed25519_public_key);
+        assert!(shape.has_auth_key);
+        assert!(shape.has_mldsa65_seed);
+        assert_eq!(shape.cert_der_len, cert_der.len());
+        assert!(shape.cert_der_has_mldsa65_patch_range);
+        validate_reality_mldsa65_live_handshake_data_shape(&shape).expect("valid shape");
+    }
+
+    #[test]
+    fn handshake_data_shape_rejects_empty_client_hello() {
+        let seed = valid_seed();
+        let server_hello = [0x04, 0x05, 0x06];
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let cert_der = full_patch_range_cert_der();
+
+        let shape = reality_mldsa65_handshake_data_shape(
+            Some(&[]),
+            Some(&server_hello),
+            Some(&public_key),
+            Some(&auth_key),
+            Some(&seed),
+            Some(&cert_der),
+        );
+
+        assert!(!shape.has_client_hello_original);
+        assert_eq!(shape.client_hello_len, 0);
+        let err = validate_reality_mldsa65_live_handshake_data_shape(&shape).unwrap_err();
+        let err_text = err.to_string();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err_text.contains("ClientHello"));
+        assert!(!err_text.contains(VALID_SEED_B64));
+    }
+
+    #[test]
+    fn handshake_data_shape_rejects_empty_server_hello() {
+        let seed = valid_seed();
+        let client_hello = [0x01, 0x02, 0x03];
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let cert_der = full_patch_range_cert_der();
+
+        let shape = reality_mldsa65_handshake_data_shape(
+            Some(&client_hello),
+            Some(&[]),
+            Some(&public_key),
+            Some(&auth_key),
+            Some(&seed),
+            Some(&cert_der),
+        );
+
+        assert!(!shape.has_server_hello_original);
+        assert_eq!(shape.server_hello_len, 0);
+        let err = validate_reality_mldsa65_live_handshake_data_shape(&shape).unwrap_err();
+        let err_text = err.to_string();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err_text.contains("ServerHello"));
+        assert!(!err_text.contains(VALID_SEED_B64));
+    }
+
+    #[test]
+    fn handshake_data_shape_rejects_missing_seed() {
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let cert_der = full_patch_range_cert_der();
+
+        let shape = reality_mldsa65_handshake_data_shape(
+            Some(&client_hello),
+            Some(&server_hello),
+            Some(&public_key),
+            Some(&auth_key),
+            None,
+            Some(&cert_der),
+        );
+
+        assert!(!shape.has_mldsa65_seed);
+        let err = validate_reality_mldsa65_live_handshake_data_shape(&shape).unwrap_err();
+        let err_text = err.to_string();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err_text.contains("mldsa65Seed"));
+        assert!(!err_text.contains(VALID_SEED_B64));
+    }
+
+    #[test]
+    fn handshake_data_shape_rejects_short_cert_der() {
+        let seed = valid_seed();
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let cert_der =
+            vec![0xaa; MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_SIGNATURE_LEN - 1];
+
+        let shape = reality_mldsa65_handshake_data_shape(
+            Some(&client_hello),
+            Some(&server_hello),
+            Some(&public_key),
+            Some(&auth_key),
+            Some(&seed),
+            Some(&cert_der),
+        );
+
+        assert!(!shape.cert_der_has_mldsa65_patch_range);
+        let err = validate_reality_mldsa65_live_handshake_data_shape(&shape).unwrap_err();
+        let err_text = err.to_string();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err_text.contains("certificate DER"));
+        assert!(err_text.contains("patch range"));
+    }
+
+    #[test]
+    fn handshake_data_shape_debug_does_not_expose_sensitive_bytes() {
+        let seed = valid_seed();
+        let client_hello = [0xaa, 0xbb, 0xcc, 0xdd];
+        let server_hello = [0x10, 0x20, 0x30, 0x40];
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let cert_der = full_patch_range_cert_der();
+
+        let shape = reality_mldsa65_handshake_data_shape(
+            Some(&client_hello),
+            Some(&server_hello),
+            Some(&public_key),
+            Some(&auth_key),
+            Some(&seed),
+            Some(&cert_der),
+        );
+
+        let debug = format!("{shape:?}");
+        assert!(debug.contains("client_hello_len: 4"));
+        assert!(debug.contains("server_hello_len: 4"));
+        assert!(!debug.contains(VALID_SEED_B64));
+        assert!(!debug.contains("170"));
+        assert!(!debug.contains("187"));
+        assert!(!debug.contains("0xaa"));
+        assert!(!debug.contains("0x22"));
     }
 
     #[test]
