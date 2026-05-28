@@ -3,6 +3,7 @@
 //! Upstream REALITY (XTLS) generates an ephemeral Ed25519 self-signed certificate, then
 //! replaces the trailing signature bytes with HMAC-SHA512(AuthKey, Ed25519 public key).
 
+use std::fmt;
 use std::io::{Error, ErrorKind};
 
 use hmac::{Hmac, Mac};
@@ -26,6 +27,59 @@ pub struct RealityCertificatePatchInput<'a> {
     pub ed25519_public_key: &'a [u8; 32],
     pub auth_key: &'a [u8; 32],
     pub mode: RealityCertificatePatchMode<'a>,
+}
+
+/// Future live REALITY ML-DSA-65 certificate patch inputs.
+///
+/// Holds borrowed transcript and key material for a later integration block.
+/// Not used by the accepted TLS handshake path today.
+pub struct RealityMldsa65LivePatchContext<'a> {
+    pub mldsa65_seed: &'a crate::reality::mldsa65::Mldsa65Seed,
+    pub client_hello_original: &'a [u8],
+    pub server_hello_original: &'a [u8],
+    pub ed25519_public_key: &'a [u8; 32],
+    pub auth_key: &'a [u8; 32],
+}
+
+impl fmt::Debug for RealityMldsa65LivePatchContext<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RealityMldsa65LivePatchContext")
+            .field("mldsa65_seed", &"<redacted>")
+            .field(
+                "client_hello_original_len",
+                &self.client_hello_original.len(),
+            )
+            .field(
+                "server_hello_original_len",
+                &self.server_hello_original.len(),
+            )
+            .field("ed25519_public_key", &"<redacted>")
+            .field("auth_key", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Validates shape of a future live ML-DSA certificate patch context.
+///
+/// Does not sign, mutate DER, or touch runtime state.
+pub fn validate_reality_mldsa65_live_patch_context(
+    context: &RealityMldsa65LivePatchContext<'_>,
+) -> std::io::Result<()> {
+    if context.client_hello_original.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "REALITY ML-DSA-65 live patch context requires non-empty ClientHello bytes",
+        ));
+    }
+
+    if context.server_hello_original.is_empty() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "REALITY ML-DSA-65 live patch context requires non-empty ServerHello bytes",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Returns true when `cert_der` is long enough for the REALITY Ed25519 tail signature patch.
@@ -108,6 +162,89 @@ mod tests {
 
     const TEST_PRIVATE_KEY: &str = "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4";
     const VALID_SEED_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+
+    fn sample_live_patch_context<'a>(
+        seed: &'a Mldsa65Seed,
+        client_hello: &'a [u8],
+        server_hello: &'a [u8],
+        public_key: &'a [u8; 32],
+        auth_key: &'a [u8; 32],
+    ) -> RealityMldsa65LivePatchContext<'a> {
+        RealityMldsa65LivePatchContext {
+            mldsa65_seed: seed,
+            client_hello_original: client_hello,
+            server_hello_original: server_hello,
+            ed25519_public_key: public_key,
+            auth_key,
+        }
+    }
+
+    #[test]
+    fn future_mldsa65_live_patch_context_can_be_constructed_without_exposing_seed() {
+        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .expect("valid seed")
+            .expect("non-empty seed");
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let context =
+            sample_live_patch_context(&seed, &client_hello, &server_hello, &public_key, &auth_key);
+
+        let debug = format!("{context:?}");
+        assert!(debug.contains("redacted"));
+        assert!(debug.contains("client_hello_original_len"));
+        assert!(debug.contains("server_hello_original_len"));
+        assert!(!debug.contains(VALID_SEED_B64));
+        assert!(!debug.contains("0, 1, 2"));
+    }
+
+    #[test]
+    fn empty_client_hello_is_rejected_by_context_validation() {
+        let seed = Mldsa65Seed::from_bytes([0x33; 32]);
+        let server_hello = [0x04, 0x05, 0x06];
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let context = sample_live_patch_context(&seed, &[], &server_hello, &public_key, &auth_key);
+
+        let err = validate_reality_mldsa65_live_patch_context(&context).unwrap_err();
+        let err_text = err.to_string();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err_text.contains("ClientHello"));
+        assert!(!err_text.contains(VALID_SEED_B64));
+    }
+
+    #[test]
+    fn empty_server_hello_is_rejected_by_context_validation() {
+        let seed = Mldsa65Seed::from_bytes([0x33; 32]);
+        let client_hello = [0x01, 0x02, 0x03];
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let context = sample_live_patch_context(&seed, &client_hello, &[], &public_key, &auth_key);
+
+        let err = validate_reality_mldsa65_live_patch_context(&context).unwrap_err();
+        let err_text = err.to_string();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err_text.contains("ServerHello"));
+        assert!(!err_text.contains(VALID_SEED_B64));
+    }
+
+    #[test]
+    fn valid_live_patch_context_passes_validation() {
+        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .expect("valid seed")
+            .expect("non-empty seed");
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let context =
+            sample_live_patch_context(&seed, &client_hello, &server_hello, &public_key, &auth_key);
+
+        validate_reality_mldsa65_live_patch_context(&context).expect("valid context");
+    }
 
     fn expected_reality_cert_hmac(auth_key: &[u8; 32], public_key: &[u8; 32]) -> [u8; 64] {
         let mut mac = HmacSha512::new_from_slice(auth_key).expect("valid HMAC key");

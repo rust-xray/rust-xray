@@ -398,6 +398,32 @@ mod tests {
     }
 
     #[test]
+    fn runtime_gate_still_rejects_configured_mldsa65_seed() {
+        let json = vless_reality_config_with_mldsa65_seed(TEST_MLDSA65_SEED);
+        let xray: XrayConfig = serde_json::from_str(&json).expect("parse config");
+        let config = runtime_config_from_xray(&xray).expect("build runtime config");
+
+        assert!(config.reality.mldsa65_seed.is_some());
+
+        let err = validate_reality_runtime_feature_gates(&config).unwrap_err();
+        let err_text = err.to_string();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err_text.contains("mldsa65Seed"));
+        assert!(err_text.contains("live runtime signing"));
+        assert!(!err_text.contains(TEST_MLDSA65_SEED));
+    }
+
+    #[test]
+    fn runtime_gate_still_allows_config_without_mldsa65_seed() {
+        let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
+        let config = runtime_config_from_xray(&xray).expect("build runtime config");
+
+        assert!(config.reality.mldsa65_seed.is_none());
+        validate_reality_runtime_feature_gates(&config).expect("gate allows absent seed");
+    }
+
+    #[test]
     fn mldsa65_runtime_mode_without_seed_is_disabled() {
         let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
         let config = runtime_config_from_xray(&xray).expect("build runtime config");
