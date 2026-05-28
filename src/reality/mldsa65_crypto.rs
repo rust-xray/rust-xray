@@ -1,5 +1,3 @@
-#![cfg(feature = "reality-mldsa65-crypto")]
-
 use ml_dsa::{Keypair, MlDsa65, Signature, SigningKey, Verifier};
 
 pub struct RealityMldsa65CertPatchInput<'a> {

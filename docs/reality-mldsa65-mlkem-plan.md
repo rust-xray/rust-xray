@@ -48,11 +48,10 @@ The resulting ML-DSA-65 signature is embedded in the certificate extension value
 
 Secrets (`mldsa65Seed`, `privateKey`) must never appear in logs or `Debug` output.
 
-## Offline RustCrypto compatibility check
+## RustCrypto compatibility check
 
-The optional Cargo feature `reality-mldsa65-crypto` enables an offline
-RustCrypto ML-DSA-65 adapter and fixture test. The default build does **not**
-enable this feature and does not include ML-DSA crypto dependencies.
+ML-DSA-65 crypto is a standard dependency through `ml-dsa`; `mldsa65Seed` no
+longer requires a Cargo feature.
 
 The compatibility test derives a Rust ML-DSA-65 key pair from the 32-byte
 `mldsa65Seed` fixture and compares the encoded verify/public key bytes against
@@ -63,20 +62,19 @@ answer whether Rust-derived ML-DSA-65 key encoding is byte-compatible with
 This is not runtime integration. The accepted REALITY path, certificate patch
 behavior, and ML-DSA-65 certificate extension signing remain unchanged.
 
-## Offline sign/verify check
+## Sign/verify check
 
 The offline message helper builds the REALITY ML-DSA-65 message as
 `HMAC-SHA512(auth_key, ed25519_public_key || raw ClientHello || raw ServerHello)`.
 This produces the 64-byte digest that upstream signs before embedding the
 ML-DSA-65 signature in the certificate extension.
 
-Signing and verification helpers are available only with the
-`reality-mldsa65-crypto` feature. They are test/compatibility tools for checking
-RustCrypto behavior against upstream-derived seed and verify-key fixtures.
+Signing and verification helpers are available in the standard build. They are
+test/compatibility tools for checking RustCrypto behavior against
+upstream-derived seed and verify-key fixtures.
 
-Runtime certificate patching does **not** use this code yet.
-`RealityCertificatePatchMode::HmacPlusMldsa65` and the live-safe certificate
-extension signing API still return `Unsupported`.
+Runtime certificate patching uses `RealityCertificatePatchMode::HmacPlusMldsa65`
+when `mldsa65Seed` is configured.
 
 ## Offline certificate DER patcher
 
@@ -87,10 +85,9 @@ HMAC-only certificate behavior. It then builds the ML-DSA-65 message as
 and writes the resulting ML-DSA-65 signature into the fixed REALITY certificate
 extension value at DER offset `126`.
 
-This patcher is an offline/test-only API available only with the
-`reality-mldsa65-crypto` feature. The live
-`RealityCertificatePatchMode::HmacPlusMldsa65` path is still not enabled and may
-continue to return `Unsupported`.
+The live `RealityCertificatePatchMode::HmacPlusMldsa65` path uses the same
+signing and DER patch primitives. Signing or patch errors abort the accepted
+path.
 
 ## Non-goals (hard constraints for follow-up work)
 

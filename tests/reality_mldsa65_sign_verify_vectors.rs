@@ -1,5 +1,3 @@
-#![cfg(feature = "reality-mldsa65-crypto")]
-
 use std::fs;
 use std::path::Path;
 

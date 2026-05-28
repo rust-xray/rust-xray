@@ -247,15 +247,7 @@ fn runtime_config_from_xray(xray: &XrayConfig) -> std::io::Result<RuntimeConfig>
 fn validate_reality_runtime_feature_gates(config: &RuntimeConfig) -> std::io::Result<()> {
     match reality_mldsa65_runtime_mode(&config.reality) {
         RealityMldsa65RuntimeMode::Disabled => Ok(()),
-        RealityMldsa65RuntimeMode::EnabledWithCryptoFeature => Ok(()),
-        RealityMldsa65RuntimeMode::ConfiguredButLiveRuntimeUnsupported {
-            crypto_feature_compiled,
-        } => Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            format!(
-                "realitySettings.mldsa65Seed is configured, but REALITY ML-DSA-65 live runtime signing requires the reality-mldsa65-crypto feature; reality-mldsa65-crypto compiled: {crypto_feature_compiled}"
-            ),
-        )),
+        RealityMldsa65RuntimeMode::Enabled => Ok(()),
     }
 }
 
@@ -400,24 +392,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "reality-mldsa65-crypto"))]
-    fn runtime_gate_with_seed_requires_crypto_feature_without_feature() {
-        let json = vless_reality_config_with_mldsa65_seed(TEST_MLDSA65_SEED);
-        let xray: XrayConfig = serde_json::from_str(&json).expect("parse config");
-        let config = runtime_config_from_xray(&xray).expect("build runtime config");
-
-        assert!(config.reality.mldsa65_seed.is_some());
-
-        let err = validate_reality_runtime_feature_gates(&config).unwrap_err();
-        let err_text = err.to_string();
-
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert!(err_text.contains("mldsa65Seed"));
-        assert!(err_text.contains("reality-mldsa65-crypto"));
-        assert!(!err_text.contains(TEST_MLDSA65_SEED));
-    }
-
-    #[test]
     fn runtime_gate_without_seed_is_ok() {
         let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
         let config = runtime_config_from_xray(&xray).expect("build runtime config");
@@ -440,8 +414,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "reality-mldsa65-crypto"))]
-    fn mldsa65_runtime_mode_with_seed_is_unsupported_without_crypto_feature() {
+    fn runtime_gate_with_valid_mldsa65_seed_is_ok() {
         let json = vless_reality_config_with_mldsa65_seed(TEST_MLDSA65_SEED);
         let xray: XrayConfig = serde_json::from_str(&json).expect("parse config");
         let config = runtime_config_from_xray(&xray).expect("build runtime config");
@@ -449,36 +422,10 @@ mod tests {
         assert!(config.reality.mldsa65_seed.is_some());
         assert_eq!(
             reality_mldsa65_runtime_mode(&config.reality),
-            RealityMldsa65RuntimeMode::ConfiguredButLiveRuntimeUnsupported {
-                crypto_feature_compiled: false,
-            }
+            RealityMldsa65RuntimeMode::Enabled
         );
 
-        let err = validate_reality_runtime_feature_gates(&config).unwrap_err();
-        let err_text = err.to_string();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert!(err_text.contains("mldsa65Seed"));
-        assert!(err_text.contains("ML-DSA-65"));
-        assert!(err_text.contains("live runtime signing"));
-        assert!(err_text.contains("reality-mldsa65-crypto"));
-        assert!(err_text.contains("false"));
-        assert!(!err_text.contains(TEST_MLDSA65_SEED));
-    }
-
-    #[test]
-    #[cfg(feature = "reality-mldsa65-crypto")]
-    fn mldsa65_runtime_mode_with_seed_is_enabled_with_crypto_feature() {
-        let json = vless_reality_config_with_mldsa65_seed(TEST_MLDSA65_SEED);
-        let xray: XrayConfig = serde_json::from_str(&json).expect("parse config");
-        let config = runtime_config_from_xray(&xray).expect("build runtime config");
-
-        assert!(config.reality.mldsa65_seed.is_some());
-        assert_eq!(
-            reality_mldsa65_runtime_mode(&config.reality),
-            RealityMldsa65RuntimeMode::EnabledWithCryptoFeature
-        );
-
-        validate_reality_runtime_feature_gates(&config).expect("feature enables seed runtime gate");
+        validate_reality_runtime_feature_gates(&config).expect("valid seed runtime gate");
     }
 
     #[test]

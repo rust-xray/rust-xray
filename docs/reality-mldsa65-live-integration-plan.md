@@ -10,17 +10,16 @@ already implemented offline, and the constraints for controlled live integration
 | Config parse `mldsa65Seed` | `src/config/xray.rs` | Done — stored on `RealityInboundRuntime` |
 | Seed decode / validation | `src/reality/mldsa65.rs` | Done |
 | Offline message builder | `build_reality_mldsa65_message` | Done |
-| Offline signer / DER patch | `sign_reality_mldsa65_message`, `sign_reality_cert_extension`, `patch_reality_cert_der_with_mldsa65_signature` | Done under `reality-mldsa65-crypto` |
+| Offline signer / DER patch | `sign_reality_mldsa65_message`, `sign_reality_cert_extension`, `patch_reality_cert_der_with_mldsa65_signature` | Done with standard `ml-dsa` dependency |
 | Certificate patch mode API | `RealityCertificatePatchMode::HmacPlusMldsa65` | Done — used by live path only when seed is configured |
-| Runtime capability enum | `RealityMldsa65RuntimeMode` | Done — seed requires `reality-mldsa65-crypto` |
+| Runtime capability enum | `RealityMldsa65RuntimeMode` | Done — seed is enabled with built-in ML-DSA-65 crypto |
 | Live patch context scaffold | `RealityMldsa65LivePatchContext` | Done — offline shape helper remains non-runtime |
 | Legacy HMAC cert patch | `patch_reality_certificate_der` | Unchanged — no-seed live path still selects HMAC-only |
 
 ## Current live runtime gate
 
-1. Startup gate rejects parsed `mldsa65Seed` without `reality-mldsa65-crypto`
-   as `ErrorKind::Unsupported`.
-2. Startup gate allows parsed `mldsa65Seed` with `reality-mldsa65-crypto`.
+1. Startup gate allows parsed `mldsa65Seed`.
+2. Invalid seed still fails during config parsing before the runtime gate.
 3. No-seed configs still select HMAC-only patching.
 4. Seed configs select `HmacPlusMldsa65`; signing or DER patch failure aborts
    the accepted path, with no HMAC-only fallback.
@@ -86,8 +85,7 @@ Required inputs:
 - Parsed into `RealityInboundRuntime.mldsa65_seed` (`src/config/xray.rs`).
 - Borrowed from `src/main.rs` into `handle_accepted_reality_client`, then into
   `complete_reality_tls13_handshake`.
-- Startup gate blocks configs where seed is present unless
-  `reality-mldsa65-crypto` is compiled.
+- Startup gate allows configs where seed is present.
 
 ### Current HMAC-only patch site (live)
 
@@ -102,12 +100,12 @@ selected mode when seed is absent.
 
 ## Live patching order
 
-1. Confirm runtime gate allows configured seed only under `reality-mldsa65-crypto`.
+1. Confirm runtime gate allows configured seed.
 2. Build `RealityMldsa65LivePatchContext` from transcript-local bytes + runtime seed reference.
 3. `validate_reality_mldsa65_live_patch_context` — shape check only.
 4. Select `HmacOnly` for no seed, or `HmacPlusMldsa65` for configured seed.
 5. Apply legacy HMAC tail through `patch_reality_certificate_der_with_mode`.
-6. For `HmacPlusMldsa65`, `sign_reality_cert_extension` is feature-gated and
+6. For `HmacPlusMldsa65`, `sign_reality_cert_extension` signs with `ml-dsa` and
    `patch_reality_cert_der_with_mldsa65_signature` writes extension offset 126.
 7. Continue Certificate / CertificateVerify / Finished generation unchanged.
 
@@ -118,7 +116,6 @@ selected mode when seed is absent.
 - **Do not change** `derive_reality_auth_key`.
 - Keep `patch_reality_certificate_der` legacy HMAC-only API unchanged.
 - **Do not change** Vision/REALITY accepted flow for configs without `mldsa65Seed`.
-- **Do not enable** `reality-mldsa65-crypto` by default.
 - **Do not modify** live smoke scripts.
 
 ## Risks to avoid

@@ -286,22 +286,6 @@ pub fn sign_reality_cert_extension(
 }
 
 /// Offline REALITY ML-DSA-65 message signing from a 32-byte seed.
-///
-/// Requires the `reality-mldsa65-crypto` feature. Without it, returns
-/// [`std::io::ErrorKind::Unsupported`].
-#[cfg(not(feature = "reality-mldsa65-crypto"))]
-pub fn sign_reality_mldsa65_message(
-    _seed: &Mldsa65Seed,
-    _message: &[u8; 64],
-) -> std::io::Result<Mldsa65Signature> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "REALITY ML-DSA-65 signing requires the `reality-mldsa65-crypto` feature",
-    ))
-}
-
-/// Offline REALITY ML-DSA-65 message signing from a 32-byte seed.
-#[cfg(feature = "reality-mldsa65-crypto")]
 pub fn sign_reality_mldsa65_message(
     seed: &Mldsa65Seed,
     message: &[u8; 64],
@@ -311,7 +295,7 @@ pub fn sign_reality_mldsa65_message(
     let seed_bytes = ml_dsa::B32::from(*seed.as_bytes());
     let signing_key = SigningKey::<MlDsa65>::from_seed(&seed_bytes);
     let signature = signing_key.try_sign(message.as_slice()).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::Unsupported, "ML-DSA-65 signing failed")
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "ML-DSA-65 signing failed")
     })?;
 
     Mldsa65Signature::from_bytes(signature.to_bytes().as_slice().to_vec())
@@ -683,34 +667,43 @@ mod tests {
         assert_eq!(verify.as_bytes().len(), MLDSA65_VERIFY_KEY_LEN);
     }
 
-    #[cfg(not(feature = "reality-mldsa65-crypto"))]
-    #[test]
-    fn sign_reality_mldsa65_message_without_feature_returns_unsupported() {
-        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
-            .unwrap()
-            .unwrap();
-        let message = [0x33; 64];
-
-        let err = sign_reality_mldsa65_message(&seed, &message).unwrap_err();
-
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert!(err.to_string().contains("reality-mldsa65-crypto"));
-    }
-
-    #[cfg(feature = "reality-mldsa65-crypto")]
     #[test]
     fn sign_reality_mldsa65_message_returns_3309_byte_signature() {
         let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
             .unwrap()
             .unwrap();
-        let message = [0x33; 64];
+        let message = [0x42; 64];
 
         let signature = sign_reality_mldsa65_message(&seed, &message).expect("valid signature");
 
         assert_eq!(signature.as_bytes().len(), MLDSA65_SIGNATURE_LEN);
+        let debug = format!("{signature:?}");
+        assert_eq!(debug, "Mldsa65Signature(redacted)");
+        assert!(!debug.contains(VALID_SEED_B64));
     }
 
-    #[cfg(feature = "reality-mldsa65-crypto")]
+    #[test]
+    fn sign_reality_cert_extension_returns_3309_byte_signature() {
+        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .unwrap()
+            .unwrap();
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+
+        let signature = sign_reality_cert_extension(
+            &seed,
+            &public_key,
+            &auth_key,
+            &client_hello,
+            &server_hello,
+        )
+        .expect("valid certificate extension signature");
+
+        assert_eq!(signature.as_bytes().len(), MLDSA65_SIGNATURE_LEN);
+    }
+
     #[test]
     fn patch_reality_cert_der_with_mldsa65_signature_writes_at_fixed_offset() {
         let extension_end = MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_SIGNATURE_LEN;

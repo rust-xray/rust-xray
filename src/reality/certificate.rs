@@ -381,71 +381,8 @@ mod tests {
         ));
     }
 
-    #[cfg(not(feature = "reality-mldsa65-crypto"))]
     #[test]
-    fn hmac_plus_mldsa65_without_feature_returns_unsupported_and_does_not_mutate() {
-        let original = vec![0xaa; 128];
-        let mut cert = original.clone();
-        let public_key = [0x11; 32];
-        let auth_key = [0x22; 32];
-        let client_hello = [0x01, 0x02, 0x03];
-        let server_hello = [0x04, 0x05, 0x06];
-        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
-            .expect("valid seed")
-            .expect("non-empty seed");
-
-        let err = patch_reality_certificate_der_with_mode(RealityCertificatePatchInput {
-            cert_der: &mut cert,
-            ed25519_public_key: &public_key,
-            auth_key: &auth_key,
-            mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
-                mldsa65_seed: &seed,
-                client_hello_original: &client_hello,
-                server_hello_original: &server_hello,
-            },
-        })
-        .unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-        assert_eq!(cert, original);
-        let err_text = err.to_string();
-        assert!(
-            err_text.contains("reality-mldsa65-crypto") || err_text.contains("ML-DSA-65"),
-            "unexpected error text: {err_text}"
-        );
-        assert!(!err_text.contains(VALID_SEED_B64));
-    }
-
-    #[cfg(not(feature = "reality-mldsa65-crypto"))]
-    #[test]
-    fn hmac_plus_mldsa65_mode_requires_seed_reference() {
-        let mut cert = vec![0x5a; 512];
-        let cert_before = cert.clone();
-        let public_key = [0x31; 32];
-        let auth_key = [0x42; 32];
-        let client_hello = [0x01, 0x02, 0x03, 0x04];
-        let server_hello = [0x05, 0x06, 0x07, 0x08];
-        let seed = Mldsa65Seed::from_bytes([0x44; 32]);
-
-        let err = patch_reality_certificate_der_with_mode(RealityCertificatePatchInput {
-            cert_der: &mut cert,
-            ed25519_public_key: &public_key,
-            auth_key: &auth_key,
-            mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
-                mldsa65_seed: &seed,
-                client_hello_original: &client_hello,
-                server_hello_original: &server_hello,
-            },
-        })
-        .unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-        assert_eq!(cert, cert_before);
-    }
-
-    #[cfg(feature = "reality-mldsa65-crypto")]
-    #[test]
-    fn hmac_plus_mldsa65_with_feature_patches_der_at_fixed_offset() {
+    fn hmac_plus_mldsa65_patch_mode_patches_der() {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
         use crate::reality::mldsa65_crypto::{
@@ -477,7 +414,7 @@ mod tests {
                 server_hello_original: &server_hello,
             },
         })
-        .expect("offline ML-DSA patch");
+        .expect("ML-DSA patch");
 
         assert_eq!(
             &cert[..MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET],
@@ -502,7 +439,6 @@ mod tests {
             .expect("signature verifies");
     }
 
-    #[cfg(feature = "reality-mldsa65-crypto")]
     #[test]
     fn mldsa65_live_patch_error_does_not_fallback_to_hmac() {
         use crate::reality::{MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET, MLDSA65_SIGNATURE_LEN};

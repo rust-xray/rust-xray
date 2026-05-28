@@ -3,9 +3,9 @@
 ## Current status
 
 - `realitySettings.mldsa65Seed` parsing and validation is present in `src/config/xray.rs` via `reality_mldsa65_seed`; bytes are stored as `Mldsa65Seed` on `RealityInboundRuntime`.
-- Runtime admission remains closed without `reality-mldsa65-crypto`; with that feature, `validate_reality_runtime_feature_gates` allows configured `mldsa65Seed`.
-- Offline certificate patch primitives are present in `src/reality/mldsa65.rs` and `src/reality/certificate.rs`. `HmacPlusMldsa65` is feature-backed or returns `Unsupported`.
-- Live runtime ML-DSA-65 patch selection is wired for configured seeds under `reality-mldsa65-crypto`; accepted REALITY/Vision without `mldsa65Seed` still uses HMAC-only certificate patching.
+- Runtime admission allows configured `mldsa65Seed`; ML-DSA-65 crypto is a standard dependency.
+- Certificate patch primitives are present in `src/reality/mldsa65.rs` and `src/reality/certificate.rs`.
+- Live runtime ML-DSA-65 patch selection is wired for configured seeds; accepted REALITY/Vision without `mldsa65Seed` still uses HMAC-only certificate patching.
 
 ## Required data for ML-DSA-65 live certificate extension signing
 
@@ -41,7 +41,7 @@
 
 ## Future integration seam
 
-- Runtime config may contain `mldsa65Seed`; without `reality-mldsa65-crypto` it is still rejected, with the feature it selects `HmacPlusMldsa65`.
+- Runtime config may contain `mldsa65Seed`; configured seed selects `HmacPlusMldsa65`.
 - Live integration passes original ClientHello record bytes and upstream ServerHello bytes into TLS13 completion at the point where certificate DER, Ed25519 public key, `auth_key`, and seed are available.
 - Live integration calls `HmacPlusMldsa65` only after complete data is available; the patch call still rejects certificate DER without the fixed patch range.
 - If `mldsa65Seed` is configured, ML-DSA signing or patch failure aborts the accepted path explicitly.
@@ -51,6 +51,6 @@
 
 - No behavior change for configs without `mldsa65Seed`.
 - No seed disclosure in Debug, logs, error strings, panic messages, traces, or test output.
-- `reality-mldsa65-crypto` remains non-default.
+- ML-DSA-65 crypto remains a standard dependency; no cargo feature is required.
 - Live smoke scripts stay unchanged.
 - No ML-DSA to HMAC-only fallback.
