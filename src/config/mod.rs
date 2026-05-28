@@ -6,6 +6,6 @@ pub use xray::{
     is_supported_reality_tcp_inbound, load_xray_config_from_file, parse_inbound_port,
     reality_dest_addr, reality_private_key, reality_server_names, reality_short_ids,
     validate_reality_stream_settings, validate_reality_transport_network, InboundObject,
-    InboundPortValue, RealityInboundRuntime, RealitySettingsObject, StreamSettingsObject,
-    VlessClientObject, VlessInboundSettings, XrayConfig,
+    InboundPortValue, RealityInboundRuntime, RealityMldsa65RuntimeMode, RealitySettingsObject,
+    StreamSettingsObject, VlessClientObject, VlessInboundSettings, XrayConfig,
 };

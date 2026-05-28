@@ -8,7 +8,8 @@ use tracing::{debug, error, info, warn};
 
 use rust_xray::codec::{Codec, Reader};
 use rust_xray::config::{
-    first_reality_inbound_runtime, load_xray_config_from_file, RealityInboundRuntime, XrayConfig,
+    first_reality_inbound_runtime, load_xray_config_from_file, RealityInboundRuntime,
+    RealityMldsa65RuntimeMode, XrayConfig,
 };
 use rust_xray::protocol::structs::ClientHelloPayload;
 use rust_xray::proxy::relay_fallback_with_xver;
@@ -243,14 +244,13 @@ fn runtime_config_from_xray(xray: &XrayConfig) -> std::io::Result<RuntimeConfig>
 }
 
 fn validate_reality_runtime_feature_gates(config: &RuntimeConfig) -> std::io::Result<()> {
-    if config.reality.mldsa65_seed.is_some() {
-        return Err(std::io::Error::new(
+    match config.reality.mldsa65_runtime_mode() {
+        RealityMldsa65RuntimeMode::Disabled => Ok(()),
+        RealityMldsa65RuntimeMode::ConfiguredButUnsupported => Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "realitySettings.mldsa65Seed is configured, but REALITY ML-DSA-65 runtime signing is not implemented/enabled yet",
-        ));
+        )),
     }
-
-    Ok(())
 }
 
 fn load_runtime_config(path: &PathBuf) -> std::io::Result<RuntimeConfig> {
@@ -399,6 +399,10 @@ mod tests {
         let config = runtime_config_from_xray(&xray).expect("build runtime config");
 
         assert!(config.reality.mldsa65_seed.is_none());
+        assert_eq!(
+            config.reality.mldsa65_runtime_mode(),
+            RealityMldsa65RuntimeMode::Disabled
+        );
         validate_reality_runtime_feature_gates(&config).expect("absent mldsa65Seed is unchanged");
     }
 
@@ -409,6 +413,10 @@ mod tests {
         let config = runtime_config_from_xray(&xray).expect("build runtime config");
 
         assert!(config.reality.mldsa65_seed.is_some());
+        assert_eq!(
+            config.reality.mldsa65_runtime_mode(),
+            RealityMldsa65RuntimeMode::ConfiguredButUnsupported
+        );
 
         let err = validate_reality_runtime_feature_gates(&config).unwrap_err();
         let err_text = err.to_string();

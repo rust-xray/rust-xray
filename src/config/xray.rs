@@ -137,6 +137,21 @@ pub struct RealityInboundRuntime {
     pub vless_fallbacks: Vec<FallbackConfig>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealityMldsa65RuntimeMode {
+    Disabled,
+    ConfiguredButUnsupported,
+}
+
+impl RealityInboundRuntime {
+    pub fn mldsa65_runtime_mode(&self) -> RealityMldsa65RuntimeMode {
+        match self.mldsa65_seed.as_ref() {
+            Some(_) => RealityMldsa65RuntimeMode::ConfiguredButUnsupported,
+            None => RealityMldsa65RuntimeMode::Disabled,
+        }
+    }
+}
+
 impl std::fmt::Debug for RealityInboundRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RealityInboundRuntime")
