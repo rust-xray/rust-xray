@@ -20,7 +20,7 @@ use crate::tls::{TlsRecord, TLS_RECORD_ALERT, TLS_RECORD_HANDSHAKE};
 
 use super::certificate::{
     build_tls13_certificate_message, build_tls13_certificate_verify_ed25519,
-    generate_reality_ephemeral_ed25519_certificate,
+    generate_reality_ephemeral_ed25519_certificate_with_layout, RealityEphemeralCertificateLayout,
 };
 use super::cipher_suite::{resolve_tls13_cipher_suite, Tls13CipherSuite};
 use super::key_schedule::{
@@ -260,8 +260,18 @@ impl RealityTls13ServerState {
         let encrypted_extensions = build_encrypted_extensions_empty()?;
         self.transcript.update(&encrypted_extensions);
 
-        let ephemeral_cert =
-            generate_reality_ephemeral_ed25519_certificate(self.accepted.sni.as_deref())?;
+        let certificate_layout = match &certificate_patch_mode {
+            RealityCertificatePatchMode::HmacOnly => {
+                RealityEphemeralCertificateLayout::LegacyHmacOnly
+            }
+            RealityCertificatePatchMode::HmacPlusMldsa65 { .. } => {
+                RealityEphemeralCertificateLayout::Mldsa65ExtensionPlaceholder
+            }
+        };
+        let ephemeral_cert = generate_reality_ephemeral_ed25519_certificate_with_layout(
+            self.accepted.sni.as_deref(),
+            certificate_layout,
+        )?;
         let mut cert_der = ephemeral_cert.der.clone();
         if !certificate_der_has_ed25519_signature_tail(&cert_der) {
             return Err(Error::new(
@@ -419,8 +429,8 @@ pub async fn complete_reality_tls13_handshake<S>(
     mut stream: S,
     client_hello_payload: &ClientHelloPayload,
     client_hello_message: &[u8],
-    client_hello_original: &[u8],
-    server_hello_original: &[u8],
+    _client_hello_original: &[u8],
+    _server_hello_original: &[u8],
     mldsa65_seed: Option<&Mldsa65Seed>,
     mut state: RealityTls13ServerState,
 ) -> std::io::Result<RealityTls13ApplicationStream<S>>
@@ -440,6 +450,7 @@ where
             ),
         )
     })?;
+    let server_hello_for_mldsa65 = server_hello_message.clone();
     let server_hello_record = build_handshake_record(server_hello_message)
         .map_err(|err| stage_error(RealityAcceptedStage::ServerHello, err))?;
 
@@ -480,8 +491,8 @@ where
 
     let certificate_patch_mode = select_reality_certificate_patch_mode(
         mldsa65_seed,
-        client_hello_original,
-        server_hello_original,
+        client_hello_message,
+        &server_hello_for_mldsa65,
     )
     .map_err(|err| stage_error(RealityAcceptedStage::ServerHandshakeRecords, err))?;
 

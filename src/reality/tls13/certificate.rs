@@ -5,6 +5,8 @@ use ed25519_dalek::pkcs8::DecodePrivateKey;
 use ed25519_dalek::{Signer, SigningKey};
 use rcgen::{CertificateParams, DnType, KeyPair, PKCS_ED25519};
 
+use crate::reality::{MLDSA65_CERT_EXTENSION_VALUE_LEN, MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET};
+
 use super::messages::{
     build_handshake_message, HANDSHAKE_TYPE_CERTIFICATE, HANDSHAKE_TYPE_CERTIFICATE_VERIFY,
 };
@@ -29,6 +31,12 @@ pub struct RealityEphemeralCertificate {
     pub public_key_der: Vec<u8>,
     pub public_key_raw: [u8; 32],
     pub signing_key: SigningKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealityEphemeralCertificateLayout {
+    LegacyHmacOnly,
+    Mldsa65ExtensionPlaceholder,
 }
 
 impl fmt::Debug for RealityEphemeralCertificate {
@@ -78,9 +86,114 @@ fn append_u24(bytes: &mut Vec<u8>, value: usize) -> Result<(), Error> {
     Ok(())
 }
 
+fn append_der_len(bytes: &mut Vec<u8>, len: usize) {
+    if len < 0x80 {
+        bytes.push(len as u8);
+    } else if len <= 0xff {
+        bytes.extend_from_slice(&[0x81, len as u8]);
+    } else if len <= 0xffff {
+        bytes.extend_from_slice(&[0x82, (len >> 8) as u8, len as u8]);
+    } else {
+        bytes.extend_from_slice(&[0x83, (len >> 16) as u8, (len >> 8) as u8, len as u8]);
+    }
+}
+
+fn der_wrap(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + 4 + content.len());
+    out.push(tag);
+    append_der_len(&mut out, content.len());
+    out.extend_from_slice(content);
+    out
+}
+
+fn der_sequence(content: &[u8]) -> Vec<u8> {
+    der_wrap(0x30, content)
+}
+
+fn der_explicit_context_3(content: &[u8]) -> Vec<u8> {
+    der_wrap(0xa3, content)
+}
+
+fn generate_reality_mldsa65_placeholder_certificate_der(
+    signing_key: &SigningKey,
+) -> std::io::Result<Vec<u8>> {
+    const ED25519_ALGORITHM_IDENTIFIER: &[u8] = &[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70];
+    const VERSION_V3: &[u8] = &[0xa0, 0x03, 0x02, 0x01, 0x02];
+    const SERIAL_ONE: &[u8] = &[0x02, 0x01, 0x01];
+    const EMPTY_NAME: &[u8] = &[0x30, 0x00];
+    const VALIDITY_UTC_1970_2099: &[u8] = b"\x30\x1e\x17\x0d700101000000Z\x17\x0d991231235959Z";
+    const REALITY_MLDSA65_EXTENSION_OID: &[u8] = &[0x06, 0x05, 0x2b, 0x06, 0x01, 0x04, 0x01];
+
+    let public_key_raw = signing_key.verifying_key().to_bytes();
+
+    let mut subject_public_key = Vec::with_capacity(44);
+    subject_public_key.extend_from_slice(ED25519_ALGORITHM_IDENTIFIER);
+    subject_public_key.push(0x03);
+    subject_public_key.push(0x21);
+    subject_public_key.push(0x00);
+    subject_public_key.extend_from_slice(&public_key_raw);
+    let subject_public_key_info = der_sequence(&subject_public_key);
+
+    let mut extension = Vec::with_capacity(
+        REALITY_MLDSA65_EXTENSION_OID.len() + 4 + MLDSA65_CERT_EXTENSION_VALUE_LEN,
+    );
+    extension.extend_from_slice(REALITY_MLDSA65_EXTENSION_OID);
+    extension.push(0x04);
+    append_der_len(&mut extension, MLDSA65_CERT_EXTENSION_VALUE_LEN);
+    extension.extend(std::iter::repeat_n(0u8, MLDSA65_CERT_EXTENSION_VALUE_LEN));
+    let extensions = der_explicit_context_3(&der_sequence(&der_sequence(&extension)));
+
+    let mut tbs_content = Vec::new();
+    tbs_content.extend_from_slice(VERSION_V3);
+    tbs_content.extend_from_slice(SERIAL_ONE);
+    tbs_content.extend_from_slice(ED25519_ALGORITHM_IDENTIFIER);
+    tbs_content.extend_from_slice(EMPTY_NAME);
+    tbs_content.extend_from_slice(VALIDITY_UTC_1970_2099);
+    tbs_content.extend_from_slice(EMPTY_NAME);
+    tbs_content.extend_from_slice(&subject_public_key_info);
+    tbs_content.extend_from_slice(&extensions);
+
+    let tbs_certificate = der_sequence(&tbs_content);
+    let signature = signing_key.sign(&tbs_certificate).to_bytes();
+    let mut signature_value = Vec::with_capacity(1 + signature.len());
+    signature_value.push(0);
+    signature_value.extend_from_slice(&signature);
+
+    let mut certificate_content =
+        Vec::with_capacity(tbs_certificate.len() + ED25519_ALGORITHM_IDENTIFIER.len() + 67);
+    certificate_content.extend_from_slice(&tbs_certificate);
+    certificate_content.extend_from_slice(ED25519_ALGORITHM_IDENTIFIER);
+    certificate_content.extend_from_slice(&der_wrap(0x03, &signature_value));
+
+    let certificate = der_sequence(&certificate_content);
+    let extension_end =
+        MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_CERT_EXTENSION_VALUE_LEN;
+    if certificate[MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET..extension_end]
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "REALITY ML-DSA-65 certificate placeholder is not at DER offset 126",
+        ));
+    }
+
+    Ok(certificate)
+}
+
 /// Generates a self-signed ephemeral Ed25519 certificate for REALITY scaffold use.
 pub fn generate_reality_ephemeral_ed25519_certificate(
     server_name: Option<&str>,
+) -> std::io::Result<RealityEphemeralCertificate> {
+    generate_reality_ephemeral_ed25519_certificate_with_layout(
+        server_name,
+        RealityEphemeralCertificateLayout::LegacyHmacOnly,
+    )
+}
+
+pub fn generate_reality_ephemeral_ed25519_certificate_with_layout(
+    server_name: Option<&str>,
+    layout: RealityEphemeralCertificateLayout,
 ) -> std::io::Result<RealityEphemeralCertificate> {
     let name = server_name.unwrap_or(DEFAULT_REALITY_CERT_NAME);
 
@@ -98,11 +211,16 @@ pub fn generate_reality_ephemeral_ed25519_certificate(
         )
     })?;
 
-    let cert = params
-        .self_signed(&key_pair)
-        .map_err(|e| rcgen_error("self-signed certificate generation failed", e))?;
-
-    let der = cert.der().to_vec();
+    let der = match layout {
+        RealityEphemeralCertificateLayout::LegacyHmacOnly => params
+            .self_signed(&key_pair)
+            .map_err(|e| rcgen_error("self-signed certificate generation failed", e))?
+            .der()
+            .to_vec(),
+        RealityEphemeralCertificateLayout::Mldsa65ExtensionPlaceholder => {
+            generate_reality_mldsa65_placeholder_certificate_der(&signing_key)?
+        }
+    };
     let public_key_raw = signing_key.verifying_key().to_bytes();
 
     Ok(RealityEphemeralCertificate {
@@ -217,6 +335,71 @@ mod tests {
             .expect("valid ephemeral certificate");
 
         assert!(!cert.der.is_empty());
+    }
+
+    #[test]
+    fn generated_hmac_only_certificate_der_keeps_legacy_layout() {
+        let cert = generate_reality_ephemeral_ed25519_certificate_with_layout(
+            Some("example.com"),
+            RealityEphemeralCertificateLayout::LegacyHmacOnly,
+        )
+        .expect("valid legacy certificate");
+        let extension_end =
+            MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_CERT_EXTENSION_VALUE_LEN;
+
+        assert!(cert.der.len() < extension_end);
+        assert_eq!(
+            cert.public_key_raw,
+            cert.signing_key.verifying_key().to_bytes()
+        );
+    }
+
+    #[test]
+    fn generated_mldsa65_certificate_der_contains_placeholder_patch_range() {
+        let cert = generate_reality_ephemeral_ed25519_certificate_with_layout(
+            Some("example.com"),
+            RealityEphemeralCertificateLayout::Mldsa65ExtensionPlaceholder,
+        )
+        .expect("valid ML-DSA placeholder certificate");
+        let extension_end =
+            MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_CERT_EXTENSION_VALUE_LEN;
+
+        assert!(cert.der.len() >= extension_end);
+        assert!(
+            cert.der[MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET..extension_end]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+    }
+
+    #[test]
+    fn generated_mldsa65_certificate_der_patch_writes_signature_at_offset_126() {
+        use crate::reality::{patch_reality_cert_der_with_mldsa65_signature, Mldsa65Signature};
+
+        let cert = generate_reality_ephemeral_ed25519_certificate_with_layout(
+            Some("example.com"),
+            RealityEphemeralCertificateLayout::Mldsa65ExtensionPlaceholder,
+        )
+        .expect("valid ML-DSA placeholder certificate");
+        let mut cert_der = cert.der.clone();
+        let original = cert_der.clone();
+        let signature = Mldsa65Signature::from_bytes(vec![0x42; MLDSA65_CERT_EXTENSION_VALUE_LEN])
+            .expect("test signature");
+        let extension_end =
+            MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_CERT_EXTENSION_VALUE_LEN;
+
+        patch_reality_cert_der_with_mldsa65_signature(&mut cert_der, &signature)
+            .expect("patch placeholder");
+
+        assert_eq!(
+            &cert_der[..MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET],
+            &original[..MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET]
+        );
+        assert_eq!(
+            &cert_der[MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET..extension_end],
+            signature.as_bytes()
+        );
+        assert_eq!(&cert_der[extension_end..], &original[extension_end..]);
     }
 
     #[test]

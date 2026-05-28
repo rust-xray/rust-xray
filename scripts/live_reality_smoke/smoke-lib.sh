@@ -158,6 +158,7 @@ smoke_write_client_config() {
   local user_id="${4:-11111111-1111-1111-1111-111111111111}"
   local short_id="${5:-0123456789abcdef}"
   local server_name="${6:-www.microsoft.com}"
+  local mldsa65_verify="${7:-}"
 
   SMOKE_TEMPLATE="${template_path}" \
     SMOKE_OUTPUT="${output_path}" \
@@ -165,6 +166,7 @@ smoke_write_client_config() {
     SMOKE_USER_ID="${user_id}" \
     SMOKE_SHORT_ID="${short_id}" \
     SMOKE_SERVER_NAME="${server_name}" \
+    SMOKE_MLDSA65_VERIFY="${mldsa65_verify}" \
     SMOKE_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
     python3 - <<'PY'
 import json
@@ -188,6 +190,9 @@ reality = cfg["outbounds"][0]["streamSettings"]["realitySettings"]
 reality["publicKey"] = os.environ["SMOKE_PUBLIC_KEY"]
 reality["shortId"] = os.environ["SMOKE_SHORT_ID"]
 reality["serverName"] = os.environ["SMOKE_SERVER_NAME"]
+mldsa65_verify = os.environ.get("SMOKE_MLDSA65_VERIFY", "")
+if mldsa65_verify:
+    reality["mldsa65Verify"] = mldsa65_verify
 
 output.write_text(json.dumps(cfg, indent=2) + "\n")
 PY
@@ -501,6 +506,16 @@ smoke_write_report() {
     for phase in "${SMOKE_PHASE_NAMES[@]}"; do
       echo "${phase}"
     done
+    echo
+    echo "[mldsa65 summary]"
+    echo "mldsa65_checks_passed: ${SMOKE_MLDSA65_PASSED:-0}"
+    echo "mldsa65_checks_failed: ${SMOKE_MLDSA65_FAILED:-0}"
+    local mldsa65_detail
+    if [[ -n "${SMOKE_MLDSA65_DETAILS+x}" ]]; then
+      for mldsa65_detail in "${SMOKE_MLDSA65_DETAILS[@]}"; do
+        echo "${mldsa65_detail}"
+      done
+    fi
   } >"${report_path}"
 
   cat "${report_path}"

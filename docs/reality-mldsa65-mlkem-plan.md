@@ -50,8 +50,8 @@ Secrets (`mldsa65Seed`, `privateKey`) must never appear in logs or `Debug` outpu
 
 ## RustCrypto compatibility check
 
-ML-DSA-65 crypto is a standard dependency through `ml-dsa`; `mldsa65Seed` no
-longer requires a Cargo feature.
+ML-DSA-65 crypto is a standard dependency through `ml-dsa`; `mldsa65Seed` is
+available in the normal build.
 
 The compatibility test derives a Rust ML-DSA-65 key pair from the 32-byte
 `mldsa65Seed` fixture and compares the encoded verify/public key bytes against

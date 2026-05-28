@@ -16,8 +16,10 @@ mod transcript;
 
 pub use certificate::{
     build_tls13_certificate_message, build_tls13_certificate_verify_ed25519,
-    generate_reality_ephemeral_ed25519_certificate, tls13_certificate_verify_message_to_sign,
-    RealityEphemeralCertificate, SIGNATURE_SCHEME_ED25519,
+    generate_reality_ephemeral_ed25519_certificate,
+    generate_reality_ephemeral_ed25519_certificate_with_layout,
+    tls13_certificate_verify_message_to_sign, RealityEphemeralCertificate,
+    RealityEphemeralCertificateLayout, SIGNATURE_SCHEME_ED25519,
 };
 pub use cipher_suite::{
     is_tls13_ccm_cipher_suite, resolve_tls13_cipher_suite, tls13_cipher_suite, Tls13AeadAlgorithm,

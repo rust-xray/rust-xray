@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/smoke-lib.sh"
 
 TEST_PUBLIC_KEY="${TEST_PUBLIC_KEY:-oU1MbEgszawWQJa0S_DxLsNt9G2zyE4rF-CrqvJjTmg}"
+TEST_MLDSA65_VERIFY="${TEST_MLDSA65_VERIFY:-$(tr -d '\n' <"${SCRIPT_DIR}/mldsa65-verify.fixture.txt")}"
 SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT:-24443}"
 SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT:-10808}"
 SMOKE_RUST_LOG="${SMOKE_RUST_LOG:-info}"
@@ -34,10 +35,15 @@ SMOKE_CURL_EXIT_CODES=()
 SMOKE_CURL_HTTP_CODES=()
 SMOKE_PHASE_NAMES=()
 SMOKE_CIPHER_DETAILS=()
+SMOKE_MLDSA65_PASSED=0
+SMOKE_MLDSA65_FAILED=0
+SMOKE_MLDSA65_DETAILS=()
 
 SERVER_EMPTY="${SCRIPT_DIR}/rust-xray-server.fixture.json"
 SERVER_VISION="${SCRIPT_DIR}/rust-xray-server.vision.fixture.json"
 SERVER_RAW="${SCRIPT_DIR}/rust-xray-server.raw.fixture.json"
+SERVER_MLDSA65_RAW="${SCRIPT_DIR}/rust-xray-server-mldsa65.raw.fixture.json"
+SERVER_MLDSA65_INVALID_SEED="${SCRIPT_DIR}/rust-xray-server-mldsa65.invalid-seed.fixture.json"
 SERVER_FALLBACKS="${SCRIPT_DIR}/rust-xray-server.fallbacks.fixture.json"
 SERVER_CIPHER_AES128="${SCRIPT_DIR}/rust-xray-server.cipher-aes128.fixture.json"
 SERVER_CIPHER_AES256="${SCRIPT_DIR}/rust-xray-server.cipher-aes256.fixture.json"
@@ -66,6 +72,20 @@ fail_phase() {
 skip_phase() {
   SMOKE_PHASE_NAMES+=("SKIP ${1}")
   echo "== SKIP: ${1}"
+}
+
+mldsa65_pass() {
+  SMOKE_MLDSA65_PASSED=$((SMOKE_MLDSA65_PASSED + 1))
+  SMOKE_MLDSA65_DETAILS+=("PASS ${1}")
+}
+
+mldsa65_fail() {
+  SMOKE_MLDSA65_FAILED=$((SMOKE_MLDSA65_FAILED + 1))
+  SMOKE_MLDSA65_DETAILS+=("FAIL ${1}")
+}
+
+mldsa65_note() {
+  SMOKE_MLDSA65_DETAILS+=("NOTE ${1}")
 }
 
 run_phase() {
@@ -110,6 +130,7 @@ client_config() {
   local user_id="${3:-11111111-1111-1111-1111-111111111111}"
   local short_id="${4:-0123456789abcdef}"
   local server_name="${5:-www.microsoft.com}"
+  local mldsa65_verify="${6:-}"
   local output="${SMOKE_WORK_DIR}/client-${suffix}.json"
   smoke_write_client_config \
     "${CLIENT_TEMPLATE}" \
@@ -117,7 +138,8 @@ client_config() {
     "${flow}" \
     "${user_id}" \
     "${short_id}" \
-    "${server_name}"
+    "${server_name}" \
+    "${mldsa65_verify}"
   printf '%s\n' "${output}"
 }
 
@@ -396,6 +418,65 @@ phase_network_raw_alias() {
   client="$(client_config network-raw "xtls-rprx-vision")"
   smoke_start_stack "${SERVER_RAW}" "${client}"
   smoke_record_curl "network-alias-raw" -m 30 "${SMOKE_QUICK_URL}"
+}
+
+phase_mldsa65_seed_raw_vision() {
+  local client http_code curl_exit log_before
+  local removed_feature_marker="reality-mldsa65"
+  local removed_feature_error="requires "
+  removed_feature_marker+="-crypto"
+  removed_feature_error+="feature"
+  client="$(client_config mldsa65-raw-vision "xtls-rprx-vision" "11111111-1111-1111-1111-111111111111" "0123456789abcdef" "www.microsoft.com" "${TEST_MLDSA65_VERIFY}")"
+
+  smoke_stop_stack
+
+  if ! smoke_start_stack "${SERVER_MLDSA65_RAW}" "${client}"; then
+    mldsa65_fail "valid mldsa65Seed server/client startup"
+    return 1
+  fi
+  mldsa65_pass "valid mldsa65Seed accepted by normal build"
+
+  if smoke_log_contains "${removed_feature_marker}" || smoke_log_contains "${removed_feature_error}"; then
+    mldsa65_fail "valid mldsa65Seed did not require removed cargo feature"
+    return 1
+  fi
+  mldsa65_pass "valid mldsa65Seed does not require removed cargo feature"
+
+  log_before="$(smoke_log_line_count "${SMOKE_SERVER_LOG}")"
+  set +e
+  http_code="$(smoke_curl_socks -m 30 "${SMOKE_QUICK_URL}")"
+  curl_exit=$?
+  set -e
+
+  if [[ "${curl_exit}" -eq 0 && "${http_code}" =~ ^2 ]]; then
+    mldsa65_pass "full mldsa65 raw vision curl succeeded"
+    return 0
+  fi
+
+  if smoke_log_contains_since "${SMOKE_SERVER_LOG}" "${log_before}" "REALITY certificate DER too short for ML-DSA-65 extension patch"; then
+    mldsa65_fail "full mldsa65 live curl still blocked by missing certificate placeholder"
+    return 0
+  fi
+
+  mldsa65_fail "mldsa65 raw vision curl failed without expected ML-DSA-65 patch error: exit=${curl_exit} http=${http_code}"
+  return 1
+}
+
+phase_mldsa65_invalid_seed_rejected() {
+  if smoke_expect_server_reject \
+    "mldsa65-invalid-seed" \
+    "${SERVER_MLDSA65_INVALID_SEED}" \
+    "invalid mldsa65Seed length"; then
+    smoke_wait_port_closed 127.0.0.1 "${SMOKE_SERVER_PORT}" "mldsa65 invalid seed server" 20 || {
+      mldsa65_fail "invalid mldsa65Seed left server port open"
+      return 1
+    }
+    mldsa65_pass "invalid mldsa65Seed rejected during startup"
+    return 0
+  fi
+
+  mldsa65_fail "invalid mldsa65Seed was not rejected during startup"
+  return 1
 }
 
 phase_network_tcp_regression() {
@@ -791,6 +872,8 @@ main() {
   run_phase "flow mismatch empty account + vision client" phase_flow_mismatch_empty_account_vision_client
   run_phase "flow mismatch vision account + empty client" phase_flow_mismatch_vision_account_empty_client
   run_phase "network alias raw" phase_network_raw_alias
+  run_phase "mldsa65 reality raw vision" phase_mldsa65_seed_raw_vision
+  run_phase "negative mldsa65 invalid seed" phase_mldsa65_invalid_seed_rejected
   run_phase "network alias tcp regression" phase_network_tcp_regression
   run_phase "transport xhttp unsupported" phase_transport_xhttp_unsupported
   run_phase "transport grpc unsupported" phase_transport_grpc_unsupported
@@ -807,7 +890,7 @@ main() {
   echo
   smoke_write_report "${SMOKE_REPORT_PATH}"
 
-  if [[ "${SMOKE_FAILED}" -ne 0 || "${SMOKE_CURL_FAILED}" -ne 0 ]]; then
+  if [[ "${SMOKE_FAILED}" -ne 0 || "${SMOKE_CURL_FAILED}" -ne 0 || "${SMOKE_MLDSA65_FAILED}" -ne 0 ]]; then
     echo "live smoke failed; see ${SMOKE_REPORT_PATH}" >&2
     exit 1
   fi
