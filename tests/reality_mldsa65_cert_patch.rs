@@ -4,13 +4,13 @@ use std::fs;
 use std::path::Path;
 
 use rust_xray::reality::mldsa65_crypto::{
-    patch_reality_certificate_der_with_mldsa65_for_test, verify_reality_mldsa65_signature_for_test,
-    Mldsa65Signature, RealityMldsa65CertPatchInput,
+    mldsa65_signature_from_bytes_for_test, patch_reality_certificate_der_with_mldsa65_for_test,
+    verify_reality_mldsa65_signature_for_test, RealityMldsa65CertPatchInput,
 };
 use rust_xray::reality::{
     build_reality_mldsa65_message, decode_mldsa65_seed, decode_mldsa65_verify_key,
-    patch_reality_certificate_der, Mldsa65Seed, MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET,
-    MLDSA65_SIGNATURE_LEN,
+    patch_reality_certificate_der, Mldsa65Seed, Mldsa65Signature,
+    MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET, MLDSA65_SIGNATURE_LEN,
 };
 use serde::Deserialize;
 
@@ -156,7 +156,7 @@ fn mldsa65_cert_patch_applies_legacy_tail_and_verifiable_signature(
         &client_hello_original,
         &server_hello_original,
     );
-    let signature = Mldsa65Signature::from_bytes_for_test(cert_der[extension_range].to_vec());
+    let signature = mldsa65_signature_from_bytes_for_test(cert_der[extension_range].to_vec())?;
     verify_reality_mldsa65_signature_for_test(&verify_key, &message, &signature)?;
 
     let mut modified_message = message;
@@ -169,7 +169,7 @@ fn mldsa65_cert_patch_applies_legacy_tail_and_verifiable_signature(
 
     let mut modified_signature = signature.as_bytes().to_vec();
     modified_signature[0] ^= 0x80;
-    let modified_signature = Mldsa65Signature::from_bytes_for_test(modified_signature);
+    let modified_signature = mldsa65_signature_from_bytes_for_test(modified_signature)?;
     assert!(
         verify_reality_mldsa65_signature_for_test(&verify_key, &message, &modified_signature)
             .is_err(),

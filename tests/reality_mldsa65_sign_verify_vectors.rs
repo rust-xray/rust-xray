@@ -4,8 +4,8 @@ use std::fs;
 use std::path::Path;
 
 use rust_xray::reality::mldsa65_crypto::{
-    sign_reality_mldsa65_message_for_test, verify_reality_mldsa65_signature_for_test,
-    Mldsa65Signature,
+    mldsa65_signature_from_bytes_for_test, sign_reality_mldsa65_message_for_test,
+    verify_reality_mldsa65_signature_for_test,
 };
 use rust_xray::reality::{
     build_reality_mldsa65_message, decode_mldsa65_seed, decode_mldsa65_verify_key,
@@ -150,7 +150,7 @@ fn rustcrypto_mldsa65_sign_verify_reality_message_vector() -> Result<(), Box<dyn
 
     let mut modified_signature = signature.as_bytes().to_vec();
     modified_signature[0] ^= 0x80;
-    let modified_signature = Mldsa65Signature::from_bytes_for_test(modified_signature);
+    let modified_signature = mldsa65_signature_from_bytes_for_test(modified_signature)?;
     assert!(
         verify_reality_mldsa65_signature_for_test(&verify_key, &message, &modified_signature)
             .is_err(),

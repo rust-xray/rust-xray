@@ -43,6 +43,36 @@ impl std::fmt::Debug for Mldsa65VerifyKey {
     }
 }
 
+#[derive(Clone)]
+pub struct Mldsa65Signature(Vec<u8>);
+
+impl Mldsa65Signature {
+    pub fn from_bytes(bytes: Vec<u8>) -> std::io::Result<Self> {
+        if bytes.len() != MLDSA65_SIGNATURE_LEN {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid ML-DSA-65 signature length: expected {} bytes, got {}",
+                    MLDSA65_SIGNATURE_LEN,
+                    bytes.len()
+                ),
+            ));
+        }
+
+        Ok(Self(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Mldsa65Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Mldsa65Signature(redacted)")
+    }
+}
+
 pub fn decode_mldsa65_verify_key(value: &str) -> std::io::Result<Mldsa65VerifyKey> {
     if value.is_empty() {
         return Err(std::io::Error::new(
@@ -125,6 +155,64 @@ pub fn build_reality_mldsa65_message(
     mac.update(client_hello_original);
     mac.update(server_hello_original);
     mac.finalize().into_bytes().into()
+}
+
+/// Writes an ML-DSA-65 signature into the REALITY certificate extension value at
+/// [`MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET`].
+pub fn write_reality_mldsa65_cert_extension_signature(
+    cert_der: &mut [u8],
+    signature: &Mldsa65Signature,
+) -> std::io::Result<()> {
+    let extension_end = MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_SIGNATURE_LEN;
+    if cert_der.len() < extension_end {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "REALITY certificate DER too short for ML-DSA-65 extension patch: {} bytes (need >= {extension_end})",
+                cert_der.len()
+            ),
+        ));
+    }
+
+    cert_der[MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET..extension_end]
+        .copy_from_slice(signature.as_bytes());
+
+    Ok(())
+}
+
+/// Offline REALITY ML-DSA-65 message signing from a 32-byte seed.
+///
+/// Requires the `reality-mldsa65-crypto` feature. Without it, returns
+/// [`std::io::ErrorKind::Unsupported`].
+#[cfg(not(feature = "reality-mldsa65-crypto"))]
+pub fn sign_reality_mldsa65_message(
+    _seed: &Mldsa65Seed,
+    _message: &[u8; 64],
+) -> std::io::Result<Mldsa65Signature> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "REALITY ML-DSA-65 signing requires the `reality-mldsa65-crypto` feature",
+    ))
+}
+
+/// Offline REALITY ML-DSA-65 message signing from a 32-byte seed.
+#[cfg(feature = "reality-mldsa65-crypto")]
+pub fn sign_reality_mldsa65_message(
+    seed: &Mldsa65Seed,
+    message: &[u8; 64],
+) -> std::io::Result<Mldsa65Signature> {
+    use ml_dsa::{MlDsa65, SignatureEncoding, Signer, SigningKey};
+
+    let seed_bytes = ml_dsa::B32::from(*seed.as_bytes());
+    let signing_key = SigningKey::<MlDsa65>::from_seed(&seed_bytes);
+    let signature = signing_key.try_sign(message.as_slice()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "ML-DSA-65 signing failed",
+        )
+    })?;
+
+    Mldsa65Signature::from_bytes(signature.to_bytes().as_slice().to_vec())
 }
 
 /// Stub for future REALITY ML-DSA-65 certificate extension signing.
@@ -297,6 +385,81 @@ mod tests {
         let verify_b64 = b64url_no_pad(&vec![0x01; MLDSA65_VERIFY_KEY_LEN]);
         let verify = decode_mldsa65_verify_key(&verify_b64).unwrap();
         assert_eq!(verify.as_bytes().len(), MLDSA65_VERIFY_KEY_LEN);
+    }
+
+    #[cfg(not(feature = "reality-mldsa65-crypto"))]
+    #[test]
+    fn sign_reality_mldsa65_message_without_feature_returns_unsupported() {
+        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .unwrap()
+            .unwrap();
+        let message = [0x33; 64];
+
+        let err = sign_reality_mldsa65_message(&seed, &message).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("reality-mldsa65-crypto"));
+    }
+
+    #[cfg(feature = "reality-mldsa65-crypto")]
+    #[test]
+    fn sign_reality_mldsa65_message_with_feature_returns_expected_length() {
+        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .unwrap()
+            .unwrap();
+        let message = build_reality_mldsa65_message(
+            &[0x22; 32],
+            &[0x11; 32],
+            &[0x01, 0x02, 0x03],
+            &[0x04, 0x05, 0x06],
+        );
+
+        let signature = sign_reality_mldsa65_message(&seed, &message).expect("valid signature");
+
+        assert_eq!(signature.as_bytes().len(), MLDSA65_SIGNATURE_LEN);
+    }
+
+    #[test]
+    fn write_reality_mldsa65_cert_extension_signature_writes_at_offset() {
+        let extension_end = MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_SIGNATURE_LEN;
+        let mut cert_der = vec![0xaa; extension_end + 64];
+        let signature =
+            Mldsa65Signature::from_bytes(vec![0x42; MLDSA65_SIGNATURE_LEN]).unwrap();
+
+        write_reality_mldsa65_cert_extension_signature(&mut cert_der, &signature)
+            .expect("valid extension write");
+
+        assert_eq!(
+            &cert_der[MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET..extension_end],
+            signature.as_bytes()
+        );
+        assert_eq!(&cert_der[..MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET], &[0xaa; 126]);
+        assert_eq!(&cert_der[extension_end..], &[0xaa; 64]);
+    }
+
+    #[test]
+    fn write_reality_mldsa65_cert_extension_signature_rejects_too_short_cert() {
+        let extension_end = MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_SIGNATURE_LEN;
+        let mut cert_der = vec![0xaa; extension_end - 1];
+        let cert_before = cert_der.clone();
+        let signature =
+            Mldsa65Signature::from_bytes(vec![0x42; MLDSA65_SIGNATURE_LEN]).unwrap();
+
+        let err =
+            write_reality_mldsa65_cert_extension_signature(&mut cert_der, &signature).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(cert_der, cert_before);
+    }
+
+    #[test]
+    fn mldsa65_signature_debug_does_not_expose_bytes() {
+        let signature =
+            Mldsa65Signature::from_bytes(vec![0x42; MLDSA65_SIGNATURE_LEN]).unwrap();
+        let debug = format!("{signature:?}");
+        assert_eq!(debug, "Mldsa65Signature(redacted)");
+        assert!(debug.contains("redacted"));
+        assert!(!debug.contains("66"));
     }
 
     #[test]

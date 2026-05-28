@@ -1,6 +1,6 @@
 #![cfg(feature = "reality-mldsa65-crypto")]
 
-use ml_dsa::{Keypair, MlDsa65, Signature, SignatureEncoding, Signer, SigningKey, Verifier};
+use ml_dsa::{Keypair, MlDsa65, Signature, SigningKey, Verifier};
 
 pub struct RealityMldsa65CertPatchInput<'a> {
     pub cert_der: &'a mut [u8],
@@ -16,23 +16,10 @@ pub struct Mldsa65DerivedKey {
     pub signing_key_bytes: Vec<u8>,
 }
 
-#[derive(Clone)]
-pub struct Mldsa65Signature(Vec<u8>);
+pub use crate::reality::Mldsa65Signature;
 
-impl Mldsa65Signature {
-    pub fn from_bytes_for_test(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for Mldsa65Signature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Mldsa65Signature(<redacted>)")
-    }
+pub fn mldsa65_signature_from_bytes_for_test(bytes: Vec<u8>) -> std::io::Result<Mldsa65Signature> {
+    Mldsa65Signature::from_bytes(bytes)
 }
 
 pub fn derive_mldsa65_key_from_seed_for_test(
@@ -55,16 +42,17 @@ pub fn sign_reality_mldsa65_message_for_test(
     seed: &crate::reality::Mldsa65Seed,
     message: &[u8],
 ) -> std::io::Result<Mldsa65Signature> {
-    let seed_bytes = ml_dsa::B32::from(*seed.as_bytes());
-    let signing_key = SigningKey::<MlDsa65>::from_seed(&seed_bytes);
-    let signature: Signature<MlDsa65> = signing_key.try_sign(message).map_err(|_| {
+    let message: [u8; 64] = message.try_into().map_err(|_| {
         std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "ml-dsa crate failed to sign ML-DSA-65 message from seed",
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "REALITY ML-DSA-65 message must be exactly 64 bytes, got {}",
+                message.len()
+            ),
         )
     })?;
 
-    Ok(Mldsa65Signature(signature.to_bytes().as_slice().to_vec()))
+    crate::reality::sign_reality_mldsa65_message(seed, &message)
 }
 
 pub fn verify_reality_mldsa65_signature_for_test(
@@ -133,19 +121,5 @@ pub fn patch_reality_certificate_der_with_mldsa65_for_test(
         input.server_hello_original,
     );
     let signature = sign_reality_mldsa65_message_for_test(input.seed, &message)?;
-    if signature.as_bytes().len() != crate::reality::MLDSA65_SIGNATURE_LEN {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "invalid ML-DSA-65 signature length: expected {} bytes, got {}",
-                crate::reality::MLDSA65_SIGNATURE_LEN,
-                signature.as_bytes().len()
-            ),
-        ));
-    }
-
-    input.cert_der[crate::reality::MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET..extension_end]
-        .copy_from_slice(signature.as_bytes());
-
-    Ok(())
+    crate::reality::write_reality_mldsa65_cert_extension_signature(input.cert_der, &signature)
 }
