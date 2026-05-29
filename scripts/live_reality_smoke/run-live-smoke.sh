@@ -837,6 +837,32 @@ run_cipher_phases() {
   SMOKE_CIPHER_TLS_PID=""
 }
 
+smoke_assert_report_contains() {
+  local needle="$1"
+  if ! grep -Fq -- "${needle}" "${SMOKE_REPORT_PATH}"; then
+    echo "error: live smoke report missing required guard: ${needle}" >&2
+    return 1
+  fi
+}
+
+smoke_validate_final_report() {
+  smoke_assert_report_contains "curl_checks_failed: 0" &&
+    smoke_assert_report_contains "aes_gcm_decrypt_failed: 0" &&
+    smoke_assert_report_contains "mldsa65_checks_failed: 0" &&
+    smoke_assert_report_contains "PASS full mldsa65 raw vision curl succeeded" &&
+    smoke_assert_report_contains "PASS invalid mldsa65Seed rejected during startup" &&
+    smoke_assert_report_contains "PASS fallback default" &&
+    smoke_assert_report_contains "PASS fallback by SNI/name" &&
+    smoke_assert_report_contains "PASS fallback by HTTP path" &&
+    smoke_assert_report_contains "PASS fallback by ALPN http/1.1" &&
+    smoke_assert_report_contains "PASS fallback by ALPN h2" &&
+    smoke_assert_report_contains "PASS fallback xver=1 PROXY v1" &&
+    smoke_assert_report_contains "PASS fallback xver=2 PROXY v2" &&
+    smoke_assert_report_contains "PASS cipher force AES128" &&
+    smoke_assert_report_contains "PASS cipher force AES256" &&
+    smoke_assert_report_contains "PASS cipher force CHACHA20"
+}
+
 main() {
   if [[ "${SMOKE_SKIP_LIVE}" == "1" ]]; then
     echo "Skipping live smoke (SMOKE_SKIP_LIVE=1)"
@@ -889,6 +915,11 @@ main() {
 
   echo
   smoke_write_report "${SMOKE_REPORT_PATH}"
+
+  if ! smoke_validate_final_report; then
+    echo "live smoke failed final report guards; see ${SMOKE_REPORT_PATH}" >&2
+    exit 1
+  fi
 
   if [[ "${SMOKE_FAILED}" -ne 0 || "${SMOKE_CURL_FAILED}" -ne 0 || "${SMOKE_MLDSA65_FAILED}" -ne 0 ]]; then
     echo "live smoke failed; see ${SMOKE_REPORT_PATH}" >&2

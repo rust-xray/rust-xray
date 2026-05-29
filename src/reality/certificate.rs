@@ -389,7 +389,35 @@ mod tests {
     }
 
     #[test]
+    fn no_seed_selects_hmac_only() {
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+
+        let mode = select_reality_certificate_patch_mode(None, &client_hello, &server_hello)
+            .expect("HMAC-only mode");
+
+        assert!(matches!(mode, RealityCertificatePatchMode::HmacOnly));
+    }
+
+    #[test]
     fn live_patch_context_with_seed_selects_hmac_plus_mldsa65() {
+        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .expect("valid seed")
+            .expect("non-empty seed");
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+
+        let mode = select_reality_certificate_patch_mode(Some(&seed), &client_hello, &server_hello)
+            .expect("ML-DSA mode");
+
+        assert!(matches!(
+            mode,
+            RealityCertificatePatchMode::HmacPlusMldsa65 { .. }
+        ));
+    }
+
+    #[test]
+    fn seed_selects_hmac_plus_mldsa65() {
         let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
             .expect("valid seed")
             .expect("non-empty seed");
@@ -500,6 +528,39 @@ mod tests {
         assert_eq!(cert, original);
         assert!(err_text.contains("ML-DSA-65 extension patch"));
         assert!(!err_text.contains(VALID_SEED_B64));
+    }
+
+    #[test]
+    fn seed_patch_error_does_not_fallback_to_hmac_only() {
+        use crate::reality::{MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET, MLDSA65_SIGNATURE_LEN};
+
+        let extension_end = MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET + MLDSA65_SIGNATURE_LEN;
+        let original = vec![0xaa; extension_end - 1];
+        let mut cert = original.clone();
+        let public_key = [0x11; 32];
+        let auth_key = [0x22; 32];
+        let client_hello = [0x01, 0x02, 0x03];
+        let server_hello = [0x04, 0x05, 0x06];
+        let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+            .expect("valid seed")
+            .expect("non-empty seed");
+
+        let err = patch_reality_certificate_der_with_mode(RealityCertificatePatchInput {
+            cert_der: &mut cert,
+            ed25519_public_key: &public_key,
+            auth_key: &auth_key,
+            mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
+                mldsa65_seed: &seed,
+                client_hello_original: &client_hello,
+                server_hello_original: &server_hello,
+            },
+        })
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert_eq!(cert, original);
+        assert!(err.to_string().contains("ML-DSA-65 extension patch"));
+        assert!(!err.to_string().contains(VALID_SEED_B64));
     }
 
     #[test]

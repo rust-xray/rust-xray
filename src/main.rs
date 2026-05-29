@@ -442,6 +442,14 @@ mod tests {
     }
 
     fn runtime_with_fallbacks() -> RuntimeConfig {
+        runtime_with_fallbacks_json("")
+    }
+
+    fn runtime_with_fallbacks_and_mldsa65_seed() -> RuntimeConfig {
+        runtime_with_fallbacks_json(&format!(r#","mldsa65Seed":"{TEST_MLDSA65_SEED}""#))
+    }
+
+    fn runtime_with_fallbacks_json(reality_extra: &str) -> RuntimeConfig {
         let json = r#"{
             "inbounds": [{
                 "tag": "reality-in",
@@ -469,12 +477,13 @@ mod tests {
                         "dest": "www.example.com:443",
                         "serverNames": ["www.example.com"],
                         "privateKey": "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4",
-                        "shortIds": [""]
+                        "shortIds": [""]__REALITY_EXTRA__
                     }
                 }
             }]
-        }"#;
-        let xray: XrayConfig = serde_json::from_str(json).expect("parse config");
+        }"#
+        .replace("__REALITY_EXTRA__", reality_extra);
+        let xray: XrayConfig = serde_json::from_str(&json).expect("parse config");
         runtime_config_from_xray(&xray).expect("build runtime config")
     }
 
@@ -574,6 +583,51 @@ mod tests {
         );
         assert_eq!(
             runtime_selection(&config, &proxy_v2),
+            ("127.0.0.1:19507".to_string(), 2)
+        );
+    }
+
+    #[test]
+    fn runtime_fallback_selection_with_mldsa65_seed_stays_on_fallback_targets() {
+        let config = runtime_with_fallbacks_and_mldsa65_seed();
+        assert!(config.reality.mldsa65_seed.is_some());
+
+        let path_ctx = build_fallback_context(
+            None,
+            b"GET /smoke-path/resource HTTP/1.1\r\nHost: smoke.local\r\n\r\n",
+        );
+        let h2_ctx = FallbackContext {
+            alpn: Some("http/1.1".to_string()),
+            alpn_offers: vec!["http/1.1".to_string(), "h2".to_string()],
+            ..FallbackContext::default()
+        };
+        let proxy_v1_ctx = FallbackContext {
+            sni: Some("proxy-fallback.test".to_string()),
+            ..FallbackContext::default()
+        };
+        let proxy_v2_ctx = FallbackContext {
+            sni: Some("proxy-v2-fallback.test".to_string()),
+            ..FallbackContext::default()
+        };
+
+        assert_eq!(
+            runtime_selection(&config, &FallbackContext::default()),
+            ("127.0.0.1:19501".to_string(), 0)
+        );
+        assert_eq!(
+            runtime_selection(&config, &path_ctx),
+            ("127.0.0.1:19503".to_string(), 0)
+        );
+        assert_eq!(
+            runtime_selection(&config, &h2_ctx),
+            ("127.0.0.1:19506".to_string(), 0)
+        );
+        assert_eq!(
+            runtime_selection(&config, &proxy_v1_ctx),
+            ("127.0.0.1:19504".to_string(), 1)
+        );
+        assert_eq!(
+            runtime_selection(&config, &proxy_v2_ctx),
             ("127.0.0.1:19507".to_string(), 2)
         );
     }

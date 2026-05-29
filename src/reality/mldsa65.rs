@@ -588,6 +588,14 @@ mod tests {
     }
 
     #[test]
+    fn invalid_mldsa65_seed_rejected_before_runtime() {
+        let err = decode_mldsa65_seed(Some("not-valid-base64!!!"), TEST_PRIVATE_KEY).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("invalid mldsa65Seed base64"));
+        assert!(!err.to_string().contains("feature gate"));
+    }
+
+    #[test]
     fn rejects_decoded_31_bytes() {
         let err = decode_mldsa65_seed(Some(SEED_31_BYTES_B64), TEST_PRIVATE_KEY).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
@@ -778,6 +786,15 @@ mod tests {
 
     #[test]
     fn mldsa65_signature_debug_does_not_expose_bytes() {
+        let signature = Mldsa65Signature::from_bytes(vec![0x42; MLDSA65_SIGNATURE_LEN]).unwrap();
+        let debug = format!("{signature:?}");
+        assert_eq!(debug, "Mldsa65Signature(redacted)");
+        assert!(debug.contains("redacted"));
+        assert!(!debug.contains("66"));
+    }
+
+    #[test]
+    fn mldsa65_signature_debug_redacted() {
         let signature = Mldsa65Signature::from_bytes(vec![0x42; MLDSA65_SIGNATURE_LEN]).unwrap();
         let debug = format!("{signature:?}");
         assert_eq!(debug, "Mldsa65Signature(redacted)");
