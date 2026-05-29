@@ -11,8 +11,12 @@ use crate::api::proto::app::proxyman::command::{
     ListInboundsResponse, ListOutboundsRequest, ListOutboundsResponse, RemoveInboundRequest,
     RemoveInboundResponse, RemoveOutboundRequest, RemoveOutboundResponse, RemoveUserOperation,
 };
+use crate::api::proto::common::protocol::User;
+use crate::api::proto::common::serial::TypedMessage;
+use crate::api::proto::core::InboundHandlerConfig;
+use crate::api::proto::proxy::vless::Account;
 use crate::runtime::InboundUserManagers;
-use crate::vless::user_manager::{managed_user_from_vless_account, UserManagerError};
+use crate::vless::user_manager::{managed_user_from_vless_account, ManagedUser, UserManagerError};
 
 #[derive(Debug)]
 pub struct HandlerServiceImpl {
@@ -44,6 +48,56 @@ fn map_user_manager_error(err: UserManagerError) -> Status {
         }
         UserManagerError::InvalidUser(message) => Status::new(Code::InvalidArgument, message),
     }
+}
+
+fn inbound_not_found(tag: &str) -> Status {
+    Status::new(Code::NotFound, format!("inbound tag not found: {tag}"))
+}
+
+fn require_inbound_tag(tag: &str) -> Result<&str, Status> {
+    if tag.trim().is_empty() {
+        return Err(Status::new(
+            Code::InvalidArgument,
+            "inbound tag is required",
+        ));
+    }
+    Ok(tag)
+}
+
+fn managed_user_to_proto(user: &ManagedUser) -> Result<User, Status> {
+    if user.email.is_empty() {
+        return Err(Status::new(
+            Code::InvalidArgument,
+            "vless user email is required for HandlerService introspection",
+        ));
+    }
+
+    let account = Account {
+        id: user.id.to_string(),
+        flow: user.flow.clone().unwrap_or_default(),
+        seconds: user.expiry_secs.unwrap_or(0),
+        ..Default::default()
+    };
+    let account_msg = TypedMessage {
+        r#type: "xray.proxy.vless.Account".to_string(),
+        value: account.encode_to_vec(),
+    };
+
+    Ok(User {
+        level: user.level.unwrap_or(0),
+        email: user.email.clone(),
+        account: Some(account_msg),
+    })
+}
+
+fn listable_managed_users(
+    manager: &crate::vless::user_manager::VlessUserManager,
+) -> Vec<ManagedUser> {
+    manager
+        .list_managed_users()
+        .into_iter()
+        .filter(|user| !user.email.is_empty())
+        .collect()
 }
 
 fn unsupported_account_type(account_type: &str) -> Status {
@@ -179,23 +233,83 @@ impl HandlerService for HandlerServiceImpl {
 
     async fn list_inbounds(
         &self,
-        _request: Request<ListInboundsRequest>,
+        request: Request<ListInboundsRequest>,
     ) -> Result<Response<ListInboundsResponse>, Status> {
-        Err(unimplemented("ListInbounds"))
+        let request = request.into_inner();
+        let inbounds = self
+            .managers
+            .list_tags()
+            .into_iter()
+            .map(|tag| {
+                if request.is_only_tags {
+                    InboundHandlerConfig {
+                        tag,
+                        receiver_settings: None,
+                        proxy_settings: None,
+                    }
+                } else {
+                    InboundHandlerConfig {
+                        tag,
+                        receiver_settings: None,
+                        proxy_settings: Some(TypedMessage {
+                            r#type: "xray.proxy.vless.InboundConfig".to_string(),
+                            value: Vec::new(),
+                        }),
+                    }
+                }
+            })
+            .collect();
+
+        Ok(Response::new(ListInboundsResponse { inbounds }))
     }
 
     async fn get_inbound_users(
         &self,
-        _request: Request<GetInboundUserRequest>,
+        request: Request<GetInboundUserRequest>,
     ) -> Result<Response<GetInboundUserResponse>, Status> {
-        Err(unimplemented("GetInboundUsers"))
+        let request = request.into_inner();
+        let tag = require_inbound_tag(&request.tag)?;
+        let manager = self.managers.get(tag).map_err(|_| inbound_not_found(tag))?;
+
+        let managed = if request.email.trim().is_empty() {
+            listable_managed_users(&manager)
+        } else {
+            let email = request.email.trim();
+            let user = manager.get_managed_user_by_email(email).ok_or_else(|| {
+                Status::new(Code::NotFound, format!("vless user not found: {email}"))
+            })?;
+            vec![user]
+        };
+
+        let users = managed
+            .iter()
+            .map(managed_user_to_proto)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Response::new(GetInboundUserResponse { users }))
     }
 
     async fn get_inbound_users_count(
         &self,
-        _request: Request<GetInboundUserRequest>,
+        request: Request<GetInboundUserRequest>,
     ) -> Result<Response<GetInboundUsersCountResponse>, Status> {
-        Err(unimplemented("GetInboundUsersCount"))
+        let request = request.into_inner();
+        let tag = require_inbound_tag(&request.tag)?;
+        let manager = self.managers.get(tag).map_err(|_| inbound_not_found(tag))?;
+
+        let count = if request.email.trim().is_empty() {
+            i64::try_from(manager.user_count())
+                .map_err(|_| Status::new(Code::Internal, "inbound user count exceeds i64::MAX"))?
+        } else {
+            let email = request.email.trim();
+            if manager.get_managed_user_by_email(email).is_some() {
+                1
+            } else {
+                0
+            }
+        };
+
+        Ok(Response::new(GetInboundUsersCountResponse { count }))
     }
 
     async fn add_outbound(

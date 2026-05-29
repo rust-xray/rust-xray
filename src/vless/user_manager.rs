@@ -170,6 +170,37 @@ impl VlessUserManager {
         })
     }
 
+    /// Returns all managed users (static + dynamic), sorted by email then UUID.
+    pub fn list_managed_users(&self) -> Vec<ManagedUser> {
+        let mut users: Vec<ManagedUser> = self
+            .users_by_id
+            .read()
+            .expect("users lock")
+            .values()
+            .cloned()
+            .collect();
+        users.sort_by(|left, right| {
+            left.email
+                .cmp(&right.email)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        users
+    }
+
+    pub fn get_managed_user_by_email(&self, email: &str) -> Option<ManagedUser> {
+        let id = self
+            .email_to_id
+            .read()
+            .expect("email lock")
+            .get(email)
+            .copied()?;
+        self.users_by_id
+            .read()
+            .expect("users lock")
+            .get(&id)
+            .cloned()
+    }
+
     pub fn snapshot_vless_clients(&self) -> Vec<VlessClient> {
         self.users_by_id
             .read()

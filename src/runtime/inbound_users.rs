@@ -47,4 +47,12 @@ impl InboundUserManagers {
                 tag: tag.to_string(),
             })
     }
+
+    /// Returns registered inbound tags in stable sorted order.
+    pub fn list_tags(&self) -> Vec<String> {
+        let guard = self.managers.read().expect("inbound user managers lock");
+        let mut tags: Vec<String> = guard.keys().cloned().collect();
+        tags.sort();
+        tags
+    }
 }

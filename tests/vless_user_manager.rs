@@ -112,6 +112,28 @@ fn duplicate_email_is_rejected() {
 }
 
 #[test]
+fn list_managed_users_includes_static_and_dynamic_entries() {
+    let manager = static_manager();
+    manager
+        .add_user(ManagedUser {
+            id: DYNAMIC_ID,
+            email: "dynamic@example.test".to_string(),
+            flow: None,
+            level: None,
+            expiry_secs: None,
+        })
+        .expect("add user");
+
+    let emails: Vec<_> = manager
+        .list_managed_users()
+        .into_iter()
+        .map(|user| user.email)
+        .collect();
+    assert!(emails.contains(&"static@example.test".to_string()));
+    assert!(emails.contains(&"dynamic@example.test".to_string()));
+}
+
+#[test]
 fn remove_missing_user_returns_error() {
     let manager = static_manager();
     let err = manager
