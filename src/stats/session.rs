@@ -57,6 +57,34 @@ impl StatsSession {
         }
     }
 
+    /// Register Xray-compatible counter names after successful VLESS auth (value stays 0 until traffic).
+    pub fn ensure_registered(&self) {
+        if self.policy.inbound_uplink {
+            self.registry
+                .ensure(&inbound_traffic_uplink(&self.inbound_tag));
+        }
+        if self.policy.inbound_downlink {
+            self.registry
+                .ensure(&inbound_traffic_downlink(&self.inbound_tag));
+        }
+        if self.policy.outbound_uplink {
+            self.registry
+                .ensure(&outbound_traffic_uplink(&self.outbound_tag));
+        }
+        if self.policy.outbound_downlink {
+            self.registry
+                .ensure(&outbound_traffic_downlink(&self.outbound_tag));
+        }
+        if let Some(email) = self.user_email.as_deref() {
+            if self.policy.user_uplink {
+                self.registry.ensure(&user_traffic_uplink(email));
+            }
+            if self.policy.user_downlink {
+                self.registry.ensure(&user_traffic_downlink(email));
+            }
+        }
+    }
+
     pub fn record_downlink(&self, bytes: u64) {
         if bytes == 0 {
             return;

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use crate::vless::{validate_fallback_configs, FallbackConfig};
@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tracing::warn;
+use tracing::{info, warn};
 
 const REALITY_DEFAULT_DEST_PORT: u16 = 443;
 const HTTP_UNIX_SCHEME: &str = "http+unix://";
@@ -151,6 +151,9 @@ pub struct VlessInboundSettings {
     #[serde(default)]
     pub clients: Vec<VlessClientObject>,
 
+    /// Inbound-level default flow (Remnawave panel / Xray upstream).
+    pub flow: Option<String>,
+
     pub decryption: Option<String>,
 
     #[serde(default)]
@@ -230,6 +233,8 @@ pub struct RealitySettingsObject {
 #[derive(Clone)]
 pub struct RealityInboundRuntime {
     pub tag: Option<String>,
+    /// All inbound tags merged into this runtime (includes `tag` when set).
+    pub merged_inbound_tags: Vec<String>,
     pub protocol: Option<String>,
     pub listen_addr: String,
     pub dest_addr: String,
@@ -270,6 +275,7 @@ impl std::fmt::Debug for RealityInboundRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RealityInboundRuntime")
             .field("tag", &self.tag)
+            .field("merged_inbound_tags", &self.merged_inbound_tags)
             .field("protocol", &self.protocol)
             .field("listen_addr", &self.listen_addr)
             .field("dest_addr", &self.dest_addr)
@@ -659,6 +665,19 @@ pub fn config_source_kind(source: &str) -> &'static str {
     }
 }
 
+const REMNAWAVE_INTERNAL_CONFIG_PATH: &str = "/internal/get-config";
+
+/// True when config is loaded from Remnawave's internal `http+unix` socket API.
+pub fn is_remnawave_http_unix_config_source(source: &str) -> bool {
+    if config_source_kind(source) != "http+unix" {
+        return false;
+    }
+    match parse_http_unix_config_uri(source) {
+        Ok((_, path)) => path.starts_with(REMNAWAVE_INTERNAL_CONFIG_PATH),
+        Err(_) => source.contains(REMNAWAVE_INTERNAL_CONFIG_PATH),
+    }
+}
+
 /// Redacted Xray-style command line for logs (`rw-core -config ... -format json`).
 pub fn format_redacted_run_command(
     program: &str,
@@ -693,6 +712,134 @@ impl ApiListenSource {
             Self::RoutingRule => "routing.outboundTag==api.tag",
         }
     }
+}
+
+/// PEM material for Remnawave-style mTLS on the API dokodemo-door inbound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiTlsMaterial {
+    pub cert_pem: Vec<u8>,
+    pub key_pem: Vec<u8>,
+    pub ca_pem: Vec<u8>,
+    pub server_name: Option<String>,
+}
+
+fn pem_bytes_from_json_value(value: &Value) -> Option<Vec<u8>> {
+    match value {
+        Value::String(text) => {
+            let pem = text.replace("\\n", "\n");
+            if pem.trim().is_empty() {
+                None
+            } else {
+                Some(pem.into_bytes())
+            }
+        }
+        Value::Array(lines) => {
+            let joined = lines
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if joined.trim().is_empty() {
+                None
+            } else {
+                Some(joined.into_bytes())
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_tls_settings_certificates(
+    tls_settings: &Value,
+) -> std::io::Result<Option<ApiTlsMaterial>> {
+    let Some(entries) = tls_settings.get("certificates").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+
+    let mut cert_pem = None;
+    let mut key_pem = None;
+    let mut ca_pem = None;
+
+    for entry in entries {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let usage = obj
+            .get("usage")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let certificate = obj.get("certificate").and_then(pem_bytes_from_json_value);
+        if usage.is_some_and(|value| eq_ignore_ascii_case(value, "verify")) {
+            if let Some(ca) = certificate {
+                ca_pem = Some(ca);
+            }
+            continue;
+        }
+        if let Some(cert) = certificate {
+            cert_pem = Some(cert);
+        }
+        if let Some(key) = obj.get("key").and_then(pem_bytes_from_json_value) {
+            key_pem = Some(key);
+        }
+    }
+
+    let (cert_pem, key_pem, ca_pem) = match (cert_pem, key_pem, ca_pem) {
+        (Some(cert_pem), Some(key_pem), Some(ca_pem)) => (cert_pem, key_pem, ca_pem),
+        _ => return Ok(None),
+    };
+
+    let server_name = tls_settings
+        .get("serverName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    Ok(Some(ApiTlsMaterial {
+        cert_pem,
+        key_pem,
+        ca_pem,
+        server_name,
+    }))
+}
+
+/// Parse Remnawave/Xray API inbound `streamSettings.tlsSettings` PEM material.
+pub fn extract_tls_material_from_inbound(
+    inbound: &InboundObject,
+) -> std::io::Result<Option<ApiTlsMaterial>> {
+    let Some(stream) = inbound.stream_settings.as_ref() else {
+        return Ok(None);
+    };
+    if !stream
+        .security
+        .as_deref()
+        .is_some_and(|value| eq_ignore_ascii_case(value, "tls"))
+    {
+        return Ok(None);
+    }
+    let Some(tls_settings) = stream.extra.get("tlsSettings") else {
+        return Ok(None);
+    };
+    parse_tls_settings_certificates(tls_settings)
+}
+
+/// Extract API TLS material from the routed dokodemo-door inbound (if present).
+pub fn extract_api_inbound_tls_material(
+    config: &XrayConfig,
+) -> std::io::Result<Option<ApiTlsMaterial>> {
+    let Some(api) = config.api.as_ref() else {
+        return Ok(None);
+    };
+    let Some(inbound) = find_api_inbound(config, api.tag.as_str()) else {
+        return Ok(None);
+    };
+    extract_tls_material_from_inbound(inbound)
+}
+
+/// True when the resolved API listen address is localhost-only (`127.0.0.1:*`).
+pub fn is_localhost_api_listen(listen: &str) -> bool {
+    listen.trim().starts_with("127.0.0.1:")
 }
 
 /// Resolved API listen address and optional dokodemo-door inbound tag (when not using `api.listen`).
@@ -834,6 +981,11 @@ pub async fn load_xray_config_from_source(source: &str) -> std::io::Result<XrayC
 
 async fn fetch_http_unix_config(source: &str) -> std::io::Result<String> {
     let (socket_path, request_target) = parse_http_unix_source(source)?;
+    crate::startup_log::eprintln_bootstrap(format!(
+        "http+unix config fetch: socket={} path={}",
+        socket_path,
+        redact_config_source(request_target)
+    ));
     let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
         std::io::Error::new(
             e.kind(),
@@ -1177,85 +1329,250 @@ pub fn reality_mldsa65_seed(
     crate::reality::decode_mldsa65_seed(settings.mldsa65_seed.as_deref(), private_key)
 }
 
-pub fn first_reality_inbound_runtime(
-    config: &XrayConfig,
-) -> std::io::Result<RealityInboundRuntime> {
-    let vless_reality_inbounds = find_vless_reality_inbounds(config);
-    let inbounds = find_reality_inbounds(config);
-    let inbound = inbounds.first().ok_or_else(|| {
-        if let Some(inbound) = vless_reality_inbounds.first() {
-            if let Err(err) = validate_vless_reality_inbound_stream(inbound) {
-                return err;
-            }
-        }
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "no supported VLESS TCP REALITY inbound found",
-        )
-    })?;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RealityMergeKey {
+    listen_addr: String,
+    private_key: String,
+    dest_addr: String,
+    vless_decryption: String,
+    max_time_diff: u64,
+    min_client_ver: Option<String>,
+    max_client_ver: Option<String>,
+    show: bool,
+    mldsa65_present: bool,
+}
 
-    if inbounds.len() > 1 {
-        warn!(
-            inbound_count = inbounds.len(),
-            selected_tag = ?inbound.tag,
-            "multiple supported VLESS TCP REALITY inbounds found; using the first match"
-        );
-    }
+struct ParsedRealityInbound {
+    tag: Option<String>,
+    protocol: Option<String>,
+    merge_key: RealityMergeKey,
+    server_names: Vec<String>,
+    short_ids: Vec<Vec<u8>>,
+    mldsa65_seed: Option<crate::reality::Mldsa65Seed>,
+    clients: Vec<VlessClientObject>,
+    fallbacks: Vec<FallbackConfig>,
+}
 
+fn parse_reality_inbound_for_merge(
+    inbound: &InboundObject,
+) -> std::io::Result<ParsedRealityInbound> {
     let stream = inbound.stream_settings.as_ref().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "VLESS REALITY inbound is missing streamSettings",
         )
     })?;
-
     let settings = get_inbound_reality_settings(inbound).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "reality inbound is missing realitySettings",
         )
     })?;
-
     validate_reality_inbound_config_policy(stream, settings)?;
-
-    let vless_settings = inbound_vless_settings(inbound)?;
-    let (vless_clients, vless_decryption, vless_fallbacks) = match vless_settings {
-        Some(settings) => (
-            settings.clients,
-            settings
-                .decryption
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| "none".to_string()),
-            settings.fallbacks,
-        ),
-        None => (Vec::new(), "none".to_string(), Vec::new()),
-    };
 
     let private_key = reality_private_key(settings)?.to_owned();
     crate::reality::validate_reality_private_key_b64(&private_key)?;
     let mldsa65_seed = reality_mldsa65_seed(settings, &private_key)?;
-    crate::vless::validate_vless_client_flows(&vless_clients)?;
-    crate::vless::build_vless_clients(&vless_clients).map(|_| ())?;
 
-    Ok(RealityInboundRuntime {
+    let vless_settings = inbound_vless_settings(inbound)?;
+    let (clients, vless_decryption, fallbacks) = match vless_settings {
+        Some(settings) => {
+            let mut clients = settings.clients;
+            crate::vless::apply_inbound_vless_client_flows(
+                &mut clients,
+                settings.flow.as_deref(),
+                stream.security.as_deref(),
+                stream.network.as_deref(),
+            )?;
+            (
+                clients,
+                settings
+                    .decryption
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "none".to_string()),
+                settings.fallbacks,
+            )
+        }
+        None => (Vec::new(), "none".to_string(), Vec::new()),
+    };
+
+    Ok(ParsedRealityInbound {
         tag: inbound.tag.clone(),
         protocol: inbound.protocol.clone(),
-        listen_addr: inbound_listen_addr(inbound)?,
-        dest_addr: reality_dest_addr(settings)?,
-        private_key,
+        merge_key: RealityMergeKey {
+            listen_addr: inbound_listen_addr(inbound)?,
+            private_key,
+            dest_addr: reality_dest_addr(settings)?,
+            vless_decryption: vless_decryption.clone(),
+            max_time_diff: settings.max_time_diff,
+            min_client_ver: settings.min_client_ver.clone(),
+            max_client_ver: settings.max_client_ver.clone(),
+            show: settings.show,
+            mldsa65_present: mldsa65_seed.is_some(),
+        },
         server_names: reality_server_names(settings)?,
         short_ids: reality_short_ids(settings)?,
-        max_time_diff: settings.max_time_diff,
-        min_client_ver: settings.min_client_ver.clone(),
-        max_client_ver: settings.max_client_ver.clone(),
-        show: settings.show,
         mldsa65_seed,
-        vless_clients,
-        vless_decryption,
-        vless_fallbacks,
+        clients,
+        fallbacks,
     })
+}
+
+fn merge_server_names(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut merged = Vec::new();
+    for name in values {
+        if !merged.iter().any(|existing| existing == &name) {
+            merged.push(name);
+        }
+    }
+    merged
+}
+
+fn merge_short_ids(values: impl IntoIterator<Item = Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut merged = Vec::new();
+    for short_id in values {
+        if !merged.iter().any(|existing| existing == &short_id) {
+            merged.push(short_id);
+        }
+    }
+    merged
+}
+
+fn log_supported_reality_inbound(parsed: &ParsedRealityInbound) {
+    info!(
+        inbound_tag = ?parsed.tag,
+        listen = %parsed.merge_key.listen_addr,
+        server_name_count = parsed.server_names.len(),
+        user_count = parsed.clients.len(),
+        flow_distribution = %crate::vless::format_vless_flow_distribution(
+            &crate::vless::vless_flow_distribution(&parsed.clients)
+        ),
+        "supported VLESS REALITY inbound"
+    );
+}
+
+fn build_reality_inbound_runtime_from_group(
+    group: &[ParsedRealityInbound],
+) -> std::io::Result<RealityInboundRuntime> {
+    let primary = &group[0];
+    let mut merged_tags: Vec<String> = group
+        .iter()
+        .filter_map(|inbound| inbound.tag.clone())
+        .collect();
+    if merged_tags.is_empty() {
+        merged_tags.push("reality-in".to_string());
+    }
+    if group.len() > 1 {
+        info!(
+            merged_inbound_count = group.len(),
+            merged_tags = ?merged_tags,
+            listen = %primary.merge_key.listen_addr,
+            "merging compatible VLESS REALITY inbounds on shared listen address"
+        );
+    }
+
+    let merged_clients = crate::vless::merge_vless_client_objects(
+        group.iter().flat_map(|inbound| inbound.clients.clone()),
+    )?;
+    crate::vless::validate_vless_client_flows(&merged_clients)?;
+    crate::vless::build_vless_clients(&merged_clients).map(|_| ())?;
+
+    let merged_server_names = merge_server_names(
+        group
+            .iter()
+            .flat_map(|inbound| inbound.server_names.clone()),
+    );
+    let merged_short_ids =
+        merge_short_ids(group.iter().flat_map(|inbound| inbound.short_ids.clone()));
+
+    info!(
+        inbound_tag = ?primary.tag,
+        merged_tags = ?merged_tags,
+        listen = %primary.merge_key.listen_addr,
+        user_count = merged_clients.len(),
+        flow_distribution = %crate::vless::format_vless_flow_distribution(
+            &crate::vless::vless_flow_distribution(&merged_clients)
+        ),
+        "selected VLESS REALITY inbound runtime"
+    );
+
+    Ok(RealityInboundRuntime {
+        tag: primary.tag.clone(),
+        merged_inbound_tags: merged_tags,
+        protocol: primary.protocol.clone(),
+        listen_addr: primary.merge_key.listen_addr.clone(),
+        dest_addr: primary.merge_key.dest_addr.clone(),
+        private_key: primary.merge_key.private_key.clone(),
+        server_names: merged_server_names,
+        short_ids: merged_short_ids,
+        max_time_diff: primary.merge_key.max_time_diff,
+        min_client_ver: primary.merge_key.min_client_ver.clone(),
+        max_client_ver: primary.merge_key.max_client_ver.clone(),
+        show: primary.merge_key.show,
+        mldsa65_seed: primary.mldsa65_seed.clone(),
+        vless_clients: merged_clients,
+        vless_decryption: primary.merge_key.vless_decryption.clone(),
+        vless_fallbacks: primary.fallbacks.clone(),
+    })
+}
+
+/// All supported VLESS REALITY runtime listeners (one per compatible merge group).
+pub fn reality_inbound_runtimes(
+    config: &XrayConfig,
+) -> std::io::Result<Vec<RealityInboundRuntime>> {
+    let inbounds = find_reality_inbounds(config);
+    if inbounds.is_empty() {
+        let vless_reality_inbounds = find_vless_reality_inbounds(config);
+        if let Some(inbound) = vless_reality_inbounds.first() {
+            if let Err(err) = validate_vless_reality_inbound_stream(inbound) {
+                return Err(err);
+            }
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no supported VLESS TCP REALITY inbound found",
+        ));
+    }
+
+    let mut parsed_inbounds = Vec::with_capacity(inbounds.len());
+    for inbound in inbounds {
+        parsed_inbounds.push(parse_reality_inbound_for_merge(inbound)?);
+    }
+
+    for parsed in &parsed_inbounds {
+        log_supported_reality_inbound(parsed);
+    }
+
+    let mut groups: HashMap<RealityMergeKey, Vec<ParsedRealityInbound>> = HashMap::new();
+    for parsed in parsed_inbounds {
+        groups
+            .entry(parsed.merge_key.clone())
+            .or_default()
+            .push(parsed);
+    }
+
+    let mut runtimes = Vec::with_capacity(groups.len());
+    for group in groups.into_values() {
+        runtimes.push(build_reality_inbound_runtime_from_group(&group)?);
+    }
+    runtimes.sort_by(|left, right| left.listen_addr.cmp(&right.listen_addr));
+    Ok(runtimes)
+}
+
+pub fn first_reality_inbound_runtime(
+    config: &XrayConfig,
+) -> std::io::Result<RealityInboundRuntime> {
+    reality_inbound_runtimes(config)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no supported VLESS TCP REALITY inbound found",
+            )
+        })
 }
 
 #[cfg(test)]
@@ -2680,6 +2997,136 @@ mod tests {
     }
 
     #[test]
+    fn is_remnawave_http_unix_detects_internal_get_config() {
+        let source = "http+unix:///run/a.sock/internal/get-config?token=secret";
+        assert!(is_remnawave_http_unix_config_source(source));
+        assert!(!is_remnawave_http_unix_config_source("/etc/xray.json"));
+        assert!(!is_remnawave_http_unix_config_source(
+            "http+unix:///run/a.sock/other/path"
+        ));
+    }
+
+    #[test]
+    fn parse_api_inbound_tls_settings_from_remnawave_shape() {
+        let cert_lines = [
+            "-----BEGIN CERTIFICATE-----",
+            "TESTCERT",
+            "-----END CERTIFICATE-----",
+        ];
+        let key_lines = [
+            "-----BEGIN PRIVATE KEY-----",
+            "TESTKEY",
+            "-----END PRIVATE KEY-----",
+        ];
+        let inbound: InboundObject = serde_json::from_value(serde_json::json!({
+            "tag": "REMNAWAVE_API_INBOUND",
+            "listen": "127.0.0.1",
+            "port": 61000,
+            "protocol": "dokodemo-door",
+            "settings": { "address": "127.0.0.1" },
+            "streamSettings": {
+                "security": "tls",
+                "tlsSettings": {
+                    "serverName": "internal.remnawave.local",
+                    "certificates": [
+                        {
+                            "certificate": cert_lines,
+                            "key": key_lines
+                        },
+                        {
+                            "usage": "verify",
+                            "certificate": cert_lines
+                        }
+                    ]
+                }
+            }
+        }))
+        .expect("parse inbound");
+        let material = extract_tls_material_from_inbound(&inbound)
+            .expect("extract")
+            .expect("material");
+        assert_eq!(
+            String::from_utf8_lossy(&material.cert_pem),
+            "-----BEGIN CERTIFICATE-----\nTESTCERT\n-----END CERTIFICATE-----"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&material.key_pem),
+            "-----BEGIN PRIVATE KEY-----\nTESTKEY\n-----END PRIVATE KEY-----"
+        );
+        assert_eq!(
+            material.server_name.as_deref(),
+            Some("internal.remnawave.local")
+        );
+    }
+
+    #[test]
+    fn merge_compatible_reality_inbounds_combines_users_and_flow() {
+        let config: XrayConfig = serde_json::from_str(include_str!(
+            "../../tests/fixtures/remna/remnawave_vless_reality_vision_users.json"
+        ))
+        .expect("parse fixture");
+        let runtime = first_reality_inbound_runtime(&config).expect("runtime");
+        assert_eq!(runtime.merged_inbound_tags.len(), 2);
+        assert_eq!(runtime.vless_clients.len(), 3);
+        let distribution = crate::vless::vless_flow_distribution(&runtime.vless_clients);
+        assert_eq!(distribution.get("xtls-rprx-vision").copied(), Some(2));
+    }
+
+    #[test]
+    fn reality_inbound_runtimes_serves_two_listen_addresses() {
+        let config: XrayConfig = serde_json::from_str(include_str!(
+            "../../tests/fixtures/remna/remnawave_two_reality_inbounds_flow.json"
+        ))
+        .expect("parse fixture");
+        let runtimes = reality_inbound_runtimes(&config).expect("runtimes");
+        assert_eq!(runtimes.len(), 2);
+        let listens: Vec<_> = runtimes
+            .iter()
+            .map(|runtime| runtime.listen_addr.as_str())
+            .collect();
+        assert!(listens.contains(&"0.0.0.0:443"));
+        assert!(listens.contains(&"0.0.0.0:8444"));
+    }
+
+    #[test]
+    fn inbound_settings_flow_applies_to_clients_missing_flow() {
+        let json = format!(
+            r#"{{
+            "inbounds": [{{
+                "port": 443,
+                "protocol": "vless",
+                "settings": {{
+                    "flow": "xtls-rprx-vision",
+                    "clients": [{{"id": "00000000-0000-0000-0000-000000000001"}}],
+                    "decryption": "none"
+                }},
+                "streamSettings": {{
+                    "security": "reality",
+                    "realitySettings": {{
+                        "dest": "example.com:443",
+                        "serverNames": ["example.com"],
+                        "privateKey": "{TEST_REALITY_PRIVATE_KEY}",
+                        "shortIds": [""]
+                    }}
+                }}
+            }}]
+        }}"#
+        );
+        let config: XrayConfig = serde_json::from_str(&json).unwrap();
+        let runtime = first_reality_inbound_runtime(&config).expect("runtime");
+        assert_eq!(
+            runtime.vless_clients[0].flow.as_deref(),
+            Some("xtls-rprx-vision")
+        );
+    }
+
+    #[test]
+    fn localhost_api_listen_detection() {
+        assert!(is_localhost_api_listen("127.0.0.1:61000"));
+        assert!(!is_localhost_api_listen("0.0.0.0:61000"));
+    }
+
+    #[test]
     fn reality_inbound_runtime_debug_does_not_expose_secrets() {
         let seed =
             crate::reality::decode_mldsa65_seed(Some(TEST_MLDSA65_SEED), TEST_REALITY_PRIVATE_KEY)
@@ -2687,6 +3134,7 @@ mod tests {
                 .unwrap();
         let runtime = RealityInboundRuntime {
             tag: Some("reality-in".to_string()),
+            merged_inbound_tags: vec!["reality-in".to_string()],
             protocol: Some("vless".to_string()),
             listen_addr: "127.0.0.1:443".to_string(),
             dest_addr: "www.example.com:443".to_string(),

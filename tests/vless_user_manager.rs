@@ -31,6 +31,25 @@ fn vless_request(user_id: uuid::Uuid) -> VlessRequest {
 }
 
 #[test]
+fn add_user_preserves_vision_flow() {
+    let manager = static_manager();
+    manager
+        .add_user(ManagedUser {
+            id: DYNAMIC_ID,
+            email: "vision@example.test".to_string(),
+            flow: Some("xtls-rprx-vision".to_string()),
+            level: None,
+            expiry_secs: None,
+        })
+        .expect("add user");
+
+    let auth = manager
+        .authenticate(&vless_request(DYNAMIC_ID))
+        .expect("auth");
+    assert_eq!(auth.flow.as_deref(), Some("xtls-rprx-vision"));
+}
+
+#[test]
 fn static_user_authenticates_by_uuid() {
     let manager = static_manager();
     let auth = manager
@@ -94,6 +113,25 @@ fn duplicate_uuid_is_rejected() {
         })
         .unwrap_err();
     assert!(matches!(err, UserManagerError::DuplicateUuid { .. }));
+}
+
+#[test]
+fn add_user_updates_existing_user_flow() {
+    let manager = static_manager();
+    manager
+        .add_user(ManagedUser {
+            id: STATIC_ID,
+            email: "static@example.test".to_string(),
+            flow: Some("xtls-rprx-vision".to_string()),
+            level: None,
+            expiry_secs: None,
+        })
+        .expect("upsert flow");
+
+    let auth = manager
+        .authenticate(&vless_request(STATIC_ID))
+        .expect("auth");
+    assert_eq!(auth.flow.as_deref(), Some("xtls-rprx-vision"));
 }
 
 #[test]

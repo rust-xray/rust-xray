@@ -2,7 +2,7 @@ use rust_xray::api::proto::app::proxyman::command::handler_service_client::Handl
 use rust_xray::api::proto::app::proxyman::command::AlterInboundRequest;
 use rust_xray::api::proto::app::stats::command::stats_service_client::StatsServiceClient;
 use rust_xray::api::proto::app::stats::command::{GetStatsRequest, SysStatsRequest};
-use rust_xray::api::server::{parse_enabled_services, serve_grpc_on, ApiService};
+use rust_xray::api::server::{parse_enabled_services, serve_grpc_on, ApiService, ApiTransportMode};
 use rust_xray::runtime::InboundUserManagers;
 use rust_xray::stats::StatsRegistry;
 use tokio::net::TcpListener;
@@ -18,7 +18,14 @@ async fn grpc_stats_get_stats_returns_not_found_for_missing_counter() {
     let registry = std::sync::Arc::new(StatsRegistry::new());
     let inbound_users = std::sync::Arc::new(InboundUserManagers::new());
     tokio::spawn(async move {
-        let _ = serve_grpc_on(listener, services, registry, inbound_users).await;
+        let _ = serve_grpc_on(
+            listener,
+            services,
+            registry,
+            inbound_users,
+            ApiTransportMode::Plaintext,
+        )
+        .await;
     });
 
     let channel = Endpoint::from_shared(format!("http://{addr}"))
@@ -46,7 +53,14 @@ async fn grpc_stats_get_sys_stats_returns_minimal_response() {
     let registry = std::sync::Arc::new(StatsRegistry::new());
     let inbound_users = std::sync::Arc::new(InboundUserManagers::new());
     tokio::spawn(async move {
-        let _ = serve_grpc_on(listener, services, registry, inbound_users).await;
+        let _ = serve_grpc_on(
+            listener,
+            services,
+            registry,
+            inbound_users,
+            ApiTransportMode::Plaintext,
+        )
+        .await;
     });
 
     let channel = Endpoint::from_shared(format!("http://{addr}"))
@@ -92,7 +106,14 @@ async fn grpc_api_server_mounts_reflection_stats_and_handler() {
     let registry = std::sync::Arc::new(StatsRegistry::new());
     let inbound_users = std::sync::Arc::new(InboundUserManagers::new());
     tokio::spawn(async move {
-        let _ = serve_grpc_on(listener, services, registry, inbound_users).await;
+        let _ = serve_grpc_on(
+            listener,
+            services,
+            registry,
+            inbound_users,
+            ApiTransportMode::Plaintext,
+        )
+        .await;
     });
 
     let channel = Endpoint::from_shared(format!("http://{addr}"))

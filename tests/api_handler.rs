@@ -9,7 +9,7 @@ use rust_xray::api::proto::app::proxyman::command::{
 use rust_xray::api::proto::common::protocol::User;
 use rust_xray::api::proto::common::serial::TypedMessage;
 use rust_xray::api::proto::proxy::vless::Account;
-use rust_xray::api::server::{serve_grpc_on, ApiService};
+use rust_xray::api::server::{serve_grpc_on, ApiService, ApiTransportMode};
 use rust_xray::config::XrayConfig;
 use rust_xray::runtime::InboundUserManagers;
 use rust_xray::stats::{user_traffic_uplink, StatsRegistry, StatsState};
@@ -49,6 +49,7 @@ async fn spawn_handler_server(
             vec![ApiService::Handler],
             stats_registry,
             inbound_users,
+            ApiTransportMode::Plaintext,
         )
         .await;
     });

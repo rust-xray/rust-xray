@@ -11,6 +11,7 @@ pub mod outbound;
 pub mod proxy;
 pub mod reality;
 pub mod runtime;
+pub mod startup_log;
 pub mod stats;
 pub mod tls;
 pub mod vless;

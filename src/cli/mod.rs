@@ -331,6 +331,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_direct_c_flag_with_format_json() {
+        let cmd = parse(&["-c", "/tmp/c.json", "-format", "json"]).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Run(RunOptions {
+                config: "/tmp/c.json".to_string(),
+                format: Some("json".to_string()),
+            })
+        );
+    }
+
+    #[test]
     fn parse_shorthand_c_flag() {
         let cmd = parse(&["run", "-c", "/tmp/c.json"]).unwrap();
         assert_eq!(

@@ -7,8 +7,10 @@ pub mod user_manager;
 pub(crate) mod vision;
 
 pub use config::{
-    build_vless_clients, parse_vless_user_id, validate_vless_client_flow,
-    validate_vless_client_flows, VlessClient,
+    apply_inbound_vless_client_flows, build_vless_clients, format_vless_flow_distribution,
+    merge_vless_client_objects, normalize_vless_flow, parse_vless_user_id,
+    resolve_inbound_default_vless_flow, validate_vless_client_flow, validate_vless_client_flows,
+    vless_flow_distribution, VlessClient,
 };
 pub use fallback::{
     build_fallback_context, build_proxy_protocol_v1, build_proxy_protocol_v2,
@@ -24,6 +26,6 @@ pub use inbound::{
 };
 pub use protocol::encode_vless_response_header;
 pub use user_manager::{
-    managed_user_from_vless_account, ManagedUser, UserManagerError, VlessAuthenticatedClient,
-    VlessUserManager,
+    managed_user_from_vless_account, user_id_hint, ManagedUser, UserManagerError,
+    VlessAuthenticatedClient, VlessUserManager,
 };

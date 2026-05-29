@@ -5,6 +5,7 @@ use rust_xray::api::proto::app::stats::command::stats_service_client::StatsServi
 use rust_xray::api::proto::app::stats::command::SysStatsRequest;
 use rust_xray::api::server::{
     bind_api_listener, parse_api_grpc_listen_addr, parse_enabled_services, serve_grpc_on,
+    ApiTransportMode,
 };
 use rust_xray::config::{api_listen_addr, load_xray_config_from_file};
 use rust_xray::runtime::InboundUserManagers;
@@ -46,7 +47,14 @@ async fn get_sys_stats_on_plaintext_api_listen() {
     let registry = Arc::new(StatsRegistry::new());
     let inbound_users = Arc::new(InboundUserManagers::new());
     tokio::spawn(async move {
-        let _ = serve_grpc_on(listener, services, registry, inbound_users).await;
+        let _ = serve_grpc_on(
+            listener,
+            services,
+            registry,
+            inbound_users,
+            ApiTransportMode::Plaintext,
+        )
+        .await;
     });
 
     let channel = Endpoint::from_shared(format!("http://{addr}"))

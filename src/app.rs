@@ -8,10 +8,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::codec::{Codec, Reader};
 use crate::config::{
-    api_dokodemo_inbound_tag, config_source_kind, first_reality_inbound_runtime,
-    format_redacted_run_command, load_xray_config_from_source, reality_mldsa65_runtime_mode,
-    redact_config_source, resolve_api_listen, RealityInboundRuntime,
-    RealityMldsa65RuntimeMode, XrayConfig,
+    api_dokodemo_inbound_tag, config_source_kind, format_redacted_run_command,
+    load_xray_config_from_source, reality_inbound_runtimes, reality_mldsa65_runtime_mode,
+    redact_config_source, resolve_api_listen, RealityInboundRuntime, RealityMldsa65RuntimeMode,
+    XrayConfig,
 };
 use crate::protocol::structs::ClientHelloPayload;
 use crate::proxy::relay_fallback_with_xver;
@@ -30,11 +30,15 @@ use crate::vless::{
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
 const NON_TLS_PREAMBLE_READ_LIMIT: usize = 4096;
 
-struct RuntimeConfig {
+struct InboundListenerConfig {
     reality: RealityInboundRuntime,
     user_manager: Arc<VlessUserManager>,
-    inbound_users: Arc<InboundUserManagers>,
     stats: Option<Arc<StatsState>>,
+}
+
+struct ServerRuntimeConfig {
+    inbounds: Vec<InboundListenerConfig>,
+    inbound_users: Arc<InboundUserManagers>,
 }
 
 enum InboundPreamble {
@@ -50,7 +54,7 @@ enum InboundPreamble {
 
 async fn relay_vless_fallback_with_log(
     client: TcpStream,
-    config: &RuntimeConfig,
+    config: &InboundListenerConfig,
     initial_client_bytes: &[u8],
     hello: Option<&ClientHelloPayload>,
     reason: &str,
@@ -127,7 +131,10 @@ async fn read_inbound_preamble(mut stream: TcpStream) -> std::io::Result<Inbound
     ))
 }
 
-async fn handle_client(stream: TcpStream, config: Arc<RuntimeConfig>) -> std::io::Result<()> {
+async fn handle_client(
+    stream: TcpStream,
+    config: Arc<InboundListenerConfig>,
+) -> std::io::Result<()> {
     let peer = stream.peer_addr().ok();
 
     match read_inbound_preamble(stream).await {
@@ -161,7 +168,7 @@ async fn handle_client(stream: TcpStream, config: Arc<RuntimeConfig>) -> std::io
 
 async fn handle_tls_client(
     stream: TcpStream,
-    config: Arc<RuntimeConfig>,
+    config: Arc<InboundListenerConfig>,
     record: TlsClientHelloRecord,
     peer: Option<std::net::SocketAddr>,
 ) -> std::io::Result<()> {
@@ -244,7 +251,7 @@ async fn handle_tls_client(
     }
 }
 
-fn validate_reality_runtime_feature_gates(config: &RuntimeConfig) -> std::io::Result<()> {
+fn validate_reality_runtime_feature_gates(config: &InboundListenerConfig) -> std::io::Result<()> {
     match reality_mldsa65_runtime_mode(&config.reality) {
         RealityMldsa65RuntimeMode::Disabled => Ok(()),
         RealityMldsa65RuntimeMode::Enabled => Ok(()),
@@ -252,92 +259,148 @@ fn validate_reality_runtime_feature_gates(config: &RuntimeConfig) -> std::io::Re
 }
 
 #[cfg(test)]
-fn runtime_config_from_xray(xray: &XrayConfig) -> std::io::Result<RuntimeConfig> {
-    load_runtime_config(xray)
+fn runtime_config_from_xray(xray: &XrayConfig) -> std::io::Result<InboundListenerConfig> {
+    load_runtime_config(xray, Arc::new(StatsRegistry::new()))?
+        .inbounds
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no supported VLESS TCP REALITY inbound found",
+            )
+        })
 }
 
-fn load_runtime_config(xray: &XrayConfig) -> std::io::Result<RuntimeConfig> {
-    let reality = first_reality_inbound_runtime(xray)?;
-    let inbound_tag = reality
-        .tag
-        .clone()
-        .filter(|tag| !tag.is_empty())
-        .unwrap_or_else(|| "reality-in".to_string());
-    let vless_clients = build_vless_clients(&reality.vless_clients)?;
-    let user_manager = Arc::new(VlessUserManager::new(inbound_tag.clone(), vless_clients));
+fn load_runtime_config(
+    xray: &XrayConfig,
+    stats_registry: Arc<StatsRegistry>,
+) -> std::io::Result<ServerRuntimeConfig> {
+    let runtimes = reality_inbound_runtimes(xray)?;
     let inbound_users = Arc::new(InboundUserManagers::new());
-    inbound_users.register(Arc::clone(&user_manager));
-    let stats_state = StatsState::from_xray_config(xray, Some(inbound_tag));
-    let stats = if stats_state.enabled() {
-        Some(Arc::new(stats_state))
-    } else {
-        None
-    };
-    let config = RuntimeConfig {
-        reality,
-        user_manager,
-        inbound_users,
-        stats,
-    };
-    validate_reality_runtime_feature_gates(&config)?;
+    let stats_enabled = StatsState::from_xray_config(xray, None).enabled();
+    let mut inbounds = Vec::with_capacity(runtimes.len());
 
-    if config.reality.protocol.as_deref() == Some("vless") {
-        info!(tag = ?config.reality.tag, "using VLESS REALITY inbound");
-    } else {
-        warn!(
-            tag = ?config.reality.tag,
-            protocol = ?config.reality.protocol,
-            "using REALITY inbound with non-vless protocol"
-        );
-    }
+    for reality in runtimes {
+        let inbound_tag = reality
+            .tag
+            .clone()
+            .filter(|tag| !tag.is_empty())
+            .unwrap_or_else(|| "reality-in".to_string());
+        let vless_clients = build_vless_clients(&reality.vless_clients)?;
+        let user_manager = Arc::new(VlessUserManager::new(inbound_tag.clone(), vless_clients));
+        for tag in &reality.merged_inbound_tags {
+            inbound_users.register_tag(tag, Arc::clone(&user_manager));
+        }
+        if reality.merged_inbound_tags.is_empty() {
+            inbound_users.register(Arc::clone(&user_manager));
+        }
+        let stats = if stats_enabled {
+            Some(Arc::new(StatsState::from_xray_config_with_registry(
+                xray,
+                Arc::clone(&stats_registry),
+                inbound_tag.clone(),
+            )))
+        } else {
+            None
+        };
+        let listener_config = InboundListenerConfig {
+            reality,
+            user_manager,
+            stats,
+        };
+        validate_reality_runtime_feature_gates(&listener_config)?;
 
-    if config.reality.show {
-        info!("REALITY show mode enabled in config");
-    }
+        if listener_config.reality.protocol.as_deref() == Some("vless") {
+            info!(tag = ?listener_config.reality.tag, "using VLESS REALITY inbound");
+        } else {
+            warn!(
+                tag = ?listener_config.reality.tag,
+                protocol = ?listener_config.reality.protocol,
+                "using REALITY inbound with non-vless protocol"
+            );
+        }
 
-    info!(
-        listen = %config.reality.listen_addr,
-        dest = %config.reality.dest_addr,
-        server_names = ?config.reality.server_names,
-        short_id_count = config.reality.short_ids.len(),
-        max_time_diff = config.reality.max_time_diff,
-        vless_client_count = config.user_manager.user_count(),
-        vless_fallback_count = config.reality.vless_fallbacks.len(),
-        "loaded REALITY inbound settings"
-    );
+        if listener_config.reality.show {
+            info!("REALITY show mode enabled in config");
+        }
 
-    for (index, fallback) in config.reality.vless_fallbacks.iter().enumerate() {
         info!(
-            index,
-            name = fallback.name.as_deref().unwrap_or(""),
-            alpn = fallback.alpn.as_deref().unwrap_or(""),
-            path = fallback.path.as_deref().unwrap_or(""),
-            dest = %fallback.dest.addr,
-            xver = fallback.xver,
-            "VLESS fallback entry"
+            listen = %listener_config.reality.listen_addr,
+            dest = %listener_config.reality.dest_addr,
+            server_names = ?listener_config.reality.server_names,
+            short_id_count = listener_config.reality.short_ids.len(),
+            max_time_diff = listener_config.reality.max_time_diff,
+            vless_client_count = listener_config.user_manager.user_count(),
+            vless_flow_distribution = %listener_config.user_manager.flow_distribution_log_label(),
+            merged_inbound_tags = ?listener_config.reality.merged_inbound_tags,
+            vless_fallback_count = listener_config.reality.vless_fallbacks.len(),
+            "loaded REALITY inbound settings"
         );
+
+        for (index, fallback) in listener_config.reality.vless_fallbacks.iter().enumerate() {
+            info!(
+                index,
+                name = fallback.name.as_deref().unwrap_or(""),
+                alpn = fallback.alpn.as_deref().unwrap_or(""),
+                path = fallback.path.as_deref().unwrap_or(""),
+                dest = %fallback.dest.addr,
+                xver = fallback.xver,
+                "VLESS fallback entry"
+            );
+        }
+
+        inbounds.push(listener_config);
     }
 
-    Ok(config)
+    Ok(ServerRuntimeConfig {
+        inbounds,
+        inbound_users,
+    })
 }
 
-pub async fn main_entry() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+fn init_tracing(command: &Command) {
+    let default_level = match command {
+        Command::Version => "warn",
+        _ => "info",
+    };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+}
 
-    let command = match cli::parse_args(std::env::args()) {
+fn stage_error(stage: &str, err: std::io::Error) -> std::io::Error {
+    crate::startup_log::eprintln_stage(stage, &err);
+    std::io::Error::new(err.kind(), format!("{stage}: {err}"))
+}
+
+pub async fn main_entry() -> std::io::Result<()> {
+    let raw_args: Vec<String> = std::env::args().collect();
+
+    let command = match cli::parse_args(raw_args.iter().map(|s| s.as_str())) {
         Ok(command) => command,
         Err(err) => {
-            eprintln!("{err}");
-            std::process::exit(2);
+            if !matches!(raw_args.get(1).map(String::as_str), Some("version")) {
+                crate::startup_log::eprintln_bootstrap("main_entry start");
+                crate::startup_log::eprintln_bootstrap(format!(
+                    "argv: {}",
+                    crate::startup_log::redact_argv(&raw_args)
+                ));
+            }
+            crate::startup_log::eprintln_fatal_message(err.to_string());
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                err.to_string(),
+            ));
         }
     };
 
-    if let Err(err) = dispatch(command).await {
-        error!(error = %err, "server error");
-        std::process::exit(1);
+    if let Command::Run(ref opts) = command {
+        crate::startup_log::log_server_bootstrap(&raw_args, opts);
     }
+
+    init_tracing(&command);
+    dispatch(command).await
 }
 
 async fn dispatch(command: Command) -> std::io::Result<()> {
@@ -346,40 +409,45 @@ async fn dispatch(command: Command) -> std::io::Result<()> {
             cli::print_version();
             Ok(())
         }
-        Command::Api(api) => {
-            if let Err(err) = api::execute(api).await {
-                eprintln!("{err}");
-                std::process::exit(1);
-            }
-            Ok(())
-        }
+        Command::Api(api) => api::execute(api).await.map_err(|err| {
+            stage_error("api command failed", std::io::Error::other(err.to_string()))
+        }),
         Command::Run(opts) => run_server(opts).await,
     }
 }
 
 async fn start_xray_api_server(
+    config_source: &str,
     xray: &XrayConfig,
     inbound_users: Arc<InboundUserManagers>,
     stats_registry: Arc<StatsRegistry>,
-) -> std::io::Result<()> {
+) -> std::io::Result<tokio::task::JoinHandle<std::io::Result<()>>> {
     let Some(api) = xray.api.as_ref() else {
         info!("Xray API disabled (no api block in config)");
-        return Ok(());
+        return Ok(tokio::spawn(async { Ok(()) }));
     };
 
     info!(api_tag = %api.tag, api_services = ?api.services, "Xray API starting");
 
-    let resolved = resolve_api_listen(xray)?;
+    let resolved = resolve_api_listen(xray)
+        .map_err(|err| stage_error("failed to resolve API listener", err))?;
     let Some((listen, listen_source, dokodemo_tag)) = resolved else {
-        return Err(std::io::Error::new(
+        let err = std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
                 "API services configured for tag {:?} but no api.listen and no routed dokodemo-door API inbound was found",
                 api.tag
             ),
-        ));
+        );
+        return Err(stage_error("failed to resolve API listener", err));
     };
 
+    crate::startup_log::eprintln_api_listen_resolved(
+        &listen,
+        listen_source.as_log_label(),
+        dokodemo_tag.as_deref(),
+        api.tag.as_str(),
+    );
     info!(
         api_listen = %listen,
         api_listen_source = listen_source.as_log_label(),
@@ -390,43 +458,41 @@ async fn start_xray_api_server(
     if let Some(tag) = dokodemo_tag.as_deref() {
         info!(
             inbound_tag = %tag,
-            "skipping normal inbound startup for API dokodemo-door inbound (gRPC API uses this listen/port)"
+            api_listen = %listen,
+            "skipping normal inbound startup for API dokodemo-door inbound (API gRPC owns this listen/port)"
         );
+        crate::startup_log::eprintln_bootstrap(format!(
+            "skipped inbound tag {tag} (API gRPC owns {listen})"
+        ));
     }
 
-    let transport = api::server::api_transport_mode_from_env()?;
+    let selection = api::server::resolve_api_transport_mode(api::server::ApiTransportContext {
+        config_source,
+        api_listen: Some(&listen),
+        xray: Some(xray),
+    })
+    .map_err(|err| stage_error("failed to configure API transport", err))?;
+    api::server::log_api_transport_selected(&selection);
+    let transport = selection.mode;
     info!(api_transport = transport.as_log_label(), "Xray API mode");
 
-    let enabled = match api::server::parse_enabled_services(&api.services) {
-        Ok(services) => services,
-        Err(err) => {
-            error!(error = %err, "Xray API services parse FAIL");
-            return Err(err);
-        }
-    };
+    let enabled = api::server::parse_enabled_services(&api.services)
+        .map_err(|err| stage_error("failed to parse API services", err))?;
 
-    let (listener, bound_addr) = match api::server::bind_api_listener(&listen).await {
-        Ok(bound) => {
-            info!(bind_addr = %bound.1, "Xray API bind OK");
-            bound
-        }
-        Err(err) => {
-            error!(error = %err, api_listen = %listen, "Xray API bind FAIL");
-            return Err(err);
-        }
-    };
+    let (listener, bound_addr) = api::server::bind_api_listener(&listen)
+        .await
+        .map_err(|err| stage_error("failed to bind Xray API", err))?;
+    info!(bind_addr = %bound_addr, "Xray API bind OK");
 
-    api::server::log_api_listener_ready(&listen, bound_addr, &api.services, transport);
+    api::server::log_api_listener_ready(&listen, bound_addr, &api.services, &transport);
+    crate::startup_log::eprintln_api_listening(&listen, transport.as_log_label());
 
-    tokio::spawn(async move {
-        if let Err(err) =
-            api::server::serve_grpc_on(listener, enabled, stats_registry, inbound_users).await
-        {
-            error!(error = %err, "Xray API server stopped");
-        }
+    let api_task = tokio::spawn(async move {
+        api::server::serve_grpc_on(listener, enabled, stats_registry, inbound_users, transport)
+            .await
     });
 
-    Ok(())
+    Ok(api_task)
 }
 
 async fn run_server(opts: RunOptions) -> std::io::Result<()> {
@@ -450,102 +516,180 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
         config_source_kind = source_kind,
         "loading Xray config"
     );
-    let xray = match load_xray_config_from_source(&config_source).await {
-        Ok(config) => {
+    let xray = load_xray_config_from_source(&config_source)
+        .await
+        .map_err(|err| stage_error("failed to load config source", err))?;
+    crate::startup_log::eprintln_bootstrap("config load success");
+    info!(
+        source = %redact_config_source(&config_source),
+        config_source_kind = source_kind,
+        inbound_count = xray.inbounds.len(),
+        outbound_count = xray.outbounds.len(),
+        has_api = xray.api.is_some(),
+        "config loaded OK"
+    );
+    if let Some(api) = xray.api.as_ref() {
+        info!(api_tag = %api.tag, api_services = ?api.services, "api block present");
+        if let Ok(Some((listen, source, tag))) = resolve_api_listen(&xray) {
+            crate::startup_log::eprintln_api_listen_resolved(
+                &listen,
+                source.as_log_label(),
+                tag.as_deref(),
+                api.tag.as_str(),
+            );
             info!(
-                source = %redact_config_source(&config_source),
-                config_source_kind = source_kind,
-                inbound_count = config.inbounds.len(),
-                outbound_count = config.outbounds.len(),
-                has_api = config.api.is_some(),
-                "config loaded OK"
+                api_listen = %listen,
+                api_listen_source = source.as_log_label(),
+                dokodemo_inbound_tag = ?tag,
+                "API listener resolved from config"
             );
-            if let Some(api) = config.api.as_ref() {
-                info!(api_tag = %api.tag, api_services = ?api.services, "api block present");
-                if let Ok(Some((listen, source, tag))) = resolve_api_listen(&config) {
-                    info!(
-                        api_listen = %listen,
-                        api_listen_source = source.as_log_label(),
-                        dokodemo_inbound_tag = ?tag,
-                        "API listener resolved from config"
-                    );
-                }
-            }
-            config
         }
-        Err(err) => {
-            error!(
-                error = %err,
-                source = %redact_config_source(&config_source),
-                config_source_kind = source_kind,
-                "config loaded FAIL"
-            );
-            return Err(err);
-        }
-    };
+    }
 
     let inbound_users = Arc::new(InboundUserManagers::new());
     let stats_state = StatsState::from_xray_config(&xray, api_dokodemo_inbound_tag(&xray));
     let stats_registry = Arc::clone(&stats_state.registry);
 
-    if let Err(err) = start_xray_api_server(&xray, Arc::clone(&inbound_users), stats_registry).await
-    {
-        error!(error = %err, "Xray API startup FAIL");
-        return Err(err);
-    }
+    let mut api_task = start_xray_api_server(
+        &config_source,
+        &xray,
+        Arc::clone(&inbound_users),
+        Arc::clone(&stats_registry),
+    )
+    .await?;
 
     info!("loading REALITY runtime");
-    let config = match load_runtime_config(&xray) {
-        Ok(config) => {
-            info!(
-                listen = %config.reality.listen_addr,
-                tag = ?config.reality.tag,
-                "REALITY runtime loaded OK"
-            );
-            config
+    let server_config = load_runtime_config(&xray, stats_registry)
+        .map_err(|err| stage_error("failed to load REALITY runtime", err))?;
+    if server_config.inbounds.is_empty() {
+        return Err(stage_error(
+            "failed to load REALITY runtime",
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no supported VLESS TCP REALITY inbound found",
+            ),
+        ));
+    }
+    crate::startup_log::eprintln_bootstrap(format!(
+        "REALITY runtime loaded OK listener_count={}",
+        server_config.inbounds.len()
+    ));
+    for inbound in &server_config.inbounds {
+        info!(
+            listen = %inbound.reality.listen_addr,
+            tag = ?inbound.reality.tag,
+            "REALITY runtime loaded OK"
+        );
+    }
+
+    for inbound in &server_config.inbounds {
+        inbound_users.register(Arc::clone(&inbound.user_manager));
+        for tag in &inbound.reality.merged_inbound_tags {
+            inbound_users.register_tag(tag, Arc::clone(&inbound.user_manager));
         }
-        Err(err) => {
-            error!(error = %err, "REALITY runtime loaded FAIL");
-            return Err(err);
-        }
-    };
+    }
 
-    inbound_users.register(Arc::clone(&config.user_manager));
+    for inbound in &server_config.inbounds {
+        let listen_addr = inbound.reality.listen_addr.clone();
+        let inbound_tag = inbound
+            .reality
+            .tag
+            .clone()
+            .unwrap_or_else(|| "reality-in".to_string());
+        let config = Arc::new(InboundListenerConfig {
+            reality: inbound.reality.clone(),
+            user_manager: Arc::clone(&inbound.user_manager),
+            stats: inbound.stats.clone(),
+        });
 
-    let listen_addr = config.reality.listen_addr.clone();
-    let config = Arc::new(config);
+        info!(addr = %listen_addr, inbound_tag = %inbound_tag, "REALITY inbound starting");
+        let listener = TcpListener::bind(&listen_addr)
+            .await
+            .map_err(|err| stage_error("failed to bind inbound", err))?;
+        crate::startup_log::eprintln_bootstrap(format!(
+            "REALITY listener started addr={listen_addr} tag={inbound_tag}"
+        ));
+        info!(addr = %listen_addr, inbound_tag = %inbound_tag, "REALITY listener started");
 
-    info!(addr = %listen_addr, "REALITY inbound starting");
-    let listener = match TcpListener::bind(&listen_addr).await {
-        Ok(listener) => {
-            info!(addr = %listen_addr, "REALITY inbound bind OK");
-            listener
-        }
-        Err(err) => {
-            error!(error = %err, addr = %listen_addr, "REALITY inbound bind FAIL");
-            return Err(err);
-        }
-    };
-    info!(addr = %listen_addr, "REALITY listener started");
-
-    loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(err) => {
-                warn!(error = %err, "failed to accept TCP connection");
-                continue;
-            }
-        };
-
-        info!(%peer, "TCP client accepted");
-
-        let config = Arc::clone(&config);
         tokio::spawn(async move {
-            if let Err(err) = handle_client(stream, config).await {
-                debug!(%peer, error = %err, "connection closed with error");
+            loop {
+                match listener.accept().await {
+                    Ok((stream, peer)) => {
+                        info!(%peer, "REALITY TCP client accepted");
+                        let config = Arc::clone(&config);
+                        tokio::spawn(async move {
+                            if let Err(err) = handle_client(stream, config).await {
+                                debug!(%peer, error = %err, "connection closed with error");
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        warn!(error = %err, addr = %listen_addr, "failed to accept REALITY TCP connection");
+                    }
+                }
             }
         });
     }
+
+    loop {
+        tokio::select! {
+            api_result = &mut api_task => {
+                match api_result {
+                    Ok(Ok(())) => {
+                        crate::startup_log::eprintln_bootstrap(
+                            "critical task exited: api server returned",
+                        );
+                        error!("Xray API server task exited unexpectedly");
+                    }
+                    Ok(Err(err)) => {
+                        crate::startup_log::eprintln_bootstrap(format!(
+                            "critical task exited: api server error: {err}"
+                        ));
+                        error!(error = %err, "Xray API server task failed");
+                        return Err(err);
+                    }
+                    Err(join_err) => {
+                        crate::startup_log::eprintln_bootstrap(format!(
+                            "critical task exited: api server join error: {join_err}"
+                        ));
+                        error!(error = %join_err, "Xray API server task join failed");
+                        return Err(std::io::Error::other(join_err));
+                    }
+                }
+                break;
+            }
+            _ = wait_shutdown_signal() => {
+                info!("rust-xray shutting down after signal");
+                crate::startup_log::eprintln_bootstrap("rust-xray shutting down after signal");
+                api_task.abort();
+                break;
+            }
+        }
+    }
+
+    crate::startup_log::eprintln_bootstrap("run_server returning");
+    info!("rust-xray run_server exiting");
+    Ok(())
+}
+
+async fn wait_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    info!("rust-xray received shutdown signal");
+    crate::startup_log::eprintln_bootstrap("rust-xray received shutdown signal");
 }
 
 #[cfg(test)]
@@ -649,15 +793,15 @@ mod tests {
         assert!(err.to_string().contains("invalid mldsa65Seed base64"));
     }
 
-    fn runtime_with_fallbacks() -> RuntimeConfig {
+    fn runtime_with_fallbacks() -> InboundListenerConfig {
         runtime_with_fallbacks_json("")
     }
 
-    fn runtime_with_fallbacks_and_mldsa65_seed() -> RuntimeConfig {
+    fn runtime_with_fallbacks_and_mldsa65_seed() -> InboundListenerConfig {
         runtime_with_fallbacks_json(&format!(r#","mldsa65Seed":"{TEST_MLDSA65_SEED}""#))
     }
 
-    fn runtime_with_fallbacks_json(reality_extra: &str) -> RuntimeConfig {
+    fn runtime_with_fallbacks_json(reality_extra: &str) -> InboundListenerConfig {
         let json = r#"{
             "inbounds": [{
                 "tag": "reality-in",
@@ -695,7 +839,7 @@ mod tests {
         runtime_config_from_xray(&xray).expect("build runtime config")
     }
 
-    fn runtime_selection(config: &RuntimeConfig, ctx: &FallbackContext) -> (String, u8) {
+    fn runtime_selection(config: &InboundListenerConfig, ctx: &FallbackContext) -> (String, u8) {
         let selection = resolve_fallback_selection(
             &config.reality.vless_fallbacks,
             &config.reality.dest_addr,

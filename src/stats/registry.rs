@@ -68,6 +68,11 @@ impl StatsRegistry {
         self.counter(name).add(delta);
     }
 
+    /// Ensure a counter exists so QueryStats can discover it before traffic is recorded.
+    pub fn ensure(&self, name: &str) {
+        let _ = self.counter(name);
+    }
+
     pub fn get(&self, name: &str, reset: bool) -> Result<i64, GetStatError> {
         let guard = self.counters.read().expect("stats registry lock");
         let counter = guard.get(name).ok_or(GetStatError::NotFound)?;

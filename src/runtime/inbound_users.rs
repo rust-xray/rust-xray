@@ -31,10 +31,15 @@ impl InboundUserManagers {
 
     pub fn register(&self, manager: Arc<VlessUserManager>) {
         let tag = manager.inbound_tag().to_string();
+        self.register_tag(&tag, manager);
+    }
+
+    /// Register the same user manager under an additional inbound tag (merged REALITY inbounds).
+    pub fn register_tag(&self, tag: &str, manager: Arc<VlessUserManager>) {
         self.managers
             .write()
             .expect("inbound user managers lock")
-            .insert(tag, manager);
+            .insert(tag.to_string(), manager);
     }
 
     pub fn get(&self, tag: &str) -> Result<Arc<VlessUserManager>, InboundUsersError> {

@@ -19,13 +19,13 @@ use crate::vless::relay_debug::{
     log_outbound_stream_first_write, log_outbound_to_client_first_write,
     log_vless_request_diagnostics, log_vless_response_header_prefix,
 };
-use crate::vless::user_manager::{VlessAuthenticatedClient, VlessUserManager};
+use crate::vless::user_manager::{user_id_hint, VlessAuthenticatedClient, VlessUserManager};
 use crate::vless::vision::{
     is_vision_flow, new_shared_traffic_state, parse_vless_request_flow, SharedTrafficState,
     VisionRelayStream, FLOW_XTLS_RPRX_VISION,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tracing::info;
+use tracing::{info, warn};
 
 const MAX_VLESS_HEADER_SIZE: usize = 4096;
 
@@ -303,12 +303,27 @@ where
     let destination = format_vless_destination(&inbound.request.destination);
 
     let request_flow = parse_vless_request_flow(&inbound.request.additional_info);
-    validate_vless_flow_for_command(
+    if let Err(err) = validate_vless_flow_for_command(
         request_flow.as_deref(),
         auth.flow.as_deref(),
         inbound.request.command,
-    )
-    .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+    ) {
+        warn!(
+            request_flow = request_flow.as_deref().unwrap_or(""),
+            account_flow = auth.flow.as_deref().unwrap_or(""),
+            inbound_tag = users.inbound_tag(),
+            user_lookup_result = "matched",
+            user_id_hint = user_id_hint(&auth.id),
+            flow_distribution = %users.flow_distribution_log_label(),
+            error = %err,
+            "VLESS flow mismatch"
+        );
+        return Err(stage_error(RealityAcceptedStage::Vless, err));
+    }
+
+    if let Some(stats) = stats.as_ref() {
+        stats.ensure_registered();
+    }
 
     let vision_enabled =
         is_vision_flow(request_flow.as_deref()) && is_vision_flow(auth.flow.as_deref());
@@ -684,6 +699,58 @@ mod tests {
     fn validate_flow_empty_regression_unchanged() {
         validate_vless_flow_for_command(None, None, VlessCommand::Tcp).unwrap();
         validate_vless_flow_for_command(Some(""), Some(""), VlessCommand::Tcp).unwrap();
+    }
+
+    #[test]
+    fn flow_matching_selects_user_by_uuid_not_first() {
+        use crate::vless::vision::encode_vision_flow_addons_protobuf;
+
+        const USER_A: uuid::Uuid =
+            uuid::Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a]);
+        const USER_B: uuid::Uuid =
+            uuid::Uuid::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b]);
+
+        let users = test_users(vec![
+            VlessClient {
+                id: USER_A,
+                email: None,
+                flow: None,
+                level: None,
+            },
+            VlessClient {
+                id: USER_B,
+                email: None,
+                flow: Some("xtls-rprx-vision".to_string()),
+                level: None,
+            },
+        ]);
+
+        let vision_addons = encode_vision_flow_addons_protobuf();
+        let mut request_b = vless_request(USER_B);
+        request_b.additional_info = vision_addons.clone();
+
+        let auth_b = authenticate_vless_client(&request_b, &users).expect("user B auth");
+        validate_vless_flow_for_command(
+            parse_vless_request_flow(&request_b.additional_info).as_deref(),
+            auth_b.flow.as_deref(),
+            request_b.command,
+        )
+        .expect("user B vision flow");
+
+        let mut request_a = vless_request(USER_A);
+        request_a.additional_info = vision_addons;
+        let auth_a = authenticate_vless_client(&request_a, &users).expect("user A auth");
+        let err = validate_vless_flow_for_command(
+            parse_vless_request_flow(&request_a.additional_info).as_deref(),
+            auth_a.flow.as_deref(),
+            request_a.command,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains(FLOW_XTLS_RPRX_VISION));
+
+        let unknown = authenticate_vless_client(&vless_request(UNKNOWN_ID), &users).unwrap_err();
+        assert_eq!(unknown.kind(), ErrorKind::PermissionDenied);
     }
 }
 

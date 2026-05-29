@@ -1,5 +1,6 @@
 use tonic::{Request, Response, Status};
 
+use crate::api::diagnostics::{log_rpc_call, log_rpc_err, rpc_remote_addr};
 use crate::api::proto::app::router::command::{
     routing_service_server::RoutingService, AddRuleRequest, AddRuleResponse,
     GetBalancerInfoRequest, GetBalancerInfoResponse, ListRuleRequest, ListRuleResponse,
@@ -7,10 +8,13 @@ use crate::api::proto::app::router::command::{
     RemoveRuleResponse, RoutingContext, SubscribeRoutingStatsRequest, TestRouteRequest,
 };
 
+const SERVICE: &str = "RoutingService";
+
 #[derive(Debug, Default)]
 pub struct RoutingServiceImpl;
 
-fn unimplemented(method: &str) -> Status {
+fn unimplemented(method: &str, remote: &str) -> Status {
+    log_rpc_err(SERVICE, method, remote, "UNIMPLEMENTED");
     Status::unimplemented(format!(
         "RoutingService.{method} is not implemented in rust-xray"
     ))
@@ -23,50 +27,64 @@ impl RoutingService for RoutingServiceImpl {
 
     async fn subscribe_routing_stats(
         &self,
-        _request: Request<SubscribeRoutingStatsRequest>,
+        request: Request<SubscribeRoutingStatsRequest>,
     ) -> Result<Response<Self::SubscribeRoutingStatsStream>, Status> {
-        Err(unimplemented("SubscribeRoutingStats"))
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "SubscribeRoutingStats", &remote);
+        Err(unimplemented("SubscribeRoutingStats", &remote))
     }
 
     async fn test_route(
         &self,
-        _request: Request<TestRouteRequest>,
+        request: Request<TestRouteRequest>,
     ) -> Result<Response<RoutingContext>, Status> {
-        Err(unimplemented("TestRoute"))
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "TestRoute", &remote);
+        Err(unimplemented("TestRoute", &remote))
     }
 
     async fn get_balancer_info(
         &self,
-        _request: Request<GetBalancerInfoRequest>,
+        request: Request<GetBalancerInfoRequest>,
     ) -> Result<Response<GetBalancerInfoResponse>, Status> {
-        Err(unimplemented("GetBalancerInfo"))
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "GetBalancerInfo", &remote);
+        Err(unimplemented("GetBalancerInfo", &remote))
     }
 
     async fn override_balancer_target(
         &self,
-        _request: Request<OverrideBalancerTargetRequest>,
+        request: Request<OverrideBalancerTargetRequest>,
     ) -> Result<Response<OverrideBalancerTargetResponse>, Status> {
-        Err(unimplemented("OverrideBalancerTarget"))
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "OverrideBalancerTarget", &remote);
+        Err(unimplemented("OverrideBalancerTarget", &remote))
     }
 
     async fn add_rule(
         &self,
-        _request: Request<AddRuleRequest>,
+        request: Request<AddRuleRequest>,
     ) -> Result<Response<AddRuleResponse>, Status> {
-        Err(unimplemented("AddRule"))
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "AddRule", &remote);
+        Err(unimplemented("AddRule", &remote))
     }
 
     async fn remove_rule(
         &self,
-        _request: Request<RemoveRuleRequest>,
+        request: Request<RemoveRuleRequest>,
     ) -> Result<Response<RemoveRuleResponse>, Status> {
-        Err(unimplemented("RemoveRule"))
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "RemoveRule", &remote);
+        Err(unimplemented("RemoveRule", &remote))
     }
 
     async fn list_rule(
         &self,
-        _request: Request<ListRuleRequest>,
+        request: Request<ListRuleRequest>,
     ) -> Result<Response<ListRuleResponse>, Status> {
-        Err(unimplemented("ListRule"))
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "ListRule", &remote);
+        Err(unimplemented("ListRule", &remote))
     }
 }

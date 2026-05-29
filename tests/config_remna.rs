@@ -9,6 +9,9 @@ const REMNA_FIXTURE: &str = include_str!("fixtures/remna/reality_vless_api_confi
 const REMNA_API_61000_FIXTURE: &str =
     include_str!("fixtures/remna/reality_vless_api_61000_config.json");
 
+const REMNAWAVE_NODE_MINIMAL_61000: &str =
+    include_str!("fixtures/remna/remnawave_node_minimal_61000.json");
+
 const REMNA_GENERATED_FIXTURE: &str =
     include_str!("fixtures/remna/remna-generated-reality-vless-api.json");
 
@@ -154,6 +157,20 @@ fn remna_generated_smoke_fixture_parses_and_validates() {
         .services
         .iter()
         .any(|service| service.eq_ignore_ascii_case("ReflectionService")));
+    first_reality_inbound_runtime(&config).expect("reality runtime");
+}
+
+#[test]
+fn remnawave_node_minimal_fixture_resolves_api_61000_via_routing() {
+    let config: XrayConfig =
+        serde_json::from_str(REMNAWAVE_NODE_MINIMAL_61000).expect("parse minimal");
+    validate_xray_panel_config(&config).expect("panel validation");
+    let (listen, source, tag) = resolve_api_listen(&config)
+        .expect("resolve")
+        .expect("listen");
+    assert_eq!(listen, "127.0.0.1:61000");
+    assert_eq!(source, ApiListenSource::RoutingRule);
+    assert_eq!(tag.as_deref(), Some("api-inbound"));
     first_reality_inbound_runtime(&config).expect("reality runtime");
 }
 

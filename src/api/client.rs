@@ -116,7 +116,7 @@ fn stat_to_json(stat: Option<crate::api::proto::app::stats::command::Stat>) -> s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::server::{serve_grpc_on, ApiService};
+    use crate::api::server::{serve_grpc_on, ApiService, ApiTransportMode};
     use crate::runtime::InboundUserManagers;
     use tokio::net::TcpListener;
 
@@ -144,6 +144,7 @@ mod tests {
                 vec![ApiService::Stats],
                 registry_for_server,
                 inbound_users,
+                ApiTransportMode::Plaintext,
             )
             .await;
         });

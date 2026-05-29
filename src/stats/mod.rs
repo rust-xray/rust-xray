@@ -39,6 +39,20 @@ impl StatsState {
         }
     }
 
+    pub fn from_xray_config_with_registry(
+        config: &XrayConfig,
+        registry: Arc<StatsRegistry>,
+        inbound_tag: String,
+    ) -> Self {
+        Self {
+            registry,
+            base_policy: stats_policy_from_config(config),
+            policy_config: config.policy.clone().map(Arc::new),
+            inbound_tag,
+            outbound_tag: default_outbound_tag(config),
+        }
+    }
+
     pub fn enabled(&self) -> bool {
         self.base_policy != StatsPolicy::disabled()
     }

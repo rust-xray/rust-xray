@@ -1,9 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
 use uuid::Uuid;
 
-use crate::vless::config::{parse_vless_user_id, validate_vless_client_flow, VlessClient};
+use crate::vless::config::{
+    format_vless_flow_distribution, normalize_vless_flow, parse_vless_user_id,
+    validate_vless_client_flow, VlessClient,
+};
 use crate::vless::protocol::VlessRequest;
 use crate::vless::vision::vision_relay_supported;
 
@@ -72,7 +75,7 @@ impl VlessUserManager {
                 let _ = manager.insert_user(ManagedUser {
                     id: client.id,
                     email: email.to_string(),
-                    flow: client.flow.clone(),
+                    flow: normalize_vless_flow(client.flow.as_deref()),
                     level: client.level,
                     expiry_secs: None,
                 });
@@ -83,7 +86,7 @@ impl VlessUserManager {
                     ManagedUser {
                         id: client.id,
                         email: String::new(),
-                        flow: client.flow.clone(),
+                        flow: normalize_vless_flow(client.flow.as_deref()),
                         level: client.level,
                         expiry_secs: None,
                     },
@@ -101,6 +104,21 @@ impl VlessUserManager {
         self.users_by_id.read().expect("users lock").len()
     }
 
+    /// Flow label counts for diagnostics (no UUID/email).
+    pub fn flow_distribution(&self) -> BTreeMap<String, usize> {
+        let users = self.users_by_id.read().expect("users lock");
+        let mut distribution = BTreeMap::new();
+        for user in users.values() {
+            let label = normalize_vless_flow(user.flow.as_deref()).unwrap_or_default();
+            *distribution.entry(label).or_default() += 1;
+        }
+        distribution
+    }
+
+    pub fn flow_distribution_log_label(&self) -> String {
+        format_vless_flow_distribution(&self.flow_distribution())
+    }
+
     pub fn contains_id(&self, id: Uuid) -> bool {
         self.users_by_id
             .read()
@@ -116,7 +134,43 @@ impl VlessUserManager {
     }
 
     pub fn add_user(&self, user: ManagedUser) -> Result<(), UserManagerError> {
-        self.insert_user(user)
+        if user.email.is_empty() {
+            return Err(UserManagerError::InvalidUser(
+                "vless user email is required for dynamic user management".to_string(),
+            ));
+        }
+
+        validate_vless_client_flow(user.flow.as_deref())
+            .map_err(|err| UserManagerError::InvalidUser(format!("invalid vless flow: {err}")))?;
+
+        let mut users = self.users_by_id.write().expect("users lock");
+        let mut emails = self.email_to_id.write().expect("email lock");
+
+        if let Some(existing) = users.get(&user.id).cloned() {
+            if existing.email != user.email {
+                return Err(UserManagerError::DuplicateUuid { id: user.id });
+            }
+            users.insert(
+                user.id,
+                ManagedUser {
+                    flow: user.flow,
+                    level: user.level,
+                    expiry_secs: user.expiry_secs,
+                    ..existing
+                },
+            );
+            return Ok(());
+        }
+
+        if emails.contains_key(&user.email) {
+            return Err(UserManagerError::DuplicateEmail {
+                email: user.email.clone(),
+            });
+        }
+
+        emails.insert(user.email.clone(), user.id);
+        users.insert(user.id, user);
+        Ok(())
     }
 
     pub fn remove_user_by_email(&self, email: &str) -> Result<(), UserManagerError> {
@@ -247,6 +301,16 @@ impl VlessUserManager {
     }
 }
 
+/// Short non-reversible hint for logs (first 8 hex chars, no full UUID).
+pub fn user_id_hint(id: &Uuid) -> String {
+    id.to_string()
+        .chars()
+        .filter(|ch| *ch != '-')
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
 pub fn managed_user_from_vless_account(
     email: String,
     level: Option<u32>,
@@ -263,12 +327,7 @@ pub fn managed_user_from_vless_account(
     let id = parse_vless_user_id(account_id)
         .map_err(|err| UserManagerError::InvalidUser(format!("invalid vless account id: {err}")))?;
 
-    let flow = account_flow.trim();
-    let flow = if flow.is_empty() {
-        None
-    } else {
-        Some(flow.to_string())
-    };
+    let flow = normalize_vless_flow(Some(account_flow));
 
     Ok(ManagedUser {
         id,

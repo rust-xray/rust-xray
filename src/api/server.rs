@@ -2,8 +2,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
-use tonic::transport::server::{Router, TcpIncoming};
-use tonic::transport::Server;
+use tonic::transport::server::Router;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+
+use crate::api::diagnostics::DiagnosingTcpIncoming;
 use tracing::info;
 
 use crate::api::handler::HandlerServiceImpl;
@@ -15,6 +17,10 @@ use crate::api::proto::app::stats::command::stats_service_server::StatsServiceSe
 use crate::api::proto::FILE_DESCRIPTOR_SET;
 use crate::api::routing::RoutingServiceImpl;
 use crate::api::stats::StatsServiceImpl;
+use crate::config::{
+    extract_api_inbound_tls_material, is_localhost_api_listen,
+    is_remnawave_http_unix_config_source, ApiTlsMaterial, XrayConfig,
+};
 use crate::runtime::InboundUserManagers;
 use crate::stats::StatsRegistry;
 
@@ -28,22 +34,268 @@ pub enum ApiService {
     Routing,
 }
 
-/// How the Xray-compatible gRPC API is exposed (plaintext is the Xray/Remna default).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How the Xray-compatible gRPC API is exposed.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiTransportMode {
     Plaintext,
+    Tls {
+        cert_pem: Vec<u8>,
+        key_pem: Vec<u8>,
+    },
+    Mtls {
+        ca_pem: Vec<u8>,
+        cert_pem: Vec<u8>,
+        key_pem: Vec<u8>,
+    },
+}
+
+/// Resolved API transport with a stable reason label for logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiTransportSelection {
+    pub mode: ApiTransportMode,
+    pub reason: &'static str,
+}
+
+/// Inputs used to resolve API transport (env, Remnawave config source, API inbound TLS).
+#[derive(Debug, Clone, Copy)]
+pub struct ApiTransportContext<'a> {
+    pub config_source: &'a str,
+    pub api_listen: Option<&'a str>,
+    pub xray: Option<&'a XrayConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiTransportKind {
+    Plaintext,
+    Tls,
+    Mtls,
 }
 
 impl ApiTransportMode {
-    pub fn as_log_label(self) -> &'static str {
+    pub fn as_log_label(&self) -> &'static str {
         match self {
             Self::Plaintext => "plaintext",
+            Self::Tls { .. } => "tls",
+            Self::Mtls { .. } => "mtls",
         }
+    }
+
+    pub fn uses_tls(&self) -> bool {
+        !matches!(self, Self::Plaintext)
     }
 }
 
 fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
+}
+
+fn parse_transport_env(value: Option<&str>) -> Option<ApiTransportKind> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty())?;
+    if eq_ignore_ascii_case(value, "plaintext") {
+        Some(ApiTransportKind::Plaintext)
+    } else if eq_ignore_ascii_case(value, "tls") {
+        Some(ApiTransportKind::Tls)
+    } else if eq_ignore_ascii_case(value, "mtls") {
+        Some(ApiTransportKind::Mtls)
+    } else {
+        None
+    }
+}
+
+fn parse_legacy_tls_disabled(value: Option<&str>) -> bool {
+    value.map(str::trim).is_some_and(|value| {
+        value == "0" || value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("no")
+    })
+}
+
+fn parse_legacy_tls_enabled(value: Option<&str>) -> bool {
+    value.map(str::trim).is_some_and(|value| {
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+    })
+}
+
+fn read_pem_file(path: &str, label: &str) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path).map_err(|err| {
+        std::io::Error::new(err.kind(), format!("failed to read {label} {path}: {err}"))
+    })
+}
+
+fn load_tls_files(
+    cert_path: &str,
+    key_path: &str,
+    ca_path: Option<&str>,
+    require_ca: bool,
+) -> std::io::Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
+    let cert_pem = read_pem_file(cert_path, "RUST_XRAY_API_TLS_CERT")?;
+    let key_pem = read_pem_file(key_path, "RUST_XRAY_API_TLS_KEY")?;
+    let ca_pem = match ca_path {
+        Some(path) if !path.trim().is_empty() => Some(read_pem_file(path, "RUST_XRAY_API_TLS_CA")?),
+        _ if require_ca => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "RUST_XRAY_API_TRANSPORT=mtls requires RUST_XRAY_API_TLS_CA",
+            ));
+        }
+        _ => None,
+    };
+    Ok((cert_pem, key_pem, ca_pem))
+}
+
+fn validate_tls_identity(cert_pem: &[u8], key_pem: &[u8]) -> std::io::Result<()> {
+    let tls = build_server_tls_config(&ApiTransportMode::Tls {
+        cert_pem: cert_pem.to_vec(),
+        key_pem: key_pem.to_vec(),
+    })?;
+    Server::builder()
+        .tls_config(tls)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
+    Ok(())
+}
+
+fn validate_mtls_identity(ca_pem: &[u8], cert_pem: &[u8], key_pem: &[u8]) -> std::io::Result<()> {
+    validate_tls_identity(cert_pem, key_pem)?;
+    let tls = build_server_tls_config(&ApiTransportMode::Mtls {
+        ca_pem: ca_pem.to_vec(),
+        cert_pem: cert_pem.to_vec(),
+        key_pem: key_pem.to_vec(),
+    })?;
+    Server::builder()
+        .tls_config(tls)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
+    Ok(())
+}
+
+fn tls_material_from_env(require_ca: bool) -> std::io::Result<Option<ApiTlsMaterial>> {
+    let cert_path = std::env::var("RUST_XRAY_API_TLS_CERT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let key_path = std::env::var("RUST_XRAY_API_TLS_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let ca_path = std::env::var("RUST_XRAY_API_TLS_CA")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let (cert_path, key_path) = match (cert_path, key_path) {
+        (Some(cert_path), Some(key_path)) => (cert_path, key_path),
+        _ => return Ok(None),
+    };
+
+    let (cert_pem, key_pem, ca_pem) =
+        load_tls_files(&cert_path, &key_path, ca_path.as_deref(), require_ca)?;
+    let ca_pem = match (require_ca, ca_pem) {
+        (true, Some(ca_pem)) => ca_pem,
+        (true, None) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "RUST_XRAY_API_TRANSPORT=mtls requires RUST_XRAY_API_TLS_CA",
+            ));
+        }
+        (false, ca_pem) => ca_pem.unwrap_or_default(),
+    };
+
+    Ok(Some(ApiTlsMaterial {
+        cert_pem,
+        key_pem,
+        ca_pem,
+        server_name: None,
+    }))
+}
+
+fn tls_material_from_config(xray: &XrayConfig) -> std::io::Result<Option<ApiTlsMaterial>> {
+    extract_api_inbound_tls_material(xray)
+}
+
+fn select_transport_kind(context: &ApiTransportContext<'_>) -> (ApiTransportKind, &'static str) {
+    if let Some(kind) =
+        parse_transport_env(std::env::var("RUST_XRAY_API_TRANSPORT").ok().as_deref())
+    {
+        return (kind, "env-override");
+    }
+
+    if parse_legacy_tls_disabled(std::env::var("RUST_XRAY_API_TLS").ok().as_deref()) {
+        return (ApiTransportKind::Plaintext, "env-override");
+    }
+
+    if parse_legacy_tls_enabled(std::env::var("RUST_XRAY_API_TLS").ok().as_deref()) {
+        return (ApiTransportKind::Tls, "env-override");
+    }
+
+    if is_remnawave_http_unix_config_source(context.config_source)
+        && context.api_listen.is_some_and(is_localhost_api_listen)
+    {
+        return (ApiTransportKind::Mtls, "remnawave-http-unix-auto");
+    }
+
+    (ApiTransportKind::Plaintext, "xray-default-plaintext")
+}
+
+fn material_to_mode(kind: ApiTransportKind, material: ApiTlsMaterial) -> ApiTransportMode {
+    match kind {
+        ApiTransportKind::Plaintext => ApiTransportMode::Plaintext,
+        ApiTransportKind::Tls => ApiTransportMode::Tls {
+            cert_pem: material.cert_pem,
+            key_pem: material.key_pem,
+        },
+        ApiTransportKind::Mtls => ApiTransportMode::Mtls {
+            ca_pem: material.ca_pem,
+            cert_pem: material.cert_pem,
+            key_pem: material.key_pem,
+        },
+    }
+}
+
+fn resolve_tls_material(
+    kind: ApiTransportKind,
+    context: &ApiTransportContext<'_>,
+) -> std::io::Result<ApiTransportMode> {
+    match kind {
+        ApiTransportKind::Plaintext => Ok(ApiTransportMode::Plaintext),
+        ApiTransportKind::Tls => {
+            if let Some(material) = tls_material_from_env(false)? {
+                validate_tls_identity(&material.cert_pem, &material.key_pem)?;
+                return Ok(material_to_mode(kind, material));
+            }
+            if let Some(xray) = context.xray {
+                if let Some(material) = tls_material_from_config(xray)? {
+                    validate_tls_identity(&material.cert_pem, &material.key_pem)?;
+                    return Ok(material_to_mode(kind, material));
+                }
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TLS API transport requires RUST_XRAY_API_TLS_CERT and RUST_XRAY_API_TLS_KEY \
+                 or API inbound streamSettings.tlsSettings certificates",
+            ))
+        }
+        ApiTransportKind::Mtls => {
+            if let Some(material) = tls_material_from_env(true)? {
+                validate_mtls_identity(&material.ca_pem, &material.cert_pem, &material.key_pem)?;
+                return Ok(material_to_mode(kind, material));
+            }
+            if let Some(xray) = context.xray {
+                if let Some(material) = tls_material_from_config(xray)? {
+                    validate_mtls_identity(
+                        &material.ca_pem,
+                        &material.cert_pem,
+                        &material.key_pem,
+                    )?;
+                    return Ok(material_to_mode(kind, material));
+                }
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Remnawave mTLS API transport requires API inbound streamSettings.tlsSettings \
+                 (server cert/key + verify CA) from get-config, or explicit \
+                 RUST_XRAY_API_TLS_CA / RUST_XRAY_API_TLS_CERT / RUST_XRAY_API_TLS_KEY. \
+                 Remnawave generates these in Node memory and injects them into the Xray config; \
+                 auto-generated unrelated CA certs will not be trusted by @remnawave/xtls-sdk",
+            ))
+        }
+    }
 }
 
 /// Parse `api.listen` / resolved API address. Requires an explicit `host:port` (no default port).
@@ -70,46 +322,64 @@ pub fn parse_api_grpc_listen_addr(listen: &str) -> std::io::Result<SocketAddr> {
     })
 }
 
-fn parse_tls_enabled_flag(value: Option<&str>) -> bool {
-    value.map(str::trim).is_some_and(|value| {
-        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
-    })
-}
-
-fn api_transport_mode_from_tls_env(
-    tls_flag: Option<&str>,
-    cert_path: Option<&str>,
-    key_path: Option<&str>,
-) -> std::io::Result<ApiTransportMode> {
-    if !parse_tls_enabled_flag(tls_flag) {
-        return Ok(ApiTransportMode::Plaintext);
-    }
-
-    let cert = cert_path.map(str::trim).filter(|value| !value.is_empty());
-    let key = key_path.map(str::trim).filter(|value| !value.is_empty());
-
-    if cert.is_none() || key.is_none() {
-        return Err(std::io::Error::new(
+fn build_server_tls_config(mode: &ApiTransportMode) -> std::io::Result<ServerTlsConfig> {
+    match mode {
+        ApiTransportMode::Plaintext => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "RUST_XRAY_API_TLS=true requires RUST_XRAY_API_TLS_CERT and RUST_XRAY_API_TLS_KEY",
-        ));
+            "plaintext API transport does not use TLS",
+        )),
+        ApiTransportMode::Tls { cert_pem, key_pem } => {
+            let identity = Identity::from_pem(cert_pem.clone(), key_pem.clone());
+            Ok(ServerTlsConfig::new().identity(identity))
+        }
+        ApiTransportMode::Mtls {
+            ca_pem,
+            cert_pem,
+            key_pem,
+        } => {
+            let identity = Identity::from_pem(cert_pem.clone(), key_pem.clone());
+            let client_ca = Certificate::from_pem(ca_pem.clone());
+            Ok(ServerTlsConfig::new()
+                .identity(identity)
+                .client_ca_root(client_ca))
+        }
     }
-
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "API TLS mode is not implemented in rust-xray; use plaintext gRPC (default). \
-         Remna must dial the API without TLS (grpcurl -plaintext). \
-         If you see OpenSSL wrong version number, the client is using TLS against a plaintext listener.",
-    ))
 }
 
-/// Resolve API transport from environment. Plaintext is the default; TLS is not implemented.
+/// Resolve API transport from env + optional Remnawave config context.
+pub fn resolve_api_transport_mode(
+    context: ApiTransportContext<'_>,
+) -> std::io::Result<ApiTransportSelection> {
+    let (kind, reason) = select_transport_kind(&context);
+    let mode = resolve_tls_material(kind, &context)?;
+    Ok(ApiTransportSelection { mode, reason })
+}
+
+pub fn log_api_transport_selected(selection: &ApiTransportSelection) {
+    let label = match &selection.mode {
+        ApiTransportMode::Plaintext => "plaintext",
+        ApiTransportMode::Tls { .. } => "tls",
+        ApiTransportMode::Mtls { .. } => "mTLS",
+    };
+    info!(
+        api_transport = selection.mode.as_log_label(),
+        transport_reason = selection.reason,
+        "Xray API transport selected: {label}"
+    );
+    crate::startup_log::eprintln_bootstrap(format!(
+        "Xray API transport selected: {label} reason={}",
+        selection.reason
+    ));
+}
+
+/// Resolve API transport from environment only (no Remnawave config context).
 pub fn api_transport_mode_from_env() -> std::io::Result<ApiTransportMode> {
-    api_transport_mode_from_tls_env(
-        std::env::var("RUST_XRAY_API_TLS").ok().as_deref(),
-        std::env::var("RUST_XRAY_API_TLS_CERT").ok().as_deref(),
-        std::env::var("RUST_XRAY_API_TLS_KEY").ok().as_deref(),
-    )
+    Ok(resolve_api_transport_mode(ApiTransportContext {
+        config_source: "",
+        api_listen: None,
+        xray: None,
+    })?
+    .mode)
 }
 
 /// Bind the API TCP listener before serving (fail fast if the address is unavailable).
@@ -132,17 +402,24 @@ pub fn log_api_listener_ready(
     configured_listen: &str,
     bound_addr: SocketAddr,
     services: &[String],
-    mode: ApiTransportMode,
+    mode: &ApiTransportMode,
 ) {
     let configured = configured_listen.trim();
+    let transport_label = match mode {
+        ApiTransportMode::Plaintext => "plaintext",
+        ApiTransportMode::Tls { .. } => "TLS",
+        ApiTransportMode::Mtls { .. } => "mTLS",
+    };
     info!(api_listen = %configured, "Xray API config listen");
     info!(
         api_bind_addr = %bound_addr,
         api_transport = mode.as_log_label(),
-        "Xray API listening on {bound_addr} {}",
-        mode.as_log_label()
+        "Xray API listening on {bound_addr} {transport_label}"
     );
     info!(api_services = ?services, "Xray API enabled services");
+    crate::startup_log::eprintln_bootstrap(format!(
+        "API owns {bound_addr} for {transport_label} gRPC (xray.app.stats.command.StatsService)"
+    ));
 }
 
 /// Parse `api.services` into mountable services. Unknown or unsupported entries error at startup.
@@ -200,16 +477,25 @@ pub async fn serve_grpc_on(
     services: Vec<ApiService>,
     stats_registry: Arc<StatsRegistry>,
     inbound_users: Arc<InboundUserManagers>,
+    transport: ApiTransportMode,
 ) -> std::io::Result<()> {
     let local_addr = listener.local_addr()?;
-    let incoming =
-        TcpIncoming::from_listener(listener, true, None).map_err(std::io::Error::other)?;
+    let incoming = DiagnosingTcpIncoming::from_listener(listener, true, None, transport.clone())
+        .map_err(std::io::Error::other)?;
+
+    let mut server_builder = Server::builder();
+    if transport.uses_tls() {
+        let tls = build_server_tls_config(&transport)?;
+        server_builder = server_builder
+            .tls_config(tls)
+            .map_err(std::io::Error::other)?;
+    }
 
     let mut router: Option<Router> = None;
     macro_rules! add_service {
         ($svc:expr) => {
             router = Some(match router {
-                None => Server::builder().add_service($svc),
+                None => server_builder.add_service($svc),
                 Some(router) => router.add_service($svc),
             });
         };
@@ -258,14 +544,48 @@ pub async fn serve_grpc(
     stats_registry: Arc<StatsRegistry>,
     inbound_users: Arc<InboundUserManagers>,
 ) -> std::io::Result<()> {
-    api_transport_mode_from_env()?;
+    let transport = api_transport_mode_from_env()?;
     let (listener, _) = bind_api_listener(listen).await?;
-    serve_grpc_on(listener, services, stats_registry, inbound_users).await
+    serve_grpc_on(listener, services, stats_registry, inbound_users, transport).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        vars: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(pairs: &[(&'static str, Option<&str>)]) -> Self {
+            let _lock = ENV_LOCK.lock().expect("env lock");
+            let mut saved = Vec::new();
+            for (key, value) in pairs {
+                saved.push((*key, std::env::var(key).ok()));
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { vars: saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            let _lock = ENV_LOCK.lock().expect("env lock");
+            for (key, value) in &self.vars {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_api_listen_requires_host_and_port() {
@@ -277,22 +597,123 @@ mod tests {
     }
 
     #[test]
-    fn parse_api_listen_rejects_empty() {
-        let err = parse_api_grpc_listen_addr("  ").unwrap_err();
+    fn transport_defaults_plaintext_for_file_config() {
+        let _guard = EnvGuard::new(&[
+            ("RUST_XRAY_API_TRANSPORT", None),
+            ("RUST_XRAY_API_TLS", None),
+            ("RUST_XRAY_API_TLS_CA", None),
+            ("RUST_XRAY_API_TLS_CERT", None),
+            ("RUST_XRAY_API_TLS_KEY", None),
+        ]);
+        let sel = resolve_api_transport_mode(ApiTransportContext {
+            config_source: "/etc/xray/config.json",
+            api_listen: Some("127.0.0.1:61000"),
+            xray: None,
+        })
+        .expect("plaintext");
+        assert_eq!(sel.mode, ApiTransportMode::Plaintext);
+        assert_eq!(sel.reason, "xray-default-plaintext");
+    }
+
+    #[test]
+    fn transport_env_plaintext_override() {
+        let _guard = EnvGuard::new(&[
+            ("RUST_XRAY_API_TRANSPORT", Some("plaintext")),
+            ("RUST_XRAY_API_TLS", None),
+            ("RUST_XRAY_API_TLS_CA", None),
+            ("RUST_XRAY_API_TLS_CERT", None),
+            ("RUST_XRAY_API_TLS_KEY", None),
+        ]);
+        let sel = resolve_api_transport_mode(ApiTransportContext {
+            config_source: "http+unix:///run/remna.sock/internal/get-config?token=x",
+            api_listen: Some("127.0.0.1:61000"),
+            xray: None,
+        })
+        .expect("plaintext override");
+        assert_eq!(sel.mode, ApiTransportMode::Plaintext);
+        assert_eq!(sel.reason, "env-override");
+    }
+
+    #[test]
+    fn transport_remnawave_auto_selects_mtls() {
+        let _guard = EnvGuard::new(&[
+            ("RUST_XRAY_API_TRANSPORT", None),
+            ("RUST_XRAY_API_TLS", None),
+            ("RUST_XRAY_API_TLS_CA", None),
+            ("RUST_XRAY_API_TLS_CERT", None),
+            ("RUST_XRAY_API_TLS_KEY", None),
+        ]);
+        let err = resolve_api_transport_mode(ApiTransportContext {
+            config_source: "http+unix:///run/remna.sock/internal/get-config?token=x",
+            api_listen: Some("127.0.0.1:61000"),
+            xray: None,
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("Remnawave mTLS"));
+    }
+
+    #[test]
+    fn transport_env_tls_requires_cert_and_key() {
+        let _guard = EnvGuard::new(&[
+            ("RUST_XRAY_API_TRANSPORT", Some("tls")),
+            ("RUST_XRAY_API_TLS", None),
+            ("RUST_XRAY_API_TLS_CA", None),
+            ("RUST_XRAY_API_TLS_CERT", None),
+            ("RUST_XRAY_API_TLS_KEY", None),
+        ]);
+        let err = resolve_api_transport_mode(ApiTransportContext {
+            config_source: "/etc/xray/config.json",
+            api_listen: None,
+            xray: None,
+        })
+        .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
-    fn api_tls_env_defaults_to_plaintext() {
-        assert_eq!(
-            api_transport_mode_from_tls_env(None, None, None).expect("plaintext default"),
-            ApiTransportMode::Plaintext
-        );
+    fn transport_env_tls_with_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert_path = dir.path().join("api.crt");
+        let key_path = dir.path().join("api.key");
+        write_test_tls_pem(&cert_path, &key_path);
+        let _guard = EnvGuard::new(&[
+            ("RUST_XRAY_API_TRANSPORT", Some("tls")),
+            ("RUST_XRAY_API_TLS", None),
+            ("RUST_XRAY_API_TLS_CA", None),
+            ("RUST_XRAY_API_TLS_CERT", Some(cert_path.to_str().unwrap())),
+            ("RUST_XRAY_API_TLS_KEY", Some(key_path.to_str().unwrap())),
+        ]);
+        let sel = resolve_api_transport_mode(ApiTransportContext {
+            config_source: "/etc/xray/config.json",
+            api_listen: None,
+            xray: None,
+        })
+        .expect("tls files");
+        assert!(matches!(sel.mode, ApiTransportMode::Tls { .. }));
+        assert_eq!(sel.reason, "env-override");
     }
 
     #[test]
-    fn api_tls_env_requires_cert_and_key_when_enabled() {
-        let err = api_transport_mode_from_tls_env(Some("true"), None, None).unwrap_err();
+    fn transport_invalid_cert_key_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert_path = dir.path().join("bad.crt");
+        let key_path = dir.path().join("bad.key");
+        std::fs::write(&cert_path, b"not a cert").expect("write cert");
+        std::fs::write(&key_path, b"not a key").expect("write key");
+        let _guard = EnvGuard::new(&[
+            ("RUST_XRAY_API_TRANSPORT", Some("tls")),
+            ("RUST_XRAY_API_TLS", None),
+            ("RUST_XRAY_API_TLS_CA", None),
+            ("RUST_XRAY_API_TLS_CERT", Some(cert_path.to_str().unwrap())),
+            ("RUST_XRAY_API_TLS_KEY", Some(key_path.to_str().unwrap())),
+        ]);
+        let err = resolve_api_transport_mode(ApiTransportContext {
+            config_source: "/etc/xray/config.json",
+            api_listen: None,
+            xray: None,
+        })
+        .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
@@ -304,14 +725,12 @@ mod tests {
         assert_eq!(enabled, vec![ApiService::Stats]);
     }
 
-    #[test]
-    fn api_tls_env_rejects_unimplemented_tls_with_cert_and_key() {
-        let err = api_transport_mode_from_tls_env(
-            Some("true"),
-            Some("/tmp/cert.pem"),
-            Some("/tmp/key.pem"),
-        )
-        .unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+    fn write_test_tls_pem(cert_path: &std::path::Path, key_path: &std::path::Path) {
+        use rcgen::{CertificateParams, KeyPair};
+        let key_pair = KeyPair::generate().expect("generate key");
+        let params = CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+        let cert = params.self_signed(&key_pair).expect("self signed cert");
+        std::fs::write(cert_path, cert.pem()).expect("write cert");
+        std::fs::write(key_path, key_pair.serialize_pem()).expect("write key");
     }
 }

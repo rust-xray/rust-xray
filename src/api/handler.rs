@@ -3,6 +3,7 @@ use std::sync::Arc;
 use prost::Message;
 use tonic::{Code, Request, Response, Status};
 
+use crate::api::diagnostics::{log_rpc_call, log_rpc_err, log_rpc_ok, rpc_remote_addr};
 use crate::api::proto::app::proxyman::command::{
     handler_service_server::HandlerService, AddInboundRequest, AddInboundResponse,
     AddOutboundRequest, AddOutboundResponse, AddUserOperation, AlterInboundRequest,
@@ -18,6 +19,8 @@ use crate::api::proto::proxy::vless::Account;
 use crate::runtime::InboundUserManagers;
 use crate::vless::user_manager::{managed_user_from_vless_account, ManagedUser, UserManagerError};
 
+const SERVICE: &str = "HandlerService";
+
 #[derive(Debug)]
 pub struct HandlerServiceImpl {
     managers: Arc<InboundUserManagers>,
@@ -29,7 +32,8 @@ impl HandlerServiceImpl {
     }
 }
 
-fn unimplemented(method: &str) -> Status {
+fn unimplemented(method: &str, remote: &str) -> Status {
+    log_rpc_err(SERVICE, method, remote, "UNIMPLEMENTED");
     Status::unimplemented(format!(
         "HandlerService.{method} is not implemented in rust-xray"
     ))
@@ -163,22 +167,24 @@ fn parse_vless_user_from_proto(
 impl HandlerService for HandlerServiceImpl {
     async fn add_inbound(
         &self,
-        _request: Request<AddInboundRequest>,
+        request: Request<AddInboundRequest>,
     ) -> Result<Response<AddInboundResponse>, Status> {
-        Err(unimplemented("AddInbound"))
+        Err(unimplemented("AddInbound", &rpc_remote_addr(&request)))
     }
 
     async fn remove_inbound(
         &self,
-        _request: Request<RemoveInboundRequest>,
+        request: Request<RemoveInboundRequest>,
     ) -> Result<Response<RemoveInboundResponse>, Status> {
-        Err(unimplemented("RemoveInbound"))
+        Err(unimplemented("RemoveInbound", &rpc_remote_addr(&request)))
     }
 
     async fn alter_inbound(
         &self,
         request: Request<AlterInboundRequest>,
     ) -> Result<Response<AlterInboundResponse>, Status> {
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "AlterInbound", &remote);
         let request = request.into_inner();
         let manager = self
             .managers
@@ -202,6 +208,7 @@ impl HandlerService for HandlerServiceImpl {
                 .ok_or_else(|| Status::new(Code::InvalidArgument, "user is required"))?;
             let managed = parse_vless_user_from_proto(user)?;
             manager.add_user(managed).map_err(map_user_manager_error)?;
+            log_rpc_ok(SERVICE, "AlterInbound", &remote, "AddUserOperation");
             return Ok(Response::new(AlterInboundResponse {}));
         }
 
@@ -222,9 +229,16 @@ impl HandlerService for HandlerServiceImpl {
             manager
                 .remove_user_by_email(&remove.email)
                 .map_err(map_user_manager_error)?;
+            log_rpc_ok(SERVICE, "AlterInbound", &remote, "RemoveUserOperation");
             return Ok(Response::new(AlterInboundResponse {}));
         }
 
+        log_rpc_err(
+            SERVICE,
+            "AlterInbound",
+            &remote,
+            &format!("unsupported operation type: {operation_type}"),
+        );
         Err(Status::new(
             Code::InvalidArgument,
             format!("unsupported inbound operation type: {operation_type}"),
@@ -235,8 +249,10 @@ impl HandlerService for HandlerServiceImpl {
         &self,
         request: Request<ListInboundsRequest>,
     ) -> Result<Response<ListInboundsResponse>, Status> {
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "ListInbounds", &remote);
         let request = request.into_inner();
-        let inbounds = self
+        let inbounds: Vec<InboundHandlerConfig> = self
             .managers
             .list_tags()
             .into_iter()
@@ -260,6 +276,12 @@ impl HandlerService for HandlerServiceImpl {
             })
             .collect();
 
+        log_rpc_ok(
+            SERVICE,
+            "ListInbounds",
+            &remote,
+            &format!("count={}", inbounds.len()),
+        );
         Ok(Response::new(ListInboundsResponse { inbounds }))
     }
 
@@ -267,6 +289,8 @@ impl HandlerService for HandlerServiceImpl {
         &self,
         request: Request<GetInboundUserRequest>,
     ) -> Result<Response<GetInboundUserResponse>, Status> {
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "GetInboundUsers", &remote);
         let request = request.into_inner();
         let tag = require_inbound_tag(&request.tag)?;
         let manager = self.managers.get(tag).map_err(|_| inbound_not_found(tag))?;
@@ -314,29 +338,29 @@ impl HandlerService for HandlerServiceImpl {
 
     async fn add_outbound(
         &self,
-        _request: Request<AddOutboundRequest>,
+        request: Request<AddOutboundRequest>,
     ) -> Result<Response<AddOutboundResponse>, Status> {
-        Err(unimplemented("AddOutbound"))
+        Err(unimplemented("AddOutbound", &rpc_remote_addr(&request)))
     }
 
     async fn remove_outbound(
         &self,
-        _request: Request<RemoveOutboundRequest>,
+        request: Request<RemoveOutboundRequest>,
     ) -> Result<Response<RemoveOutboundResponse>, Status> {
-        Err(unimplemented("RemoveOutbound"))
+        Err(unimplemented("RemoveOutbound", &rpc_remote_addr(&request)))
     }
 
     async fn alter_outbound(
         &self,
-        _request: Request<AlterOutboundRequest>,
+        request: Request<AlterOutboundRequest>,
     ) -> Result<Response<AlterOutboundResponse>, Status> {
-        Err(unimplemented("AlterOutbound"))
+        Err(unimplemented("AlterOutbound", &rpc_remote_addr(&request)))
     }
 
     async fn list_outbounds(
         &self,
-        _request: Request<ListOutboundsRequest>,
+        request: Request<ListOutboundsRequest>,
     ) -> Result<Response<ListOutboundsResponse>, Status> {
-        Err(unimplemented("ListOutbounds"))
+        Err(unimplemented("ListOutbounds", &rpc_remote_addr(&request)))
     }
 }
