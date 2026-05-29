@@ -24,7 +24,7 @@ Confirmed PASS coverage:
 ## Invariants
 
 - ML-DSA-65 is a standard dependency, not feature-gated.
-- The `reality-mldsa65-crypto` feature must not exist.
+- The removed ML-DSA crypto feature gate must not exist.
 - Config without `mldsa65Seed` uses `HmacOnly`.
 - Config with `mldsa65Seed` uses `HmacPlusMldsa65`.
 - The seed path must not fall back to `HmacOnly` on ML-DSA-65 patch errors.

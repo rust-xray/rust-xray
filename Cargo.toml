@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "xray"
-path = "src/main.rs"
+path = "src/bin/xray.rs"
 
 [features]
 default = []

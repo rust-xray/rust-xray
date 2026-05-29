@@ -73,3 +73,18 @@ fn parse_api_statsquery_server_flag() {
         }))
     );
 }
+
+#[test]
+fn parse_api_statsquery_xray_style_server_flag() {
+    let cmd = parse_args(["xray", "api", "statsquery", "-server=127.0.0.1:10084"]).unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::Api(ApiCommand::StatsQuery(StatsApiOptions {
+            server: "127.0.0.1:10084".to_string(),
+            timeout_secs: 3,
+            name: None,
+            pattern: None,
+            reset: false,
+        }))
+    );
+}

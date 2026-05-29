@@ -2,6 +2,7 @@
 pub mod protocol;
 
 pub mod api;
+pub mod app;
 pub mod cli;
 pub mod codec;
 pub mod config;

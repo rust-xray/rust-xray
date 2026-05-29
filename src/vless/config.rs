@@ -90,21 +90,6 @@ mod tests {
         }
     }
 
-    fn client_object_with_level(
-        id: &str,
-        email: Option<&str>,
-        flow: Option<&str>,
-        level: Option<u32>,
-    ) -> VlessClientObject {
-        VlessClientObject {
-            id: id.to_string(),
-            email: email.map(str::to_string),
-            flow: flow.map(str::to_string),
-            level,
-            extra: BTreeMap::new(),
-        }
-    }
-
     #[test]
     fn build_vless_clients_parses_valid_uuid() {
         let clients = build_vless_clients(&[client_object(

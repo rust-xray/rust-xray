@@ -310,6 +310,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_api_statsquery_xray_style_server_equals() {
+        let cmd = parse(&["api", "statsquery", "-server=127.0.0.1:10084"]).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Api(ApiCommand::StatsQuery(StatsApiOptions {
+                server: "127.0.0.1:10084".to_string(),
+                timeout_secs: 3,
+                name: None,
+                pattern: None,
+                reset: false,
+            }))
+        );
+    }
+
+    #[test]
     fn parse_api_stats_with_name_and_reset() {
         let cmd = parse(&[
             "api",
