@@ -28,8 +28,121 @@ pub enum ApiService {
     Routing,
 }
 
+/// How the Xray-compatible gRPC API is exposed (plaintext is the Xray/Remna default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiTransportMode {
+    Plaintext,
+}
+
+impl ApiTransportMode {
+    pub fn as_log_label(self) -> &'static str {
+        match self {
+            Self::Plaintext => "plaintext",
+        }
+    }
+}
+
 fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
+}
+
+/// Parse `api.listen` / resolved API address. Requires an explicit `host:port` (no default port).
+pub fn parse_api_grpc_listen_addr(listen: &str) -> std::io::Result<SocketAddr> {
+    let listen = listen.trim();
+    if listen.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "api.listen must not be empty",
+        ));
+    }
+    if !listen.contains(':') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("api.listen must include host:port (e.g. 127.0.0.1:61000), got {listen:?}"),
+        ));
+    }
+
+    listen.parse().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid api.listen address {listen}: {e}"),
+        )
+    })
+}
+
+fn parse_tls_enabled_flag(value: Option<&str>) -> bool {
+    value.map(str::trim).is_some_and(|value| {
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+    })
+}
+
+fn api_transport_mode_from_tls_env(
+    tls_flag: Option<&str>,
+    cert_path: Option<&str>,
+    key_path: Option<&str>,
+) -> std::io::Result<ApiTransportMode> {
+    if !parse_tls_enabled_flag(tls_flag) {
+        return Ok(ApiTransportMode::Plaintext);
+    }
+
+    let cert = cert_path.map(str::trim).filter(|value| !value.is_empty());
+    let key = key_path.map(str::trim).filter(|value| !value.is_empty());
+
+    if cert.is_none() || key.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "RUST_XRAY_API_TLS=true requires RUST_XRAY_API_TLS_CERT and RUST_XRAY_API_TLS_KEY",
+        ));
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "API TLS mode is not implemented in rust-xray; use plaintext gRPC (default). \
+         Remna must dial the API without TLS (grpcurl -plaintext). \
+         If you see OpenSSL wrong version number, the client is using TLS against a plaintext listener.",
+    ))
+}
+
+/// Resolve API transport from environment. Plaintext is the default; TLS is not implemented.
+pub fn api_transport_mode_from_env() -> std::io::Result<ApiTransportMode> {
+    api_transport_mode_from_tls_env(
+        std::env::var("RUST_XRAY_API_TLS").ok().as_deref(),
+        std::env::var("RUST_XRAY_API_TLS_CERT").ok().as_deref(),
+        std::env::var("RUST_XRAY_API_TLS_KEY").ok().as_deref(),
+    )
+}
+
+/// Bind the API TCP listener before serving (fail fast if the address is unavailable).
+pub async fn bind_api_listener(listen: &str) -> std::io::Result<(TcpListener, SocketAddr)> {
+    let configured = listen.trim().to_string();
+    let socket_addr = parse_api_grpc_listen_addr(&configured)?;
+    let listener = TcpListener::bind(socket_addr).await.map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!(
+                "failed to bind Xray API listener on {socket_addr} (api.listen={configured}): {err}"
+            ),
+        )
+    })?;
+    let bound = listener.local_addr()?;
+    Ok((listener, bound))
+}
+
+pub fn log_api_listener_ready(
+    configured_listen: &str,
+    bound_addr: SocketAddr,
+    services: &[String],
+    mode: ApiTransportMode,
+) {
+    let configured = configured_listen.trim();
+    info!(api_listen = %configured, "Xray API config listen");
+    info!(
+        api_bind_addr = %bound_addr,
+        api_transport = mode.as_log_label(),
+        "Xray API listening on {bound_addr} {}",
+        mode.as_log_label()
+    );
+    info!(api_services = ?services, "Xray API enabled services");
 }
 
 /// Parse `api.services` into mountable services. Unknown or unsupported entries error at startup.
@@ -54,10 +167,11 @@ pub fn parse_enabled_services(services: &[String]) -> std::io::Result<Vec<ApiSer
         } else if eq_ignore_ascii_case(service, "RoutingService") {
             ApiService::Routing
         } else if eq_ignore_ascii_case(service, "ObservatoryService") {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "ObservatoryService is not implemented in rust-xray API server",
-            ));
+            tracing::warn!(
+                service = %service,
+                "ObservatoryService listed in api.services but is not mounted in rust-xray API server"
+            );
+            continue;
         } else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -70,25 +184,14 @@ pub fn parse_enabled_services(services: &[String]) -> std::io::Result<Vec<ApiSer
         }
     }
 
-    Ok(enabled)
-}
-
-fn parse_listen_addr(listen: &str) -> std::io::Result<SocketAddr> {
-    if listen.contains(':') {
-        return listen.parse().map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid api.listen address {listen}: {e}"),
-            )
-        });
+    if enabled.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "api.services did not enable any mountable gRPC service (StatsService, HandlerService, ...)",
+        ));
     }
 
-    format!("{listen}:8080").parse().map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid api.listen address {listen}: {e}"),
-        )
-    })
+    Ok(enabled)
 }
 
 /// Start the Xray-compatible gRPC API server on a pre-bound listener (blocks until shutdown).
@@ -143,16 +246,9 @@ pub async fn serve_grpc_on(
         )
     })?;
 
-    info!(
-        %local_addr,
-        services = ?services,
-        "Xray-compatible gRPC API listening"
-    );
-
-    router
-        .serve_with_incoming(incoming)
-        .await
-        .map_err(std::io::Error::other)
+    router.serve_with_incoming(incoming).await.map_err(|err| {
+        std::io::Error::other(format!("Xray API server on {local_addr} stopped: {err}"))
+    })
 }
 
 /// Start the Xray-compatible gRPC API server (blocks until shutdown).
@@ -162,7 +258,60 @@ pub async fn serve_grpc(
     stats_registry: Arc<StatsRegistry>,
     inbound_users: Arc<InboundUserManagers>,
 ) -> std::io::Result<()> {
-    let addr = parse_listen_addr(listen)?;
-    let listener = TcpListener::bind(addr).await?;
+    api_transport_mode_from_env()?;
+    let (listener, _) = bind_api_listener(listen).await?;
     serve_grpc_on(listener, services, stats_registry, inbound_users).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_api_listen_requires_host_and_port() {
+        assert!(parse_api_grpc_listen_addr("127.0.0.1:10085").is_ok());
+        assert!(parse_api_grpc_listen_addr("0.0.0.0:10085").is_ok());
+        let err = parse_api_grpc_listen_addr("127.0.0.1").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("host:port"));
+    }
+
+    #[test]
+    fn parse_api_listen_rejects_empty() {
+        let err = parse_api_grpc_listen_addr("  ").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn api_tls_env_defaults_to_plaintext() {
+        assert_eq!(
+            api_transport_mode_from_tls_env(None, None, None).expect("plaintext default"),
+            ApiTransportMode::Plaintext
+        );
+    }
+
+    #[test]
+    fn api_tls_env_requires_cert_and_key_when_enabled() {
+        let err = api_transport_mode_from_tls_env(Some("true"), None, None).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn parse_enabled_services_skips_observatory_but_mounts_stats() {
+        let enabled =
+            parse_enabled_services(&["ObservatoryService".to_string(), "StatsService".to_string()])
+                .expect("parse services");
+        assert_eq!(enabled, vec![ApiService::Stats]);
+    }
+
+    #[test]
+    fn api_tls_env_rejects_unimplemented_tls_with_cert_and_key() {
+        let err = api_transport_mode_from_tls_env(
+            Some("true"),
+            Some("/tmp/cert.pem"),
+            Some("/tmp/key.pem"),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+    }
 }

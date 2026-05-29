@@ -7,10 +7,10 @@ Upstream reference: [XTLS/Xray-core](https://github.com/XTLS/Xray-core) `main` �
 
 **No runtime changes** were made for this audit. Behavior described here reflects the current code path.
 
-**Update (explicit startup reject):** `validate_reality_inbound_config_policy` in `src/config/xray.rs` now rejects at startup (via `first_reality_inbound_runtime` / `validate_vless_reality_inbound_stream`):
+**Update (startup compatibility policy):** `validate_reality_inbound_config_policy` in `src/config/xray.rs` now handles panel-generated extras at startup (via `first_reality_inbound_runtime` / `validate_vless_reality_inbound_stream`):
 
 - `realitySettings.limitFallbackUpload` / `limitFallbackDownload` → `Unsupported`
-- Client-only inbound `realitySettings` keys in `extra` (`publicKey`, `fingerprint`, `mldsa65Verify`, …) → `InvalidInput`
+- Client-only inbound `realitySettings` keys in `extra` (`publicKey`, `fingerprint`, `mldsa65Verify`, …) → ignored with a non-secret warning
 - Unsupported `streamSettings` transport sub-objects in `extra` (`tlsSettings`, `wsSettings`, `grpcSettings`, …) → `Unsupported`
 - `streamSettings.sockopt` remains allowed (Xray-compatible smoke fixtures)
 - Server fields `show`, `dest`/`target`, `type`, `xver`, `serverNames`, `privateKey`, `shortIds`, version/time policy, `mldsa65Seed` remain accepted
@@ -146,7 +146,7 @@ Upstream (`REALITYConfig`, `config.proto`): rate-limit fallback traffic after N 
 
 ---
 
-## 5. `realitySettings` — client-only fields (must not be on server inbound)
+## 5. `realitySettings` — client-only fields on server inbound
 
 Upstream documents these on **client outbound** `realitySettings` (see `REALITYConfig` fields `Fingerprint`, `server_name`, `public_key`, … in `config.proto`). Xray server inbound uses `privateKey` + `shortIds`; client uses `publicKey` + `shortId` + `serverName` + `fingerprint` + `spiderX` + `mldsa65Verify`.
 
@@ -154,15 +154,15 @@ rust-xray does **not** define typed fields for these on `RealitySettingsObject`;
 
 | Field | Upstream role (client) | If present on server inbound | Policy | Test coverage |
 |-------|------------------------|------------------------------|--------|---------------|
-| `fingerprint` | uTLS fingerprint for outbound TLS | Startup reject if in `extra` | **explicit unsupported** | policy tests (extend as needed) |
-| `serverName` | Client SNI choice | Startup reject if in `extra` | **explicit unsupported** | same |
-| `password` | Legacy / unused in REALITY | Startup reject if in `extra` | **explicit unsupported** | same |
-| `publicKey` | Client peer key | Startup reject if in `extra` | **explicit unsupported** | `rejects_client_only_public_key_on_inbound_reality_settings` |
-| `shortId` | Client shortId (singular) | Startup reject if in `extra` | **explicit unsupported** | same |
-| `mldsa65Verify` | Client ML-DSA verify key | Startup reject if in `extra` | **explicit unsupported** | `rejects_client_only_mldsa65_verify_on_inbound_reality_settings` |
-| `spiderX` | Client crawl path | Startup reject if in `extra` | **explicit unsupported** | same |
-| `spiderY` | Client crawl pattern (proto) | Startup reject if in `extra` | **explicit unsupported** | same |
-| `masterKeyLog` | TLS key log file | Startup reject if in `extra` | **explicit unsupported** | same |
+| `fingerprint` | uTLS fingerprint for outbound TLS | Ignored if in `extra` | **ignored** | policy tests (extend as needed) |
+| `serverName` | Client SNI choice | Ignored if in `extra` | **ignored** | same |
+| `password` | Legacy / unused in REALITY | Ignored if in `extra` | **ignored** | same |
+| `publicKey` | Client peer key | Ignored if in `extra` | **ignored** | `ignores_client_only_public_key_on_inbound_reality_settings` |
+| `shortId` | Client shortId (singular) | Ignored if in `extra` | **ignored** | same |
+| `mldsa65Verify` | Client ML-DSA verify key | Ignored if in `extra` | **ignored** | `ignores_client_only_mldsa65_verify_on_inbound_reality_settings` |
+| `spiderX` | Client crawl path | Ignored if in `extra` | **ignored** | same |
+| `spiderY` | Client crawl pattern (proto) | Ignored if in `extra` | **ignored** | same |
+| `masterKeyLog` | TLS key log file | Ignored if in `extra` | **ignored** | same |
 
 **Note:** Copy-pasting client outbound `realitySettings` onto server inbound now fails fast with a clear error.
 

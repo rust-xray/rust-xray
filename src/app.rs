@@ -1,16 +1,17 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::api;
-use crate::cli::{self, Command};
+use crate::cli::{self, Command, RunOptions};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
 
 use crate::codec::{Codec, Reader};
 use crate::config::{
-    first_reality_inbound_runtime, load_xray_config_from_file, reality_mldsa65_runtime_mode,
-    RealityInboundRuntime, RealityMldsa65RuntimeMode, XrayConfig,
+    api_dokodemo_inbound_tag, config_source_kind, first_reality_inbound_runtime,
+    format_redacted_run_command, load_xray_config_from_source, reality_mldsa65_runtime_mode,
+    redact_config_source, resolve_api_listen, RealityInboundRuntime,
+    RealityMldsa65RuntimeMode, XrayConfig,
 };
 use crate::protocol::structs::ClientHelloPayload;
 use crate::proxy::relay_fallback_with_xver;
@@ -352,37 +353,179 @@ async fn dispatch(command: Command) -> std::io::Result<()> {
             }
             Ok(())
         }
-        Command::Run { config } => run_server(config).await,
+        Command::Run(opts) => run_server(opts).await,
     }
 }
 
-async fn run_server(config_path: PathBuf) -> std::io::Result<()> {
-    info!(path = %config_path.display(), "loading Xray config");
+async fn start_xray_api_server(
+    xray: &XrayConfig,
+    inbound_users: Arc<InboundUserManagers>,
+    stats_registry: Arc<StatsRegistry>,
+) -> std::io::Result<()> {
+    let Some(api) = xray.api.as_ref() else {
+        info!("Xray API disabled (no api block in config)");
+        return Ok(());
+    };
 
-    let xray = load_xray_config_from_file(&config_path)?;
-    let config = load_runtime_config(&xray)?;
-    if let Some(api) = xray.api.as_ref() {
-        let services = api::server::parse_enabled_services(&api.services)?;
-        let listen = api.listen.clone();
-        let stats_registry = config
-            .stats
-            .as_ref()
-            .map(|stats| Arc::clone(&stats.registry))
-            .unwrap_or_else(|| Arc::new(StatsRegistry::new()));
-        let inbound_users = Arc::clone(&config.inbound_users);
-        tokio::spawn(async move {
-            if let Err(err) =
-                api::server::serve_grpc(&listen, services, stats_registry, inbound_users).await
-            {
-                error!(error = %err, "gRPC API server stopped");
-            }
-        });
-        info!(api_listen = %api.listen, api_services = ?api.services, "gRPC API server task started");
+    info!(api_tag = %api.tag, api_services = ?api.services, "Xray API starting");
+
+    let resolved = resolve_api_listen(xray)?;
+    let Some((listen, listen_source, dokodemo_tag)) = resolved else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "API services configured for tag {:?} but no api.listen and no routed dokodemo-door API inbound was found",
+                api.tag
+            ),
+        ));
+    };
+
+    info!(
+        api_listen = %listen,
+        api_listen_source = listen_source.as_log_label(),
+        dokodemo_inbound_tag = ?dokodemo_tag,
+        "detected Xray API listener address"
+    );
+
+    if let Some(tag) = dokodemo_tag.as_deref() {
+        info!(
+            inbound_tag = %tag,
+            "skipping normal inbound startup for API dokodemo-door inbound (gRPC API uses this listen/port)"
+        );
     }
+
+    let transport = api::server::api_transport_mode_from_env()?;
+    info!(api_transport = transport.as_log_label(), "Xray API mode");
+
+    let enabled = match api::server::parse_enabled_services(&api.services) {
+        Ok(services) => services,
+        Err(err) => {
+            error!(error = %err, "Xray API services parse FAIL");
+            return Err(err);
+        }
+    };
+
+    let (listener, bound_addr) = match api::server::bind_api_listener(&listen).await {
+        Ok(bound) => {
+            info!(bind_addr = %bound.1, "Xray API bind OK");
+            bound
+        }
+        Err(err) => {
+            error!(error = %err, api_listen = %listen, "Xray API bind FAIL");
+            return Err(err);
+        }
+    };
+
+    api::server::log_api_listener_ready(&listen, bound_addr, &api.services, transport);
+
+    tokio::spawn(async move {
+        if let Err(err) =
+            api::server::serve_grpc_on(listener, enabled, stats_registry, inbound_users).await
+        {
+            error!(error = %err, "Xray API server stopped");
+        }
+    });
+
+    Ok(())
+}
+
+async fn run_server(opts: RunOptions) -> std::io::Result<()> {
+    let program = std::env::args()
+        .next()
+        .unwrap_or_else(|| "rw-core".to_string());
+    let config_source = opts.config.clone();
+    let source_kind = config_source_kind(&config_source);
+
+    info!(
+        command_line = %format_redacted_run_command(&program, &config_source, opts.format.as_deref()),
+        config_source_kind = source_kind,
+        "rust-xray starting"
+    );
+    if let Some(format) = opts.format.as_deref() {
+        info!(format = %format, "Xray config format");
+    }
+
+    info!(
+        source = %redact_config_source(&config_source),
+        config_source_kind = source_kind,
+        "loading Xray config"
+    );
+    let xray = match load_xray_config_from_source(&config_source).await {
+        Ok(config) => {
+            info!(
+                source = %redact_config_source(&config_source),
+                config_source_kind = source_kind,
+                inbound_count = config.inbounds.len(),
+                outbound_count = config.outbounds.len(),
+                has_api = config.api.is_some(),
+                "config loaded OK"
+            );
+            if let Some(api) = config.api.as_ref() {
+                info!(api_tag = %api.tag, api_services = ?api.services, "api block present");
+                if let Ok(Some((listen, source, tag))) = resolve_api_listen(&config) {
+                    info!(
+                        api_listen = %listen,
+                        api_listen_source = source.as_log_label(),
+                        dokodemo_inbound_tag = ?tag,
+                        "API listener resolved from config"
+                    );
+                }
+            }
+            config
+        }
+        Err(err) => {
+            error!(
+                error = %err,
+                source = %redact_config_source(&config_source),
+                config_source_kind = source_kind,
+                "config loaded FAIL"
+            );
+            return Err(err);
+        }
+    };
+
+    let inbound_users = Arc::new(InboundUserManagers::new());
+    let stats_state = StatsState::from_xray_config(&xray, api_dokodemo_inbound_tag(&xray));
+    let stats_registry = Arc::clone(&stats_state.registry);
+
+    if let Err(err) = start_xray_api_server(&xray, Arc::clone(&inbound_users), stats_registry).await
+    {
+        error!(error = %err, "Xray API startup FAIL");
+        return Err(err);
+    }
+
+    info!("loading REALITY runtime");
+    let config = match load_runtime_config(&xray) {
+        Ok(config) => {
+            info!(
+                listen = %config.reality.listen_addr,
+                tag = ?config.reality.tag,
+                "REALITY runtime loaded OK"
+            );
+            config
+        }
+        Err(err) => {
+            error!(error = %err, "REALITY runtime loaded FAIL");
+            return Err(err);
+        }
+    };
+
+    inbound_users.register(Arc::clone(&config.user_manager));
+
     let listen_addr = config.reality.listen_addr.clone();
     let config = Arc::new(config);
 
-    let listener = TcpListener::bind(&listen_addr).await?;
+    info!(addr = %listen_addr, "REALITY inbound starting");
+    let listener = match TcpListener::bind(&listen_addr).await {
+        Ok(listener) => {
+            info!(addr = %listen_addr, "REALITY inbound bind OK");
+            listener
+        }
+        Err(err) => {
+            error!(error = %err, addr = %listen_addr, "REALITY inbound bind FAIL");
+            return Err(err);
+        }
+    };
     info!(addr = %listen_addr, "REALITY listener started");
 
     loop {

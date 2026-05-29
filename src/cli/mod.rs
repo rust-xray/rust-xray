@@ -1,13 +1,21 @@
 //! Xray-compatible CLI argument parsing for Remna/Remnawave drop-in usage.
 
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const KNOWN_COMMANDS: &[&str] = &["run", "version", "api", "help"];
 
+/// Options for `run` / direct `-config` invocations (Xray-compatible).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOptions {
+    pub config: String,
+    pub format: Option<String>,
+}
+
 /// Parsed top-level command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Run { config: PathBuf },
+    Run(RunOptions),
     Version,
     Api(ApiCommand),
 }
@@ -75,30 +83,29 @@ where
     argv.remove(0);
 
     if argv.is_empty() {
-        return Ok(Command::Run {
-            config: default_config_path(),
-        });
+        return Ok(Command::Run(default_run_options()));
     }
 
     if argv[0].starts_with('-') {
         if argv.iter().any(|a| a == "-version" || a == "--version") {
             return Ok(Command::Version);
         }
-        let config = parse_run_config_flags(&argv)?;
-        return Ok(Command::Run { config });
+        let opts = parse_run_config_flags(&argv)?;
+        return Ok(Command::Run(opts));
     }
 
     match argv[0].as_str() {
         "run" => {
-            let config = parse_run_config_flags(&argv[1..])?;
-            Ok(Command::Run { config })
+            let opts = parse_run_config_flags(&argv[1..])?;
+            Ok(Command::Run(opts))
         }
         "version" => Ok(Command::Version),
         "api" => parse_api_command(&argv[1..]),
         "help" | "-h" | "--help" => Err(CliError::new(usage_text())),
-        cmd if is_legacy_config_invocation(cmd) => Ok(Command::Run {
-            config: PathBuf::from(&argv[0]),
-        }),
+        cmd if is_legacy_config_invocation(cmd) => Ok(Command::Run(RunOptions {
+            config: argv[0].clone(),
+            format: None,
+        })),
         other => Err(CliError::new(format!("unknown command: {other}"))),
     }
 }
@@ -111,8 +118,16 @@ fn default_config_path() -> PathBuf {
     PathBuf::from("./config.json")
 }
 
-fn parse_run_config_flags(args: &[String]) -> Result<PathBuf, CliError> {
-    let mut config: Option<PathBuf> = None;
+fn default_run_options() -> RunOptions {
+    RunOptions {
+        config: default_config_path().display().to_string(),
+        format: None,
+    }
+}
+
+fn parse_run_config_flags(args: &[String]) -> Result<RunOptions, CliError> {
+    let mut config: Option<String> = None;
+    let mut format: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -123,25 +138,50 @@ fn parse_run_config_flags(args: &[String]) -> Result<PathBuf, CliError> {
         }
         if matches_flag(arg, "config") || arg == "-c" {
             let path = take_flag_value(args, &mut i, "config")?;
-            config = Some(PathBuf::from(path));
+            config = Some(path.to_string());
             i += 1;
             continue;
         }
-        if arg.starts_with("-") && !arg.starts_with("--config") {
+        if matches_flag(arg, "format") {
+            let value = take_flag_value(args, &mut i, "format")?;
+            format = Some(value.to_string());
             i += 1;
             continue;
         }
-        if config.is_none() && looks_like_config_path(arg) {
-            config = Some(PathBuf::from(arg));
+        if arg.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        if config.is_none() && looks_like_config_source(arg) {
+            config = Some(arg.clone());
         }
         i += 1;
     }
 
-    Ok(config.unwrap_or_else(default_config_path))
+    validate_run_format(format.as_deref())?;
+
+    Ok(RunOptions {
+        config: config.unwrap_or_else(|| default_config_path().display().to_string()),
+        format,
+    })
 }
 
-fn looks_like_config_path(arg: &str) -> bool {
-    !arg.starts_with('-') && (arg.ends_with(".json") || Path::new(arg).exists())
+fn validate_run_format(format: Option<&str>) -> Result<(), CliError> {
+    let Some(format) = format else {
+        return Ok(());
+    };
+    let format = format.trim();
+    if format.eq_ignore_ascii_case("json") {
+        return Ok(());
+    }
+    Err(CliError::new(format!(
+        "unsupported -format {format:?}; only json is supported"
+    )))
+}
+
+fn looks_like_config_source(arg: &str) -> bool {
+    !arg.starts_with('-')
+        && (arg.starts_with("http+unix://") || arg.ends_with(".json") || Path::new(arg).exists())
 }
 
 fn parse_api_command(args: &[String]) -> Result<Command, CliError> {
@@ -217,28 +257,30 @@ fn take_flag_value<'a>(
     Ok(args[*index].as_str())
 }
 
-/// Xray-like version lines written to stdout by `version`.
-pub fn version_lines() -> Vec<String> {
+/// Single-line Xray-compatible version string (Remnawave entrypoint uses `version | head -n 1`).
+pub fn version_line() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let codename = "Xray, Penetrates Everything.";
-    let intro = "A unified platform for anti-censorship.";
     let build = "rust-xray compatibility build";
     let target = std::env::consts::ARCH;
     let os = std::env::consts::OS;
-    vec![
-        format!("Xray {version} ({codename}) {build} (rustc {os}/{target})"),
-        intro.to_string(),
-    ]
+    format!("Xray {version} ({codename}) {build} (rustc {os}/{target})")
 }
 
+/// Write version to stdout; ignore `BrokenPipe` when the consumer closes early (e.g. `head -n 1`).
 pub fn print_version() {
-    for line in version_lines() {
-        println!("{line}");
+    let line = version_line();
+    let mut stdout = io::stdout().lock();
+    if let Err(err) = writeln!(stdout, "{line}") {
+        if err.kind() != io::ErrorKind::BrokenPipe {
+            let _ = writeln!(io::stderr(), "version: {err}");
+            std::process::exit(1);
+        }
     }
 }
 
 fn usage_text() -> String {
-    "Usage: xray run -config <file> | xray -config <file> | xray version | xray api statsquery | xray api stats".to_string()
+    "Usage: xray run -config <file|http+unix://...> [-format json] | xray -config <source> -format json | xray version | xray api statsquery | xray api stats".to_string()
 }
 
 #[cfg(test)]
@@ -246,7 +288,7 @@ mod tests {
     use super::*;
 
     fn parse(argv: &[&str]) -> Result<Command, CliError> {
-        let mut args = vec!["xray".to_string()];
+        let mut args = vec!["rw-core".to_string()];
         args.extend(argv.iter().map(|s| (*s).to_string()));
         parse_args(args)
     }
@@ -256,10 +298,54 @@ mod tests {
         let cmd = parse(&["run", "-config", "/tmp/c.json"]).unwrap();
         assert_eq!(
             cmd,
-            Command::Run {
-                config: PathBuf::from("/tmp/c.json")
-            }
+            Command::Run(RunOptions {
+                config: "/tmp/c.json".to_string(),
+                format: None,
+            })
         );
+    }
+
+    #[test]
+    fn parse_direct_config_with_format_json() {
+        let uri = "http+unix:///run/a.sock/internal/get-config?token=secret";
+        let cmd = parse(&["-config", uri, "-format", "json"]).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Run(RunOptions {
+                config: uri.to_string(),
+                format: Some("json".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_run_config_with_format_json() {
+        let cmd = parse(&["run", "-config", "/tmp/c.json", "-format", "json"]).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Run(RunOptions {
+                config: "/tmp/c.json".to_string(),
+                format: Some("json".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_shorthand_c_flag() {
+        let cmd = parse(&["run", "-c", "/tmp/c.json"]).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Run(RunOptions {
+                config: "/tmp/c.json".to_string(),
+                format: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_unsupported_format_is_error() {
+        let err = parse(&["-config", "/tmp/c.json", "-format", "toml"]).unwrap_err();
+        assert!(err.message.contains("unsupported -format"));
     }
 
     #[test]
@@ -267,9 +353,10 @@ mod tests {
         let cmd = parse(&["-config", "/tmp/c.json"]).unwrap();
         assert_eq!(
             cmd,
-            Command::Run {
-                config: PathBuf::from("/tmp/c.json")
-            }
+            Command::Run(RunOptions {
+                config: "/tmp/c.json".to_string(),
+                format: None,
+            })
         );
     }
 
@@ -278,9 +365,10 @@ mod tests {
         let cmd = parse(&["run", "--config=/tmp/c.json"]).unwrap();
         assert_eq!(
             cmd,
-            Command::Run {
-                config: PathBuf::from("/tmp/c.json")
-            }
+            Command::Run(RunOptions {
+                config: "/tmp/c.json".to_string(),
+                format: None,
+            })
         );
     }
 
@@ -292,6 +380,13 @@ mod tests {
     #[test]
     fn parse_version_flag_compat() {
         assert_eq!(parse(&["-version"]).unwrap(), Command::Version);
+    }
+
+    #[test]
+    fn version_line_is_single_line() {
+        let line = version_line();
+        assert!(line.starts_with("Xray "));
+        assert!(!line.contains('\n'));
     }
 
     #[test]
@@ -353,27 +448,16 @@ mod tests {
         let cmd = parse(&["./config.json"]).unwrap();
         assert_eq!(
             cmd,
-            Command::Run {
-                config: PathBuf::from("./config.json")
-            }
+            Command::Run(RunOptions {
+                config: "./config.json".to_string(),
+                format: None,
+            })
         );
     }
 
     #[test]
     fn parse_default_config_when_no_args() {
         let cmd = parse_args(["xray"]).unwrap();
-        assert_eq!(
-            cmd,
-            Command::Run {
-                config: PathBuf::from("./config.json")
-            }
-        );
-    }
-
-    #[test]
-    fn version_lines_start_with_xray() {
-        let lines = version_lines();
-        assert!(lines[0].starts_with("Xray "));
-        assert_eq!(lines.len(), 2);
+        assert_eq!(cmd, Command::Run(default_run_options()));
     }
 }

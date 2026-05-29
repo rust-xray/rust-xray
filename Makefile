@@ -1,10 +1,15 @@
-.PHONY: test build fixture-test fixture-decode fixture-decode-write capture-clienthello live-smoke
+.PHONY: test build build-musl fixture-test fixture-decode fixture-decode-write capture-clienthello live-smoke
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+CC_x86_64_unknown_linux_musl=musl-gcc
 
 test:
 	cargo test
 
 build:
 	cargo build
+
+build-musl:
+	cargo build --target x86_64-unknown-linux-musl
 
 live-smoke:
 	bash scripts/live_reality_smoke/run-live-smoke.sh
