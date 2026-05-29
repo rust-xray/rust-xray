@@ -6,9 +6,10 @@ use tracing::{debug, info};
 
 use crate::protocol::structs::ClientHelloPayload;
 use crate::reality::Mldsa65Seed;
+use crate::stats::StatsState;
 use crate::tls::{PrefixedStream, TlsClientHelloRecord};
 use crate::vless::handle_reality_vless_tcp_inbound;
-use crate::vless::VlessClient;
+use crate::vless::VlessUserManager;
 
 use super::decision::RealityAccepted;
 use super::handshake::{fetch_dest_handshake, prepare_reality_tls13_state};
@@ -28,8 +29,9 @@ pub async fn handle_accepted_reality_client(
     client_hello_payload: ClientHelloPayload,
     accepted: RealityAccepted,
     dest_addr: &str,
-    vless_clients: &[VlessClient],
+    users: &VlessUserManager,
     mldsa65_seed: Option<&Mldsa65Seed>,
+    stats_state: Option<&StatsState>,
 ) -> std::io::Result<()> {
     info!(
         stage = stages::ACCEPTED_START,
@@ -37,7 +39,7 @@ pub async fn handle_accepted_reality_client(
         client_version = ?accepted.client.client_version,
         unix_time = accepted.client.unix_time,
         short_id_len = short_id_prefix_len(&accepted.client.short_id),
-        vless_client_count = vless_clients.len(),
+        vless_client_count = users.user_count(),
         client_hello_record_len = record.raw_record.len(),
         %dest_addr,
         "REALITY accepted path started"
@@ -103,11 +105,11 @@ pub async fn handle_accepted_reality_client(
         stage = stages::VLESS_START,
         %dest_addr,
         cipher_suite,
-        vless_client_count = vless_clients.len(),
+        vless_client_count = users.user_count(),
         "handing off to VLESS inbound"
     );
 
-    handle_reality_vless_tcp_inbound(tls_app_stream, vless_clients).await?;
+    handle_reality_vless_tcp_inbound(tls_app_stream, users, stats_state).await?;
 
     info!(stage = stages::VLESS_RELAY_DONE, %dest_addr, "REALITY accepted path complete");
 

@@ -1,12 +1,16 @@
 #[macro_use]
 pub mod protocol;
 
+pub mod api;
+pub mod cli;
 pub mod codec;
 pub mod config;
 pub mod error;
 pub mod outbound;
 pub mod proxy;
 pub mod reality;
+pub mod runtime;
+pub mod stats;
 pub mod tls;
 pub mod vless;
 

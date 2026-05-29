@@ -1,7 +1,8 @@
-use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rust_xray::api;
+use rust_xray::cli::{self, Command};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
@@ -17,10 +18,12 @@ use rust_xray::reality::{
     handle_accepted_reality_client, inspect_reality_client_hello, RealityDecision,
     RealityInspectConfig,
 };
+use rust_xray::runtime::InboundUserManagers;
+use rust_xray::stats::StatsState;
 use rust_xray::tls::{read_client_hello_record, PrefixedStream, TlsClientHelloRecord};
 use rust_xray::vless::{
     build_fallback_context, build_vless_clients, fallback_match_kind_label,
-    looks_like_http_request, resolve_fallback_selection, VlessClient,
+    looks_like_http_request, resolve_fallback_selection, VlessUserManager,
 };
 
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
@@ -28,7 +31,9 @@ const NON_TLS_PREAMBLE_READ_LIMIT: usize = 4096;
 
 struct RuntimeConfig {
     reality: RealityInboundRuntime,
-    vless_clients: Vec<VlessClient>,
+    user_manager: Arc<VlessUserManager>,
+    inbound_users: Arc<InboundUserManagers>,
+    stats: Option<Arc<StatsState>>,
 }
 
 enum InboundPreamble {
@@ -49,6 +54,10 @@ async fn relay_vless_fallback_with_log(
     hello: Option<&ClientHelloPayload>,
     reason: &str,
 ) -> std::io::Result<()> {
+    let stats = config
+        .stats
+        .as_ref()
+        .and_then(|state| state.session(None, None));
     let ctx = build_fallback_context(hello, initial_client_bytes);
     let selection = resolve_fallback_selection(
         &config.reality.vless_fallbacks,
@@ -74,12 +83,18 @@ async fn relay_vless_fallback_with_log(
         "VLESS fallback target selected"
     );
 
-    relay_fallback_with_xver(client, &dest_addr, initial_client_bytes, xver)
-        .await
-        .map_err(|e| {
-            error!(reason, %dest_addr, xver, error = %e, "fallback relay failed");
-            std::io::Error::new(e.kind(), format!("fallback relay failed ({reason}): {e}"))
-        })
+    relay_fallback_with_xver(
+        client,
+        &dest_addr,
+        initial_client_bytes,
+        xver,
+        stats.as_ref(),
+    )
+    .await
+    .map_err(|e| {
+        error!(reason, %dest_addr, xver, error = %e, "fallback relay failed");
+        std::io::Error::new(e.kind(), format!("fallback relay failed ({reason}): {e}"))
+    })
 }
 
 async fn read_inbound_preamble(mut stream: TcpStream) -> std::io::Result<InboundPreamble> {
@@ -192,8 +207,9 @@ async fn handle_tls_client(
                 ch,
                 accepted,
                 &config.reality.dest_addr,
-                &config.vless_clients,
+                &config.user_manager,
                 config.reality.mldsa65_seed.as_ref(),
+                config.stats.as_deref(),
             )
             .await
             {
@@ -227,23 +243,6 @@ async fn handle_tls_client(
     }
 }
 
-fn config_path_from_args() -> PathBuf {
-    env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("./config.json"))
-}
-
-fn runtime_config_from_xray(xray: &XrayConfig) -> std::io::Result<RuntimeConfig> {
-    let reality = first_reality_inbound_runtime(xray)?;
-    let vless_clients = build_vless_clients(&reality.vless_clients)?;
-
-    Ok(RuntimeConfig {
-        reality,
-        vless_clients,
-    })
-}
-
 fn validate_reality_runtime_feature_gates(config: &RuntimeConfig) -> std::io::Result<()> {
     match reality_mldsa65_runtime_mode(&config.reality) {
         RealityMldsa65RuntimeMode::Disabled => Ok(()),
@@ -251,9 +250,33 @@ fn validate_reality_runtime_feature_gates(config: &RuntimeConfig) -> std::io::Re
     }
 }
 
-fn load_runtime_config(path: &PathBuf) -> std::io::Result<RuntimeConfig> {
-    let xray = load_xray_config_from_file(path)?;
-    let config = runtime_config_from_xray(&xray)?;
+fn runtime_config_from_xray(xray: &XrayConfig) -> std::io::Result<RuntimeConfig> {
+    load_runtime_config(xray)
+}
+
+fn load_runtime_config(xray: &XrayConfig) -> std::io::Result<RuntimeConfig> {
+    let reality = first_reality_inbound_runtime(xray)?;
+    let inbound_tag = reality
+        .tag
+        .clone()
+        .filter(|tag| !tag.is_empty())
+        .unwrap_or_else(|| "reality-in".to_string());
+    let vless_clients = build_vless_clients(&reality.vless_clients)?;
+    let user_manager = Arc::new(VlessUserManager::new(inbound_tag.clone(), vless_clients));
+    let inbound_users = Arc::new(InboundUserManagers::new());
+    inbound_users.register(Arc::clone(&user_manager));
+    let stats_state = StatsState::from_xray_config(xray, Some(inbound_tag));
+    let stats = if stats_state.enabled() {
+        Some(Arc::new(stats_state))
+    } else {
+        None
+    };
+    let config = RuntimeConfig {
+        reality,
+        user_manager,
+        inbound_users,
+        stats,
+    };
     validate_reality_runtime_feature_gates(&config)?;
 
     if config.reality.protocol.as_deref() == Some("vless") {
@@ -276,7 +299,7 @@ fn load_runtime_config(path: &PathBuf) -> std::io::Result<RuntimeConfig> {
         server_names = ?config.reality.server_names,
         short_id_count = config.reality.short_ids.len(),
         max_time_diff = config.reality.max_time_diff,
-        vless_client_count = config.vless_clients.len(),
+        vless_client_count = config.user_manager.user_count(),
         vless_fallback_count = config.reality.vless_fallbacks.len(),
         "loaded REALITY inbound settings"
     );
@@ -302,17 +325,60 @@ async fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    if let Err(err) = run().await {
+    let command = match cli::parse_args(std::env::args()) {
+        Ok(command) => command,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
+
+    if let Err(err) = dispatch(command).await {
         error!(error = %err, "server error");
         std::process::exit(1);
     }
 }
 
-async fn run() -> std::io::Result<()> {
-    let config_path = config_path_from_args();
+async fn dispatch(command: Command) -> std::io::Result<()> {
+    match command {
+        Command::Version => {
+            cli::print_version();
+            Ok(())
+        }
+        Command::Api(api) => {
+            if let Err(err) = api::execute(api).await {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Command::Run { config } => run_server(config).await,
+    }
+}
+
+async fn run_server(config_path: PathBuf) -> std::io::Result<()> {
     info!(path = %config_path.display(), "loading Xray config");
 
-    let config = load_runtime_config(&config_path)?;
+    let xray = load_xray_config_from_file(&config_path)?;
+    let config = load_runtime_config(&xray)?;
+    if let Some(api) = xray.api.as_ref() {
+        let services = api::server::parse_enabled_services(&api.services)?;
+        let listen = api.listen.clone();
+        let stats_registry = config
+            .stats
+            .as_ref()
+            .map(|stats| Arc::clone(&stats.registry))
+            .unwrap_or_else(|| Arc::new(rust_xray::stats::StatsRegistry::new()));
+        let inbound_users = Arc::clone(&config.inbound_users);
+        tokio::spawn(async move {
+            if let Err(err) =
+                api::server::serve_grpc(&listen, services, stats_registry, inbound_users).await
+            {
+                error!(error = %err, "gRPC API server stopped");
+            }
+        });
+        info!(api_listen = %api.listen, api_services = ?api.services, "gRPC API server task started");
+    }
     let listen_addr = config.reality.listen_addr.clone();
     let config = Arc::new(config);
 
@@ -382,11 +448,10 @@ mod tests {
         let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
         let config = runtime_config_from_xray(&xray).expect("build runtime config");
 
-        assert_eq!(config.vless_clients.len(), 1);
-        assert_eq!(
-            config.vless_clients[0].id,
-            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
-        );
+        assert_eq!(config.user_manager.user_count(), 1);
+        assert!(config
+            .user_manager
+            .contains_id(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()));
         assert_eq!(config.reality.protocol.as_deref(), Some("vless"));
         assert!(config.reality.vless_fallbacks.is_empty());
     }

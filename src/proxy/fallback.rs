@@ -5,6 +5,7 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::info;
 
+use crate::stats::StatsSession;
 use crate::vless::{build_proxy_protocol_v1, build_proxy_protocol_v2, validate_fallback_xver};
 
 const FALLBACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -24,7 +25,7 @@ pub async fn relay_fallback(
     dest_addr: &str,
     initial_client_bytes: &[u8],
 ) -> std::io::Result<()> {
-    relay_fallback_with_xver(client, dest_addr, initial_client_bytes, 0).await
+    relay_fallback_with_xver(client, dest_addr, initial_client_bytes, 0, None).await
 }
 
 pub async fn relay_fallback_with_xver(
@@ -32,6 +33,7 @@ pub async fn relay_fallback_with_xver(
     dest_addr: &str,
     initial_client_bytes: &[u8],
     xver: u8,
+    stats: Option<&StatsSession>,
 ) -> std::io::Result<()> {
     validate_fallback_xver(xver)?;
 
@@ -74,6 +76,9 @@ pub async fn relay_fallback_with_xver(
     }
 
     dest.write_all(initial_client_bytes).await?;
+    if let Some(stats) = stats {
+        stats.record_uplink(initial_client_bytes.len() as u64);
+    }
     info!(
         %dest_addr,
         initial_bytes = initial_client_bytes.len(),
@@ -97,6 +102,10 @@ pub async fn relay_fallback_with_xver(
         }
         Err(err) => return Err(err),
     };
+
+    if let Some(stats) = stats {
+        stats.record_relay(client_to_dest, dest_to_client);
+    }
 
     info!(
         %dest_addr,
@@ -168,7 +177,7 @@ mod tests {
         let (client, server) = connected_inbound_stream().await;
         let relay_dest_addr = dest_addr.clone();
         let relay_task = tokio::spawn(async move {
-            relay_fallback_with_xver(server, &relay_dest_addr, initial, 1).await
+            relay_fallback_with_xver(server, &relay_dest_addr, initial, 1, None).await
         });
 
         let received = dest_task.await.expect("target task");
@@ -202,7 +211,7 @@ mod tests {
         let (client, server) = connected_inbound_stream().await;
         let relay_dest_addr = dest_addr.clone();
         let relay_task = tokio::spawn(async move {
-            relay_fallback_with_xver(server, &relay_dest_addr, initial, 2).await
+            relay_fallback_with_xver(server, &relay_dest_addr, initial, 2, None).await
         });
 
         let received = dest_task.await.expect("target task");

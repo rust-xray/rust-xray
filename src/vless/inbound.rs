@@ -11,7 +11,7 @@ use crate::reality::tls13::{
     ApplicationStreamDirectRelay, RealityTls13ApplicationStream, RealityTls13RelayClient,
     RealityTls13RelaySplit,
 };
-use crate::vless::config::VlessClient;
+use crate::stats::{StatsSession, StatsState};
 use crate::vless::protocol::{
     encode_vless_response_header, parse_vless_request, VlessCommand, VlessRequest,
 };
@@ -19,6 +19,7 @@ use crate::vless::relay_debug::{
     log_outbound_stream_first_write, log_outbound_to_client_first_write,
     log_vless_request_diagnostics, log_vless_response_header_prefix,
 };
+use crate::vless::user_manager::{VlessAuthenticatedClient, VlessUserManager};
 use crate::vless::vision::{
     is_vision_flow, new_shared_traffic_state, parse_vless_request_flow, SharedTrafficState,
     VisionRelayStream, FLOW_XTLS_RPRX_VISION,
@@ -91,46 +92,15 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct VlessAuthenticatedClient {
-    pub id: uuid::Uuid,
-    pub email: Option<String>,
-    pub flow: Option<String>,
-}
-
 pub fn is_supported_vless_flow(flow: Option<&str>) -> bool {
     matches!(flow, None | Some("") | Some("xtls-rprx-vision"))
 }
 
 pub fn authenticate_vless_client(
     request: &VlessRequest,
-    clients: &[VlessClient],
+    users: &VlessUserManager,
 ) -> std::io::Result<VlessAuthenticatedClient> {
-    let client = clients
-        .iter()
-        .find(|client| client.id == request.user_id)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "unknown vless client id",
-            )
-        })?;
-
-    if !is_supported_vless_flow(client.flow.as_deref()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            format!(
-                "unsupported VLESS flow: {}",
-                client.flow.as_deref().unwrap_or("")
-            ),
-        ));
-    }
-
-    Ok(VlessAuthenticatedClient {
-        id: client.id,
-        email: client.email.clone(),
-        flow: client.flow.clone(),
-    })
+    users.authenticate(request)
 }
 
 pub fn validate_vless_flow_for_command(
@@ -274,6 +244,7 @@ async fn relay_vless_tcp_bidirectional<S>(
     outbound: &mut tokio::net::TcpStream,
     vision: Option<(SharedTrafficState, [u8; 16])>,
     direct_relay: Option<ApplicationStreamDirectRelay>,
+    _stats: Option<&StatsSession>,
 ) -> std::io::Result<(u64, u64)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -282,9 +253,9 @@ where
     let relay_result = if let Some((traffic, user_uuid)) = vision {
         let vision_client =
             VisionRelayStream::new(probed_client, traffic, user_uuid, direct_relay.clone());
-        relay_tcp_bidirectional(vision_client, outbound).await
+        relay_tcp_bidirectional(vision_client, outbound, None).await
     } else {
-        relay_tcp_bidirectional(probed_client, outbound).await
+        relay_tcp_bidirectional(probed_client, outbound, None).await
     };
 
     if direct_relay
@@ -316,8 +287,9 @@ struct VlessTcpRelayPrepared<S> {
 
 async fn prepare_vless_tcp_relay<S>(
     mut stream: S,
-    clients: &[VlessClient],
-) -> std::io::Result<VlessTcpRelayPrepared<S>>
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+) -> std::io::Result<(VlessTcpRelayPrepared<S>, Option<StatsSession>)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -325,8 +297,9 @@ where
         .await
         .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
 
-    let auth = authenticate_vless_client(&inbound.request, clients)
+    let auth = authenticate_vless_client(&inbound.request, users)
         .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+    let stats = stats_state.and_then(|state| state.session(auth.email.clone(), auth.level));
     let destination = format_vless_destination(&inbound.request.destination);
 
     let request_flow = parse_vless_request_flow(&inbound.request.additional_info);
@@ -406,6 +379,9 @@ where
         forward_tcp_initial_payload(&mut outbound, &initial_payload)
             .await
             .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+        if let Some(stats) = stats.as_ref() {
+            stats.record_uplink(initial_payload.len() as u64);
+        }
         info!(
             stage = stages::VLESS_INITIAL_PAYLOAD_FORWARDED,
             initial_payload_len = initial_payload.len(),
@@ -413,14 +389,17 @@ where
         );
     }
 
-    Ok(VlessTcpRelayPrepared {
-        stream,
-        outbound,
-        vision,
-        auth,
-        destination,
-        command: inbound.request.command,
-    })
+    Ok((
+        VlessTcpRelayPrepared {
+            stream,
+            outbound,
+            vision,
+            auth,
+            destination,
+            command: inbound.request.command,
+        },
+        stats,
+    ))
 }
 
 struct VlessTcpRelayFinished {
@@ -432,9 +411,14 @@ struct VlessTcpRelayFinished {
 fn finish_vless_tcp_relay(
     finished: VlessTcpRelayFinished,
     relay_result: std::io::Result<(u64, u64)>,
+    stats: Option<&StatsSession>,
 ) -> std::io::Result<()> {
     let (inbound_to_outbound, outbound_to_inbound) =
         relay_result.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
+    if let Some(stats) = stats {
+        stats.record_relay(inbound_to_outbound, outbound_to_inbound);
+    }
 
     info!(
         stage = stages::VLESS_RELAY_DONE,
@@ -450,11 +434,15 @@ fn finish_vless_tcp_relay(
     Ok(())
 }
 
-pub async fn handle_vless_tcp_inbound<S>(stream: S, clients: &[VlessClient]) -> std::io::Result<()>
+pub async fn handle_vless_tcp_inbound<S>(
+    stream: S,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let prepared = prepare_vless_tcp_relay(stream, clients).await?;
+    let (prepared, stats) = prepare_vless_tcp_relay(stream, users, stats_state).await?;
 
     info!(
         stage = stages::VLESS_RELAY_STARTED,
@@ -470,7 +458,8 @@ where
         command,
     } = prepared;
 
-    let relay_result = relay_vless_tcp_bidirectional(stream, &mut outbound, vision, None).await;
+    let relay_result =
+        relay_vless_tcp_bidirectional(stream, &mut outbound, vision, None, stats.as_ref()).await;
 
     finish_vless_tcp_relay(
         VlessTcpRelayFinished {
@@ -479,17 +468,19 @@ where
             command,
         },
         relay_result,
+        stats.as_ref(),
     )
 }
 
 pub async fn handle_reality_vless_tcp_inbound<S>(
     stream: RealityTls13ApplicationStream<S>,
-    clients: &[VlessClient],
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let prepared = prepare_vless_tcp_relay(stream, clients).await?;
+    let (prepared, stats) = prepare_vless_tcp_relay(stream, users, stats_state).await?;
 
     info!(
         stage = stages::VLESS_RELAY_STARTED,
@@ -511,8 +502,14 @@ where
         direct_relay,
     } = stream.split_for_relay()?;
     let relay = RealityTls13RelayClient::new(reader, writer, direct_relay.clone());
-    let relay_result =
-        relay_vless_tcp_bidirectional(relay, &mut outbound, vision, Some(direct_relay)).await;
+    let relay_result = relay_vless_tcp_bidirectional(
+        relay,
+        &mut outbound,
+        vision,
+        Some(direct_relay),
+        stats.as_ref(),
+    )
+    .await;
 
     finish_vless_tcp_relay(
         VlessTcpRelayFinished {
@@ -521,6 +518,7 @@ where
             command,
         },
         relay_result,
+        stats.as_ref(),
     )
 }
 
@@ -540,6 +538,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vless::config::VlessClient;
     use crate::vless::protocol::{VlessCommand, VlessDestination};
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -554,7 +553,12 @@ mod tests {
             id: USER_ID,
             email: email.map(str::to_string),
             flow: flow.map(str::to_string),
+            level: None,
         }
+    }
+
+    fn test_users(clients: Vec<VlessClient>) -> VlessUserManager {
+        VlessUserManager::new("test-in", clients)
     }
 
     fn vless_request(user_id: uuid::Uuid) -> VlessRequest {
@@ -569,13 +573,13 @@ mod tests {
 
     #[test]
     fn authenticate_vless_client_known_uuid() {
-        let clients = vec![vless_client(
+        let users = test_users(vec![vless_client(
             Some("user@example.com"),
             Some("xtls-rprx-vision"),
-        )];
+        )]);
         let request = vless_request(USER_ID);
 
-        let auth = authenticate_vless_client(&request, &clients).unwrap();
+        let auth = authenticate_vless_client(&request, &users).unwrap();
 
         assert_eq!(auth.id, USER_ID);
         assert_eq!(auth.email.as_deref(), Some("user@example.com"));
@@ -584,43 +588,43 @@ mod tests {
 
     #[test]
     fn authenticate_vless_client_unknown_uuid_is_permission_denied() {
-        let clients = vec![vless_client(None, None)];
+        let users = test_users(vec![vless_client(None, None)]);
         let request = vless_request(UNKNOWN_ID);
 
-        let err = authenticate_vless_client(&request, &clients).unwrap_err();
+        let err = authenticate_vless_client(&request, &users).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[test]
     fn authenticate_vless_client_flow_none_ok() {
-        let clients = vec![vless_client(Some("user@example.com"), None)];
+        let users = test_users(vec![vless_client(Some("user@example.com"), None)]);
         let request = vless_request(USER_ID);
 
-        authenticate_vless_client(&request, &clients).unwrap();
+        authenticate_vless_client(&request, &users).unwrap();
     }
 
     #[test]
     fn authenticate_vless_client_flow_empty_ok() {
-        let clients = vec![vless_client(Some("user@example.com"), Some(""))];
+        let users = test_users(vec![vless_client(Some("user@example.com"), Some(""))]);
         let request = vless_request(USER_ID);
 
-        authenticate_vless_client(&request, &clients).unwrap();
+        authenticate_vless_client(&request, &users).unwrap();
     }
 
     #[test]
     fn authenticate_vless_client_flow_vision_ok() {
-        let clients = vec![vless_client(None, Some("xtls-rprx-vision"))];
+        let users = test_users(vec![vless_client(None, Some("xtls-rprx-vision"))]);
         let request = vless_request(USER_ID);
 
-        authenticate_vless_client(&request, &clients).unwrap();
+        authenticate_vless_client(&request, &users).unwrap();
     }
 
     #[test]
     fn authenticate_vless_client_unsupported_flow_is_unsupported() {
-        let clients = vec![vless_client(None, Some("xtls-rprx-direct"))];
+        let users = test_users(vec![vless_client(None, Some("xtls-rprx-direct"))]);
         let request = vless_request(USER_ID);
 
-        let err = authenticate_vless_client(&request, &clients).unwrap_err();
+        let err = authenticate_vless_client(&request, &users).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
         assert_eq!(err.to_string(), "unsupported VLESS flow: xtls-rprx-direct");
     }
@@ -817,6 +821,7 @@ mod read_vless_request_tests {
 mod handle_vless_tcp_inbound_tests {
     use super::*;
     use crate::vless::config::VlessClient;
+    use crate::vless::user_manager::VlessUserManager;
     use std::future::Future;
     use std::io::ErrorKind;
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
@@ -866,7 +871,12 @@ mod handle_vless_tcp_inbound_tests {
             id: uuid::Uuid::from_bytes(USER_ID),
             email: Some("user@example.com".to_string()),
             flow: None,
+            level: None,
         }]
+    }
+
+    fn test_users() -> VlessUserManager {
+        VlessUserManager::new("test-in", test_clients())
     }
 
     #[test]
@@ -874,7 +884,7 @@ mod handle_vless_tcp_inbound_tests {
         let data = build_vless_request_bytes(&USER_ID, 0x02, 443);
         let cursor = std::io::Cursor::new(data);
 
-        let err = block_on(handle_vless_tcp_inbound(cursor, &test_clients())).unwrap_err();
+        let err = block_on(handle_vless_tcp_inbound(cursor, &test_users(), None)).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert!(err.to_string().contains("UDP unsupported"));
@@ -885,7 +895,7 @@ mod handle_vless_tcp_inbound_tests {
         let data = build_vless_request_bytes(&USER_ID, 0x03, 443);
         let cursor = std::io::Cursor::new(data);
 
-        let err = block_on(handle_vless_tcp_inbound(cursor, &test_clients())).unwrap_err();
+        let err = block_on(handle_vless_tcp_inbound(cursor, &test_users(), None)).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert!(err.to_string().contains("Mux unsupported"));
@@ -896,7 +906,7 @@ mod handle_vless_tcp_inbound_tests {
         let data = build_vless_request_with_addons(&USER_ID, b"xudp", 0x02, 443);
         let cursor = std::io::Cursor::new(data);
 
-        let err = block_on(handle_vless_tcp_inbound(cursor, &test_clients())).unwrap_err();
+        let err = block_on(handle_vless_tcp_inbound(cursor, &test_users(), None)).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert!(err.to_string().contains("XUDP unsupported"));
@@ -907,7 +917,7 @@ mod handle_vless_tcp_inbound_tests {
         let data = build_vless_request_bytes(&UNKNOWN_USER_ID, 0x01, 443);
         let cursor = std::io::Cursor::new(data);
 
-        let err = block_on(handle_vless_tcp_inbound(cursor, &test_clients())).unwrap_err();
+        let err = block_on(handle_vless_tcp_inbound(cursor, &test_users(), None)).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::PermissionDenied);
     }
@@ -936,9 +946,11 @@ mod handle_vless_tcp_inbound_tests {
                 .await
                 .expect("send vless request");
 
-            let clients = test_clients();
+            let users = test_users();
             let handle =
-                tokio::spawn(async move { handle_vless_tcp_inbound(server_io, &clients).await });
+                tokio::spawn(
+                    async move { handle_vless_tcp_inbound(server_io, &users, None).await },
+                );
 
             let mut received = [0u8; 16];
             let read = client_io
@@ -1029,14 +1041,20 @@ mod handle_vless_tcp_inbound_tests {
                 .await
                 .expect("send vless request");
 
-            let clients = vec![VlessClient {
-                id: uuid::Uuid::from_bytes(user_id),
-                email: Some("user@example.com".to_string()),
-                flow: Some("xtls-rprx-vision".to_string()),
-            }];
+            let users = VlessUserManager::new(
+                "test-in",
+                vec![VlessClient {
+                    id: uuid::Uuid::from_bytes(user_id),
+                    email: Some("user@example.com".to_string()),
+                    flow: Some("xtls-rprx-vision".to_string()),
+                    level: None,
+                }],
+            );
 
             let handle =
-                tokio::spawn(async move { handle_vless_tcp_inbound(server_io, &clients).await });
+                tokio::spawn(
+                    async move { handle_vless_tcp_inbound(server_io, &users, None).await },
+                );
 
             let mut received = [0u8; 32];
             let read = client_io
@@ -1076,10 +1094,9 @@ mod handle_vless_tcp_inbound_tests {
                 .await
                 .expect("send vless request");
 
-            let handle =
-                tokio::spawn(
-                    async move { handle_vless_tcp_inbound(server_io, &test_clients()).await },
-                );
+            let handle = tokio::spawn(async move {
+                handle_vless_tcp_inbound(server_io, &test_users(), None).await
+            });
 
             let mut received = [0u8; 8];
             let read = client_io.read(&mut received).await.expect("read response");
@@ -1126,10 +1143,9 @@ mod handle_vless_tcp_inbound_tests {
                 .await
                 .expect("send vless request");
 
-            let handle =
-                tokio::spawn(
-                    async move { handle_vless_tcp_inbound(server_io, &test_clients()).await },
-                );
+            let handle = tokio::spawn(async move {
+                handle_vless_tcp_inbound(server_io, &test_users(), None).await
+            });
 
             let mut received = [0u8; 32];
             let read = client_io

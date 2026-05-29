@@ -47,7 +47,9 @@ Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, 
 | `realitySettings` server fields | dest/target, keys, policy, seed, limits | Core server fields supported | `type`, `xver`, `limitFallback*` parsed but **ignored** at runtime. |
 | `realitySettings` client fields | outbound-only in upstream | Land in `realitySettings.extra` | **Silent misconfiguration** if copied onto server inbound. |
 | Transport sub-settings | tls/raw/ws/grpc/xhttp/sockopt/finalmask | Stored in `streamSettings.extra` only | **Silent ignore** — no socket/TLS/finalmask behavior. |
-| Top-level config | log, routing, outbounds, sniffing | `XrayConfig.extra` / `InboundObject.extra` | Ignored (expected for minimal server binary). |
+| Top-level `api` / `stats` / `policy` | Remna blocks | Typed + `validate_xray_panel_config` | No gRPC stats server yet | **parsed + validated** | `tests/config_remna.rs` |
+| Top-level `log` / `outbounds` | Panel metadata | `LogConfig` / `OutboundObject` | Not read at runtime | **parsed ignored** | Remna fixture, smoke fixtures |
+| Top-level `routing` | Traffic rules | `RoutingConfig` | Non-empty `rules`/`balancers` rejected at load | **explicit unsupported** (non-empty) | `config_remna::routing_rules_are_rejected_when_non_empty` |
 
 ---
 
@@ -62,9 +64,11 @@ Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, 
 | `settings` | Protocol settings blob | `Option<Value>` → `VlessInboundSettings` when vless | VLESS clients, decryption, fallbacks | **supported** | `inbound_vless_settings_*`, `preserves_client_flow_vision` |
 | `streamSettings` | Transport + security | `StreamSettingsObject` | Network validator + REALITY settings | **supported** | transport tests in `xray.rs` `#[cfg(test)]` |
 | `sniffing`, `allocate`, … | Xray sniffing / metadata | `InboundObject.extra` | Not read | **parsed ignored** | `parse_preserves_unknown_fields_in_extra` |
-| Top-level `log`, `routing`, `outbounds` | Full Xray instance | `XrayConfig.extra` | Not read by rust-xray server | **parsed ignored** | `parses_realistic_xray_vless_tcp_reality_server_config` |
+| Top-level `log`, `outbounds` | Full Xray instance | `LogConfig` / `Vec<OutboundObject>` | Not read by rust-xray server | **parsed ignored** | `parses_realistic_xray_vless_tcp_reality_server_config` |
+| Top-level `routing` | Router rules | `RoutingConfig` | Rejected when `rules`/`balancers` non-empty | **explicit unsupported** (non-empty) | `tests/config_remna.rs` |
+| Top-level `api`, `stats`, `policy` | Panel + stats API | Typed structs | gRPC server on `api.listen` when `run`; methods mostly `UNIMPLEMENTED` | **parsed + validated** / **runtime skeleton** | `tests/config_remna.rs`, `tests/api_grpc.rs` |
 
-**Risk:** Panels that emit full Xray configs validate on upstream but rust-xray silently ignores routing/sniffing/outbounds.
+**Risk:** Non-empty `routing.rules` are rejected at load (no silent misrouting). `sniffing` and `outbounds` are still parsed-only at runtime.
 
 ---
 
@@ -76,7 +80,8 @@ Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, 
 | `clients[].id` | UUID or custom string (Xray v5) | `String` | `parse_vless_user_id` | **supported** | `src/vless/config.rs` uuid tests |
 | `clients[].email` | Optional email | `Option<String>` | Stored on `VlessClient` | **supported** | `build_vless_clients_copies_email_and_flow` |
 | `clients[].flow` | Per-user flow (`xtls-rprx-vision`, …) | `Option<String>` | `validate_vless_client_flow` | **supported** (vision) / **explicit unsupported** (unknown) | `preserves_client_flow_vision`, `unknown_flow_returns_unsupported_at_runtime_validation`, `vision_flow_runtime_accepts_when_implemented` |
-| `clients[].level`, custom keys | Legacy VMess fields | `clients[].extra` | Not read | **parsed ignored** | `inbound_vless_settings_parses_clients` (`level` in extra) |
+| `clients[].level` | User policy level | `VlessClientObject.level` | Preserved on client object; not applied at runtime | **parsed ignored** (runtime) | `tests/config_remna.rs` |
+| `clients[]` custom keys | Legacy VMess fields | `clients[].extra` | Not read | **parsed ignored** | `parse_preserves_unknown_fields_in_extra` |
 | `users[]` | Alias of `clients` in upstream | Not a field; → `settings.extra` | Not read | **parsed ignored** | — **risk: use `clients` on server configs** |
 | `decryption` | VLESS encryption (`none` only here) | `Option<String>` | Default `"none"`; other values rejected | **supported** / **explicit unsupported** | `defaults_missing_vless_decryption_to_none`, `rejects_decryption_other_than_none` |
 | `fallbacks[]` | Non-VLESS routing targets | `Vec<FallbackConfig>` | `resolve_fallback_selection` + `relay_fallback_with_xver` | **supported** | `src/vless/fallback.rs` matrix tests, `main.rs` fallback tests |

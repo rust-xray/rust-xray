@@ -2,9 +2,21 @@
 name = "rust-xray"
 version = "0.1.0"
 edition = "2021"
+default-run = "rust-xray"
+
+[[bin]]
+name = "rust-xray"
+path = "src/main.rs"
+
+[[bin]]
+name = "xray"
+path = "src/main.rs"
 
 [features]
 default = []
+
+[build-dependencies]
+tonic-build = "0.12"
 
 [dependencies]
 aead = "0.5.2"
@@ -29,6 +41,10 @@ rcgen = "0.13"
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 getrandom = "0.2"
 subtle = "2"
+tonic = { version = "0.12", features = ["transport"] }
+prost = "0.13"
+tonic-reflection = "0.12"
+tokio-stream = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

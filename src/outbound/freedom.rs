@@ -43,12 +43,17 @@ pub async fn forward_tcp_initial_payload(
 pub async fn relay_tcp_bidirectional<S>(
     mut inbound: S,
     outbound: &mut TcpStream,
+    stats: Option<&crate::stats::StatsSession>,
 ) -> std::io::Result<(u64, u64)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (inbound_to_outbound, outbound_to_inbound) =
         copy_bidirectional(&mut inbound, outbound).await?;
+
+    if let Some(stats) = stats {
+        stats.record_relay(inbound_to_outbound, outbound_to_inbound);
+    }
 
     info!(
         inbound_to_outbound,

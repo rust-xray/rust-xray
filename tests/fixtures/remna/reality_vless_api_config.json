@@ -1,0 +1,72 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "api": {
+    "tag": "api",
+    "listen": "127.0.0.1:10085",
+    "services": ["HandlerService", "StatsService"]
+  },
+  "stats": {},
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserUplink": true,
+        "statsUserDownlink": true,
+        "statsUserOnline": true
+      }
+    },
+    "system": {
+      "statsInboundUplink": true,
+      "statsInboundDownlink": true,
+      "statsOutboundUplink": true,
+      "statsOutboundDownlink": true
+    }
+  },
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": []
+  },
+  "inbounds": [
+    {
+      "tag": "vless-reality-in",
+      "listen": "127.0.0.1",
+      "port": 24443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "email": "remna-user@example.test",
+            "flow": "xtls-rprx-vision",
+            "level": 0
+          }
+        ],
+        "decryption": "none",
+        "fallbacks": []
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "www.microsoft.com:443",
+          "serverNames": ["www.microsoft.com"],
+          "privateKey": "MKVGVTTvyEyI7hpl7vP7WKtRXLhH0JieCMHgFdn6A3s",
+          "shortIds": ["0123456789abcdef"],
+          "maxTimeDiff": 0
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ]
+}

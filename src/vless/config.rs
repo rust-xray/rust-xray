@@ -8,6 +8,7 @@ pub struct VlessClient {
     pub id: uuid::Uuid,
     pub email: Option<String>,
     pub flow: Option<String>,
+    pub level: Option<u32>,
 }
 
 /// Parse a VLESS user id the same way as Xray-core `common/uuid.ParseString`.
@@ -68,6 +69,7 @@ pub fn build_vless_clients(clients: &[VlessClientObject]) -> std::io::Result<Vec
                 id,
                 email: client.email.clone(),
                 flow: client.flow.clone(),
+                level: client.level,
             })
         })
         .collect()
@@ -83,6 +85,22 @@ mod tests {
             id: id.to_string(),
             email: email.map(str::to_string),
             flow: flow.map(str::to_string),
+            level: None,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    fn client_object_with_level(
+        id: &str,
+        email: Option<&str>,
+        flow: Option<&str>,
+        level: Option<u32>,
+    ) -> VlessClientObject {
+        VlessClientObject {
+            id: id.to_string(),
+            email: email.map(str::to_string),
+            flow: flow.map(str::to_string),
+            level,
             extra: BTreeMap::new(),
         }
     }

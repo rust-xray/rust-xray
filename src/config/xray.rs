@@ -8,8 +8,112 @@ use tracing::warn;
 
 const REALITY_DEFAULT_DEST_PORT: u16 = 443;
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LogConfig {
+    pub loglevel: Option<String>,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiConfig {
+    pub tag: String,
+    pub listen: String,
+    #[serde(default)]
+    pub services: Vec<String>,
+}
+
+/// Empty object `{}` enables Xray stats counters (parsed for Remna compatibility).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct StatsConfig {}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct PolicyLevel {
+    #[serde(rename = "statsUserUplink", default)]
+    pub stats_user_uplink: bool,
+    #[serde(rename = "statsUserDownlink", default)]
+    pub stats_user_downlink: bool,
+    #[serde(rename = "statsUserOnline", default)]
+    pub stats_user_online: bool,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct SystemPolicy {
+    #[serde(rename = "statsInboundUplink", default)]
+    pub stats_inbound_uplink: bool,
+    #[serde(rename = "statsInboundDownlink", default)]
+    pub stats_inbound_downlink: bool,
+    #[serde(rename = "statsOutboundUplink", default)]
+    pub stats_outbound_uplink: bool,
+    #[serde(rename = "statsOutboundDownlink", default)]
+    pub stats_outbound_downlink: bool,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct PolicyConfig {
+    #[serde(default)]
+    pub levels: BTreeMap<String, PolicyLevel>,
+    pub system: Option<SystemPolicy>,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RoutingRuleObject {
+    #[serde(rename = "type", default)]
+    pub rule_type: Option<String>,
+    #[serde(rename = "inboundTag", default)]
+    pub inbound_tag: Option<Value>,
+    #[serde(rename = "outboundTag", default)]
+    pub outbound_tag: Option<String>,
+    #[serde(rename = "balancerTag", default)]
+    pub balancer_tag: Option<String>,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RoutingConfig {
+    #[serde(default)]
+    pub rules: Vec<RoutingRuleObject>,
+    #[serde(rename = "domainStrategy", default)]
+    pub domain_strategy: Option<String>,
+    #[serde(default)]
+    pub balancers: Vec<Value>,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutboundObject {
+    pub tag: Option<String>,
+    pub protocol: Option<String>,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct XrayConfig {
+    pub log: Option<LogConfig>,
+    pub api: Option<ApiConfig>,
+    pub stats: Option<StatsConfig>,
+    pub policy: Option<PolicyConfig>,
+    pub routing: Option<RoutingConfig>,
+
+    #[serde(default)]
+    pub outbounds: Vec<OutboundObject>,
+
     #[serde(default)]
     pub inbounds: Vec<InboundObject>,
 
@@ -57,6 +161,7 @@ pub struct VlessClientObject {
     pub id: String,
     pub email: Option<String>,
     pub flow: Option<String>,
+    pub level: Option<u32>,
 
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -418,6 +523,61 @@ fn validate_vless_decryption(decryption: Option<&str>) -> std::io::Result<String
     }
 }
 
+/// Known Xray API `services` entries (Remna panels typically enable Handler + Stats).
+pub const KNOWN_API_SERVICES: &[&str] = &[
+    "ReflectionService",
+    "HandlerService",
+    "LoggerService",
+    "StatsService",
+    "ObservatoryService",
+    "RoutingService",
+];
+
+pub fn validate_xray_panel_config(config: &XrayConfig) -> std::io::Result<()> {
+    if let Some(api) = config.api.as_ref() {
+        if api.tag.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "api.tag must not be empty",
+            ));
+        }
+        if api.listen.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "api.listen must not be empty",
+            ));
+        }
+        for service in &api.services {
+            let known = KNOWN_API_SERVICES
+                .iter()
+                .any(|candidate| eq_ignore_ascii_case(service, candidate));
+            if !known {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!("api.services entry is not supported: {service}"),
+                ));
+            }
+        }
+    }
+
+    if let Some(routing) = config.routing.as_ref() {
+        if !routing.rules.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "routing.rules are parsed but not enforced at runtime; non-empty rules are rejected to avoid silent misrouting",
+            ));
+        }
+        if !routing.balancers.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "routing.balancers are not supported at runtime",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub fn load_xray_config_from_file(path: impl AsRef<Path>) -> std::io::Result<XrayConfig> {
     let path = path.as_ref();
     let contents = std::fs::read_to_string(path).map_err(|e| {
@@ -427,12 +587,14 @@ pub fn load_xray_config_from_file(path: impl AsRef<Path>) -> std::io::Result<Xra
         )
     })?;
 
-    serde_json::from_str(&contents).map_err(|e| {
+    let config: XrayConfig = serde_json::from_str(&contents).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("failed to parse config file {}: {e}", path.display()),
         )
-    })
+    })?;
+    validate_xray_panel_config(&config)?;
+    Ok(config)
 }
 
 pub fn find_reality_inbounds(config: &XrayConfig) -> Vec<&InboundObject> {
@@ -860,7 +1022,7 @@ mod tests {
         );
         assert_eq!(settings.decryption.as_deref(), Some("none"));
         assert!(settings.fallbacks.is_empty());
-        assert!(settings.clients[0].extra.contains_key("level"));
+        assert_eq!(settings.clients[0].level, Some(0));
     }
 
     #[test]
@@ -1050,8 +1212,9 @@ mod tests {
         assert_eq!(runtime.listen_addr, "127.0.0.1:24443");
         assert_eq!(runtime.dest_addr, "www.microsoft.com:443");
         assert_eq!(runtime.vless_decryption, "none");
-        assert!(config.extra.contains_key("log"));
-        assert!(config.extra.contains_key("routing"));
+        assert!(config.log.is_some());
+        assert!(config.routing.is_some());
+        assert_eq!(config.outbounds.len(), 2);
         assert!(config.inbounds[0].extra.contains_key("sniffing"));
         assert!(config.inbounds[0]
             .stream_settings
@@ -1762,8 +1925,11 @@ mod tests {
             "unknownTopLevel": true
         }"#;
         let config: XrayConfig = serde_json::from_str(json).unwrap();
-        assert!(config.extra.contains_key("log"));
-        assert!(config.extra.contains_key("routing"));
+        assert_eq!(
+            config.log.as_ref().unwrap().loglevel.as_deref(),
+            Some("debug")
+        );
+        assert!(config.routing.is_some());
         assert!(config.extra.contains_key("unknownTopLevel"));
         assert!(config.inbounds[0].extra.contains_key("customInboundField"));
         let stream = config.inbounds[0].stream_settings.as_ref().unwrap();
@@ -2062,6 +2228,12 @@ mod tests {
             extra: BTreeMap::new(),
         });
         let config = XrayConfig {
+            log: None,
+            api: None,
+            stats: None,
+            policy: None,
+            routing: None,
+            outbounds: Vec::new(),
             inbounds: vec![inbound],
             extra: BTreeMap::new(),
         };
@@ -2100,6 +2272,7 @@ mod tests {
                 id: "00000000-0000-0000-0000-000000000001".to_string(),
                 email: None,
                 flow: None,
+                level: None,
                 extra: BTreeMap::new(),
             }],
             vless_decryption: "none".to_string(),

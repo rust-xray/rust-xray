@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package xray.proxy.vless;
+option csharp_namespace = "Xray.Proxy.Vless";
+option go_package = "github.com/xtls/xray-core/proxy/vless";
+option java_package = "com.xray.proxy.vless";
+option java_multiple_files = true;
+
+// Subset of upstream Account used by HandlerService dynamic user APIs.
+message Account {
+  string id = 1;
+  string flow = 2;
+  string encryption = 3;
+  uint32 xorMode = 4;
+  uint32 seconds = 5;
+  string padding = 6;
+}

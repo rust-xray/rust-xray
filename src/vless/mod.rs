@@ -3,6 +3,7 @@ pub mod fallback;
 pub mod inbound;
 pub mod protocol;
 pub(crate) mod relay_debug;
+pub mod user_manager;
 pub(crate) mod vision;
 
 pub use config::{
@@ -17,8 +18,12 @@ pub use fallback::{
     FallbackDest, FallbackMatchKind, FallbackSelection,
 };
 pub use inbound::{
-    authenticate_vless_client, handle_reality_vless_tcp_inbound, handle_vless_tcp_inbound,
-    is_supported_vless_flow, prepare_vless_tcp_response, read_vless_request,
-    write_vless_response_header, VlessAuthenticatedClient, VlessInboundRequest,
+    handle_reality_vless_tcp_inbound, handle_vless_tcp_inbound, is_supported_vless_flow,
+    prepare_vless_tcp_response, read_vless_request, write_vless_response_header,
+    VlessInboundRequest,
 };
 pub use protocol::encode_vless_response_header;
+pub use user_manager::{
+    managed_user_from_vless_account, ManagedUser, UserManagerError, VlessAuthenticatedClient,
+    VlessUserManager,
+};
