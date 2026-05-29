@@ -605,6 +605,68 @@ mod tests {
         assert!(matches!(result, RealityDecision::Fallback));
     }
 
+    /// Documents inbound policy implemented in `main::handle_tls_client`:
+    /// - `RealityDecision::Fallback` → VLESS fallback relay (same as smoke bad shortId/SNI).
+    /// - `inspect_reality_client_hello` I/O error → fallback relay with reason `REALITY inspect error`.
+    /// - TLS record present but ClientHello parse error → fallback relay without inspect (reason `ClientHello parse error`).
+    /// Accepted REALITY clients never take the fallback relay path.
+    #[test]
+    fn client_hello_policy_matrix_fallback_vs_inspect_error() {
+        let server_names = vec!["example.com".to_string()];
+        let short_ids = vec![vec![0xAB, 0xCD]];
+
+        let (hello_no_sni, msg_no_sni) = {
+            let (mut hello, msg) = build_valid_reality_client(1_700_000_000, &[0xAB, 0xCD]);
+            hello
+                .extensions
+                .retain(|ext| !matches!(ext, ClientExtension::ServerName(_)));
+            (hello, msg)
+        };
+        let missing_sni = inspect_reality_client_hello(
+            &hello_no_sni,
+            &msg_no_sni,
+            inspect_cfg_with_versions(&server_names, &short_ids, 0, None, None, None),
+        )
+        .unwrap();
+        assert!(matches!(missing_sni, RealityDecision::Fallback));
+
+        let (hello_no_ks, msg_no_ks) = {
+            let random = Random([0x22; 32]);
+            let hello = ClientHelloPayload {
+                extensions: vec![
+                    ClientExtension::make_sni(&DnsName::try_from("example.com").unwrap()),
+                    ClientExtension::SupportedVersions(vec![ProtocolVersion::TLSv1_3]),
+                ],
+                ..reality_candidate_hello(random)
+            };
+            let msg = build_minimal_handshake_message(&random.0, &[0u8; 32]);
+            (hello, msg)
+        };
+        let no_keyshare = inspect_reality_client_hello(
+            &hello_no_ks,
+            &msg_no_ks,
+            inspect_cfg_with_versions(&server_names, &short_ids, 0, None, None, None),
+        )
+        .unwrap();
+        assert!(matches!(no_keyshare, RealityDecision::Fallback));
+
+        let (hello, handshake_message) = build_valid_reality_client(1_700_000_000, &[0xAB, 0xCD]);
+        let inspect_err = inspect_reality_client_hello(
+            &hello,
+            &handshake_message,
+            inspect_cfg_with_versions(
+                &server_names,
+                &short_ids,
+                0,
+                Some("not.a.version"),
+                None,
+                None,
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(inspect_err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
     #[test]
     fn inspect_reality_client_hello_invalid_min_client_ver_returns_invalid_input() {
         let server_names = vec!["example.com".to_string()];

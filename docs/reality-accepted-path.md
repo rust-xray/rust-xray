@@ -59,6 +59,16 @@ Go/XTLS REALITY server handshake code):
 | TLS record framing | `src/tls/records.rs` | **Builders + parser** — no encryption layer yet |
 | Dest observation → state setup | `prepare_reality_tls13_state` (`handshake.rs`) | **Wired** — called from `handle_accepted_reality_client`; then `Unsupported` |
 
+## Deterministic Rust vectors (non-smoke)
+
+Upstream compatibility edge cases that already have live smoke coverage are also locked in Rust:
+
+- `tests/fixtures/fallback/proxy-v2-tcp4-127.0.0.1.bin` + `src/vless/fallback.rs` / `tests/upstream_compat_vectors.rs` (PROXY v2 `xver=2` bytes, path-over-ALPN precedence).
+- `src/reality/decision.rs` `client_hello_policy_matrix_fallback_vs_inspect_error` (inspect → fallback vs `InvalidInput` for main relay).
+- `tests/upstream_compat_vectors.rs` (unsupported transport startup, seed → `HmacPlusMldsa65` only).
+
+Live matrix remains `scripts/live_reality_smoke/run-live-smoke.sh` unchanged.
+
 ## Current rust-xray architecture
 
 ### Implemented

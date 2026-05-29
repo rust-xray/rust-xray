@@ -209,13 +209,15 @@ mod tests {
         drop(client);
         let _ = relay_task.await.expect("relay task");
 
-        assert!(received.starts_with(&[
-            0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
-        ]));
-        let payload_offset = 28;
         assert_eq!(
-            &received[payload_offset..payload_offset + initial.len()],
-            initial
+            &received[..12],
+            [0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A]
         );
+        assert_eq!(received[12], 0x21);
+        assert_eq!(received[13], 0x11);
+        assert_eq!(&received[14..16], &[0x00, 0x0C]);
+        let header_len = 16 + u16::from_be_bytes([received[14], received[15]]) as usize;
+        assert_eq!(header_len, 28);
+        assert_eq!(&received[header_len..header_len + initial.len()], initial);
     }
 }

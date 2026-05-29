@@ -106,6 +106,7 @@ any handshake or certificate mutation.
 
 ## Related reading
 
+- [REALITY ML-KEM / X25519MLKEM768 design (audit only)](./reality-mlkem-design.md)
 - [REALITY accepted path notes](./reality-accepted-path.md)
 - Upstream Xray REALITY server handshake (Go): `mldsa65Seed`, cert extension
   signing over HMAC + ClientHello + ServerHello

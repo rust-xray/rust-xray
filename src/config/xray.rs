@@ -253,6 +253,80 @@ pub fn validate_reality_stream_settings(stream: &StreamSettingsObject) -> std::i
     validate_reality_transport_network(stream.network.as_deref())
 }
 
+/// Client-outbound REALITY fields that must not appear on inbound server `realitySettings`.
+const REALITY_CLIENT_ONLY_INBOUND_FIELDS: &[&str] = &[
+    "fingerprint",
+    "serverName",
+    "password",
+    "publicKey",
+    "shortId",
+    "mldsa65Verify",
+    "spiderX",
+    "spiderY",
+    "masterKeyLog",
+];
+
+/// `streamSettings` sub-objects that are not implemented for REALITY inbound (misconfiguration risk).
+///
+/// `sockopt` is intentionally allowed so Xray-compatible smoke fixtures keep validating.
+const REALITY_UNSUPPORTED_STREAM_SUBOBJECTS: &[&str] = &[
+    "tlsSettings",
+    "rawSettings",
+    "tcpSettings",
+    "wsSettings",
+    "grpcSettings",
+    "xhttpSettings",
+    "splithttpSettings",
+    "kcpSettings",
+    "httpupgradeSettings",
+    "hysteriaSettings",
+    "finalmask",
+    "address",
+    "port",
+];
+
+/// Reject parsed-but-unsupported REALITY inbound fields at startup (no silent ignore).
+pub fn validate_reality_inbound_config_policy(
+    stream: &StreamSettingsObject,
+    settings: &RealitySettingsObject,
+) -> std::io::Result<()> {
+    if settings.limit_fallback_upload.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "realitySettings.limitFallbackUpload is not supported",
+        ));
+    }
+
+    if settings.limit_fallback_download.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "realitySettings.limitFallbackDownload is not supported",
+        ));
+    }
+
+    for field in REALITY_CLIENT_ONLY_INBOUND_FIELDS {
+        if settings.extra.contains_key(*field) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "realitySettings.{field} is client-only and must not appear on inbound REALITY server config"
+                ),
+            ));
+        }
+    }
+
+    for field in REALITY_UNSUPPORTED_STREAM_SUBOBJECTS {
+        if stream.extra.contains_key(*field) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!("streamSettings.{field} is not supported on REALITY inbound"),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_vless_reality_inbound_stream(inbound: &InboundObject) -> std::io::Result<()> {
     let stream = inbound.stream_settings.as_ref().ok_or_else(|| {
         std::io::Error::new(
@@ -261,7 +335,13 @@ fn validate_vless_reality_inbound_stream(inbound: &InboundObject) -> std::io::Re
         )
     })?;
 
-    validate_reality_stream_settings(stream)
+    validate_reality_stream_settings(stream)?;
+
+    if let Some(settings) = stream.reality_settings.as_ref() {
+        validate_reality_inbound_config_policy(stream, settings)?;
+    }
+
+    Ok(())
 }
 
 pub fn find_vless_reality_inbounds(config: &XrayConfig) -> Vec<&InboundObject> {
@@ -547,12 +627,21 @@ pub fn first_reality_inbound_runtime(
         );
     }
 
+    let stream = inbound.stream_settings.as_ref().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "VLESS REALITY inbound is missing streamSettings",
+        )
+    })?;
+
     let settings = get_inbound_reality_settings(inbound).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "reality inbound is missing realitySettings",
         )
     })?;
+
+    validate_reality_inbound_config_policy(stream, settings)?;
 
     let vless_settings = inbound_vless_settings(inbound)?;
     let (vless_clients, vless_decryption, vless_fallbacks) = match vless_settings {
@@ -1787,8 +1876,209 @@ mod tests {
         assert!(err.to_string().contains("must not equal privateKey"));
     }
 
+    fn vless_reality_config_from_reality_json(reality: serde_json::Value) -> XrayConfig {
+        let json = serde_json::json!({
+            "inbounds": [{
+                "port": 443,
+                "protocol": "vless",
+                "settings": {
+                    "clients": [{"id": "00000000-0000-0000-0000-000000000001"}],
+                    "decryption": "none"
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": reality
+                }
+            }]
+        });
+        serde_json::from_value(json).expect("parse config")
+    }
+
+    fn vless_reality_config_from_stream_settings(stream: serde_json::Value) -> XrayConfig {
+        let json = serde_json::json!({
+            "inbounds": [{
+                "port": 443,
+                "protocol": "vless",
+                "settings": {
+                    "clients": [{"id": "00000000-0000-0000-0000-000000000001"}],
+                    "decryption": "none"
+                },
+                "streamSettings": stream
+            }]
+        });
+        serde_json::from_value(json).expect("parse config")
+    }
+
     #[test]
-    fn reality_inbound_runtime_debug_does_not_expose_mldsa65_seed() {
+    fn rejects_client_only_public_key_on_inbound_reality_settings() {
+        let config = vless_reality_config_from_reality_json(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": TEST_REALITY_PRIVATE_KEY,
+            "shortIds": [""],
+            "publicKey": "oU1MbEgszawWQJa0S_DxLsNt9G2zyE4rF-CrqvJjTmg"
+        }));
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("realitySettings.publicKey"));
+        assert!(err.to_string().contains("client-only"));
+    }
+
+    #[test]
+    fn rejects_client_only_mldsa65_verify_on_inbound_reality_settings() {
+        let config = vless_reality_config_from_reality_json(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": TEST_REALITY_PRIVATE_KEY,
+            "shortIds": [""],
+            "mldsa65Verify": "AAECAwQ"
+        }));
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("realitySettings.mldsa65Verify"));
+    }
+
+    #[test]
+    fn rejects_limit_fallback_upload_at_startup() {
+        let config = vless_reality_config_from_reality_json(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": TEST_REALITY_PRIVATE_KEY,
+            "shortIds": [""],
+            "limitFallbackUpload": {
+                "afterBytes": 1024,
+                "bytesPerSec": 100,
+                "burstBytesPerSec": 200
+            }
+        }));
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err
+            .to_string()
+            .contains("realitySettings.limitFallbackUpload"));
+    }
+
+    #[test]
+    fn rejects_limit_fallback_download_at_startup() {
+        let config = vless_reality_config_from_reality_json(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": TEST_REALITY_PRIVATE_KEY,
+            "shortIds": [""],
+            "limitFallbackDownload": {
+                "afterBytes": 2048,
+                "bytesPerSec": 50,
+                "burstBytesPerSec": 100
+            }
+        }));
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err
+            .to_string()
+            .contains("realitySettings.limitFallbackDownload"));
+    }
+
+    #[test]
+    fn rejects_stream_settings_tls_settings_on_reality_inbound() {
+        let config = vless_reality_config_from_stream_settings(serde_json::json!({
+            "network": "tcp",
+            "security": "reality",
+            "realitySettings": {
+                "dest": "example.com:443",
+                "serverNames": ["example.com"],
+                "privateKey": TEST_REALITY_PRIVATE_KEY,
+                "shortIds": [""]
+            },
+            "tlsSettings": {
+                "serverName": "example.com"
+            }
+        }));
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("streamSettings.tlsSettings"));
+    }
+
+    #[test]
+    fn rejects_stream_settings_ws_settings_on_reality_inbound() {
+        let config = vless_reality_config_from_stream_settings(serde_json::json!({
+            "network": "tcp",
+            "security": "reality",
+            "realitySettings": {
+                "dest": "example.com:443",
+                "serverNames": ["example.com"],
+                "privateKey": TEST_REALITY_PRIVATE_KEY,
+                "shortIds": [""]
+            },
+            "wsSettings": {
+                "path": "/"
+            }
+        }));
+        let err = first_reality_inbound_runtime(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("streamSettings.wsSettings"));
+    }
+
+    #[test]
+    fn sockopt_in_stream_settings_extra_remains_valid() {
+        let config = vless_reality_config_from_stream_settings(serde_json::json!({
+            "network": "tcp",
+            "security": "reality",
+            "realitySettings": {
+                "dest": "example.com:443",
+                "serverNames": ["example.com"],
+                "privateKey": TEST_REALITY_PRIVATE_KEY,
+                "shortIds": [""]
+            },
+            "sockopt": {
+                "tcpFastOpen": true
+            }
+        }));
+        let runtime = first_reality_inbound_runtime(&config).expect("sockopt allowed");
+        assert_eq!(runtime.dest_addr, "example.com:443");
+    }
+
+    #[test]
+    fn reality_type_and_xver_remain_valid_at_startup() {
+        let settings: RealitySettingsObject = serde_json::from_value(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": TEST_REALITY_PRIVATE_KEY,
+            "shortIds": [""],
+            "type": "tcp",
+            "xver": 2
+        }))
+        .unwrap();
+
+        assert_eq!(settings.transport_type.as_deref(), Some("tcp"));
+        assert_eq!(settings.xver, 2);
+
+        let config: XrayConfig = serde_json::from_str(&minimal_reality_config_json(None)).unwrap();
+        let mut inbound = config.inbounds[0].clone();
+        inbound.stream_settings = Some(StreamSettingsObject {
+            network: Some("tcp".to_string()),
+            security: Some("reality".to_string()),
+            reality_settings: Some(settings),
+            extra: BTreeMap::new(),
+        });
+        let config = XrayConfig {
+            inbounds: vec![inbound],
+            extra: BTreeMap::new(),
+        };
+        let runtime = first_reality_inbound_runtime(&config).expect("type and xver allowed");
+        assert_eq!(runtime.dest_addr, "example.com:443");
+    }
+
+    #[test]
+    fn mldsa65_seed_config_still_valid_with_explicit_reject_policy() {
+        let config: XrayConfig =
+            serde_json::from_str(&minimal_reality_config_json(Some(TEST_MLDSA65_SEED))).unwrap();
+        let runtime = first_reality_inbound_runtime(&config).expect("valid seed");
+        assert!(runtime.mldsa65_seed.is_some());
+    }
+
+    #[test]
+    fn reality_inbound_runtime_debug_does_not_expose_secrets() {
         let seed =
             crate::reality::decode_mldsa65_seed(Some(TEST_MLDSA65_SEED), TEST_REALITY_PRIVATE_KEY)
                 .unwrap()
@@ -1818,7 +2108,9 @@ mod tests {
         let debug = format!("{runtime:?}");
 
         assert!(debug.contains("mldsa65_seed"));
+        assert!(debug.contains("private_key"));
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains(TEST_MLDSA65_SEED));
+        assert!(!debug.contains(TEST_REALITY_PRIVATE_KEY));
     }
 }

@@ -914,4 +914,83 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("path must start with '/'"));
     }
+
+    #[test]
+    fn proxy_v2_builder_matches_golden_fixture_bytes() {
+        const FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/fallback/proxy-v2-tcp4-127.0.0.1.bin"
+        ));
+
+        let header = build_proxy_protocol_v2(
+            "127.0.0.1:12345".parse().unwrap(),
+            "127.0.0.1:24443".parse().unwrap(),
+        )
+        .expect("proxy v2 header");
+
+        assert_eq!(header, FIXTURE);
+        assert_eq!(header[16], 0x7F);
+        assert_eq!(header[20], 0x7F);
+        assert_eq!(&header[24..26], &12345u16.to_be_bytes());
+        assert_eq!(&header[26..28], &24443u16.to_be_bytes());
+    }
+
+    #[test]
+    fn proxy_v2_tcp6_exact_byte_layout() {
+        let header = build_proxy_protocol_v2(
+            "[2001:db8::1]:12345".parse().unwrap(),
+            "[2001:db8::2]:24443".parse().unwrap(),
+        )
+        .expect("proxy v2 ipv6");
+
+        assert_eq!(header.len(), 52);
+        assert_eq!(&header[..12], PROXY_V2_SIGNATURE);
+        assert_eq!(header[12], 0x21);
+        assert_eq!(header[13], 0x21);
+        assert_eq!(&header[14..16], &[0x00, 0x24]);
+        assert_eq!(
+            &header[16..32],
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+        );
+        assert_eq!(
+            &header[32..48],
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]
+        );
+        assert_eq!(&header[48..50], &12345u16.to_be_bytes());
+        assert_eq!(&header[50..52], &24443u16.to_be_bytes());
+    }
+
+    #[test]
+    fn http_path_match_prefers_path_fallback_over_alpn_only() {
+        let fallbacks = vec![
+            fallback(None, Some("h2"), None, "127.0.0.1:8082", 0),
+            fallback(None, None, Some("/smoke-path"), "127.0.0.1:8083", 0),
+        ];
+        let request = b"GET /smoke-path/extra HTTP/1.1\r\nHost: x\r\n\r\n";
+        let mut ctx = build_fallback_context(None, request);
+        ctx.alpn = Some("h2".to_string());
+        ctx.alpn_offers = vec!["h2".to_string()];
+
+        let selected = select_vless_fallback_with_kind(&fallbacks, &ctx).expect("selected");
+        assert_eq!(selected.config.dest.addr, "127.0.0.1:8083");
+        assert_eq!(selected.kind, FallbackMatchKind::Path);
+    }
+
+    #[test]
+    fn alpn_only_wins_over_name_only_when_both_match_without_http_path() {
+        let fallbacks = vec![
+            fallback(Some("named.test"), None, None, "127.0.0.1:8081", 0),
+            fallback(None, Some("h2"), None, "127.0.0.1:8082", 0),
+        ];
+        let ctx = FallbackContext {
+            sni: Some("named.test".to_string()),
+            alpn: Some("h2".to_string()),
+            alpn_offers: vec!["h2".to_string()],
+            ..FallbackContext::default()
+        };
+
+        let selected = select_vless_fallback_with_kind(&fallbacks, &ctx).expect("selected");
+        assert_eq!(selected.config.dest.addr, "127.0.0.1:8082");
+        assert_eq!(selected.kind, FallbackMatchKind::Alpn);
+    }
 }
