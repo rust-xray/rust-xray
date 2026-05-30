@@ -1,7 +1,7 @@
 use rust_xray::config::{
     api_listen_addr, first_reality_inbound_runtime, load_xray_config_from_file,
-    load_xray_config_from_source, parse_http_unix_config_uri, redact_config_source,
-    resolve_api_listen, validate_xray_panel_config, ApiListenSource, XrayConfig,
+    load_xray_config_from_source, redact_config_source, resolve_api_listen,
+    validate_xray_panel_config, ApiListenSource, XrayConfig,
 };
 
 const REMNA_FIXTURE: &str = include_str!("fixtures/remna/reality_vless_api_config.json");

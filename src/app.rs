@@ -1,10 +1,12 @@
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use crate::api;
 use crate::cli::{self, Command, RunOptions};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::codec::{Codec, Reader};
 use crate::config::{
@@ -29,6 +31,7 @@ use crate::vless::{
 
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
 const NON_TLS_PREAMBLE_READ_LIMIT: usize = 4096;
+const PREAMBLE_HEX_PREVIEW_MAX: usize = 32;
 
 struct InboundListenerConfig {
     reality: RealityInboundRuntime,
@@ -38,7 +41,6 @@ struct InboundListenerConfig {
 
 struct ServerRuntimeConfig {
     inbounds: Vec<InboundListenerConfig>,
-    inbound_users: Arc<InboundUserManagers>,
 }
 
 enum InboundPreamble {
@@ -50,6 +52,105 @@ enum InboundPreamble {
         stream: TcpStream,
         initial_bytes: Vec<u8>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreambleReadStats {
+    bytes_read: usize,
+    preview: Vec<u8>,
+}
+
+impl PreambleReadStats {
+    fn new() -> Self {
+        Self {
+            bytes_read: 0,
+            preview: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, data: &[u8]) {
+        self.bytes_read += data.len();
+        for &byte in data {
+            if self.preview.len() >= PREAMBLE_HEX_PREVIEW_MAX {
+                break;
+            }
+            self.preview.push(byte);
+        }
+    }
+
+    fn hex_preview(&self) -> String {
+        self.preview
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+}
+
+struct CountingTcpStream {
+    inner: TcpStream,
+    stats: PreambleReadStats,
+}
+
+impl CountingTcpStream {
+    fn new(inner: TcpStream) -> Self {
+        Self {
+            inner,
+            stats: PreambleReadStats::new(),
+        }
+    }
+
+    fn into_inner(self) -> (TcpStream, PreambleReadStats) {
+        (self.inner, self.stats)
+    }
+}
+
+impl AsyncRead for CountingTcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let filled_before = buf.filled().len();
+        let result = Pin::new(&mut self.as_mut().get_mut().inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = &result {
+            let newly_read = &buf.filled()[filled_before..];
+            self.as_mut().get_mut().stats.record(newly_read);
+        }
+        result
+    }
+}
+
+fn preamble_len(preamble: &InboundPreamble) -> usize {
+    match preamble {
+        InboundPreamble::Tls { record, .. } => record.initial_client_bytes().len(),
+        InboundPreamble::RawFallback { initial_bytes, .. } => initial_bytes.len(),
+    }
+}
+
+fn preamble_read_error_kind(err: &std::io::Error) -> &'static str {
+    if err.kind() == std::io::ErrorKind::ConnectionReset {
+        return "connection reset";
+    }
+    if is_early_eof(err) {
+        if err.to_string().to_ascii_lowercase().contains("early eof") {
+            return "early eof";
+        }
+        return "UnexpectedEof";
+    }
+    "other"
+}
+
+fn log_preamble_bytes_preview(peer: Option<std::net::SocketAddr>, stats: &PreambleReadStats) {
+    if stats.bytes_read == 0 {
+        return;
+    }
+    trace!(
+        ?peer,
+        bytes_read = stats.bytes_read,
+        hex_preview = %stats.hex_preview(),
+        "inbound preamble bytes preview"
+    );
 }
 
 async fn relay_vless_fallback_with_log(
@@ -71,6 +172,20 @@ async fn relay_vless_fallback_with_log(
     )?;
     let dest_addr = selection.dest;
     let xver = selection.xver;
+
+    debug!(
+        reason,
+        requested_sni = ?ctx.sni,
+        detected_alpn = ?ctx.alpn,
+        alpn_offers = ?ctx.alpn_offers,
+        detected_http_path = ?ctx.http_path,
+        selected_dest = %dest_addr,
+        selected_reason = fallback_match_kind_label(selection.kind),
+        matched_alpn = ?selection.matched_alpn,
+        xver,
+        bytes_to_forward = initial_client_bytes.len(),
+        "VLESS fallback dispatch decision"
+    );
 
     info!(
         reason,
@@ -102,33 +217,69 @@ async fn relay_vless_fallback_with_log(
     })
 }
 
-async fn read_inbound_preamble(mut stream: TcpStream) -> std::io::Result<InboundPreamble> {
+async fn read_inbound_preamble(
+    stream: TcpStream,
+) -> (Result<InboundPreamble, std::io::Error>, PreambleReadStats) {
+    let mut counting = CountingTcpStream::new(stream);
+
     let mut first = [0u8; 1];
-    stream.read_exact(&mut first).await?;
+    if let Err(err) = counting.read_exact(&mut first).await {
+        let stats = counting.into_inner().1;
+        return (Err(err), stats);
+    }
 
     if first[0] == TLS_CONTENT_TYPE_HANDSHAKE {
-        let mut prefixed = PrefixedStream::new(stream, first.to_vec());
-        let record = read_client_hello_record(&mut prefixed).await?;
-        stream = prefixed.into_inner();
-        return Ok(InboundPreamble::Tls { stream, record });
+        let mut prefixed = PrefixedStream::new(counting, first.to_vec());
+        match read_client_hello_record(&mut prefixed).await {
+            Ok(record) => {
+                let counting = prefixed.into_inner();
+                let (stream, stats) = counting.into_inner();
+                (Ok(InboundPreamble::Tls { stream, record }), stats)
+            }
+            Err(err) => {
+                let counting = prefixed.into_inner();
+                let (_, stats) = counting.into_inner();
+                (Err(err), stats)
+            }
+        }
+    } else {
+        let mut initial_bytes = first.to_vec();
+        let mut chunk = [0u8; NON_TLS_PREAMBLE_READ_LIMIT - 1];
+        match counting.read(&mut chunk).await {
+            Ok(read) => {
+                initial_bytes.extend_from_slice(&chunk[..read]);
+                let (stream, stats) = counting.into_inner();
+                if looks_like_http_request(&initial_bytes) {
+                    (
+                        Ok(InboundPreamble::RawFallback {
+                            stream,
+                            initial_bytes,
+                        }),
+                        stats,
+                    )
+                } else {
+                    (
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "inbound preamble is neither TLS ClientHello nor HTTP/1.x request",
+                        )),
+                        stats,
+                    )
+                }
+            }
+            Err(err) => {
+                let (_, stats) = counting.into_inner();
+                (Err(err), stats)
+            }
+        }
     }
+}
 
-    let mut initial_bytes = first.to_vec();
-    let mut chunk = [0u8; NON_TLS_PREAMBLE_READ_LIMIT - 1];
-    let read = stream.read(&mut chunk).await?;
-    initial_bytes.extend_from_slice(&chunk[..read]);
-
-    if looks_like_http_request(&initial_bytes) {
-        return Ok(InboundPreamble::RawFallback {
-            stream,
-            initial_bytes,
-        });
+fn is_early_eof(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::UnexpectedEof {
+        return true;
     }
-
-    Err(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        "inbound preamble is neither TLS ClientHello nor HTTP/1.x request",
-    ))
+    err.to_string().to_ascii_lowercase().contains("early eof")
 }
 
 async fn handle_client(
@@ -136,32 +287,74 @@ async fn handle_client(
     config: Arc<InboundListenerConfig>,
 ) -> std::io::Result<()> {
     let peer = stream.peer_addr().ok();
+    let inbound_tag = config.reality.tag.as_deref().unwrap_or("reality-in");
+    let inbound_protocol = config.reality.protocol.as_deref();
 
-    match read_inbound_preamble(stream).await {
-        Ok(InboundPreamble::RawFallback {
-            stream,
-            initial_bytes,
-        }) => {
+    debug!(
+        ?peer,
+        inbound_tag,
+        inbound_protocol,
+        transport = "tcp",
+        "reading inbound preamble"
+    );
+
+    let (preamble_result, stats) = read_inbound_preamble(stream).await;
+
+    match preamble_result {
+        Ok(preamble) => {
             debug!(
                 ?peer,
-                initial_bytes = initial_bytes.len(),
-                "non-TLS inbound routed to VLESS fallback"
+                inbound_tag,
+                preamble_len = preamble_len(&preamble),
+                "inbound preamble read ok"
             );
-            return relay_vless_fallback_with_log(
-                stream,
-                &config,
-                &initial_bytes,
-                None,
-                "non-TLS inbound fallback",
-            )
-            .await;
-        }
-        Ok(InboundPreamble::Tls { stream, record }) => {
-            handle_tls_client(stream, config, record, peer).await
+            match preamble {
+                InboundPreamble::RawFallback {
+                    stream,
+                    initial_bytes,
+                } => {
+                    debug!(
+                        ?peer,
+                        initial_bytes = initial_bytes.len(),
+                        "non-TLS inbound routed to VLESS fallback"
+                    );
+                    return relay_vless_fallback_with_log(
+                        stream,
+                        &config,
+                        &initial_bytes,
+                        None,
+                        "non-TLS inbound fallback",
+                    )
+                    .await;
+                }
+                InboundPreamble::Tls { stream, record } => {
+                    handle_tls_client(stream, config, record, peer).await
+                }
+            }
         }
         Err(err) => {
-            error!(?peer, error = %err, "failed to read inbound preamble");
-            Err(err)
+            if is_early_eof(&err) {
+                debug!(
+                    ?peer,
+                    inbound_tag,
+                    bytes_read = stats.bytes_read,
+                    error_kind = preamble_read_error_kind(&err),
+                    "client closed before inbound preamble"
+                );
+                log_preamble_bytes_preview(peer, &stats);
+                Ok(())
+            } else {
+                error!(
+                    ?peer,
+                    inbound_tag,
+                    bytes_read = stats.bytes_read,
+                    error_kind = preamble_read_error_kind(&err),
+                    error = %err,
+                    "failed to read inbound preamble"
+                );
+                log_preamble_bytes_preview(peer, &stats);
+                Err(err)
+            }
         }
     }
 }
@@ -227,7 +420,16 @@ async fn handle_tls_client(
             Ok(())
         }
         Ok(RealityDecision::Fallback) => {
-            debug!(?peer, "REALITY inspect returned fallback");
+            let ctx = build_fallback_context(Some(&ch), record.initial_client_bytes());
+            debug!(
+                ?peer,
+                requested_sni = ?ctx.sni,
+                detected_alpn = ?ctx.alpn,
+                alpn_offers = ?ctx.alpn_offers,
+                detected_http_path = ?ctx.http_path,
+                client_hello_bytes = record.initial_client_bytes().len(),
+                "REALITY inspect returned fallback"
+            );
             relay_vless_fallback_with_log(
                 stream,
                 &config,
@@ -277,7 +479,6 @@ fn load_runtime_config(
     stats_registry: Arc<StatsRegistry>,
 ) -> std::io::Result<ServerRuntimeConfig> {
     let runtimes = reality_inbound_runtimes(xray)?;
-    let inbound_users = Arc::new(InboundUserManagers::new());
     let stats_enabled = StatsState::from_xray_config(xray, None).enabled();
     let mut inbounds = Vec::with_capacity(runtimes.len());
 
@@ -289,12 +490,6 @@ fn load_runtime_config(
             .unwrap_or_else(|| "reality-in".to_string());
         let vless_clients = build_vless_clients(&reality.vless_clients)?;
         let user_manager = Arc::new(VlessUserManager::new(inbound_tag.clone(), vless_clients));
-        for tag in &reality.merged_inbound_tags {
-            inbound_users.register_tag(tag, Arc::clone(&user_manager));
-        }
-        if reality.merged_inbound_tags.is_empty() {
-            inbound_users.register(Arc::clone(&user_manager));
-        }
         let stats = if stats_enabled {
             Some(Arc::new(StatsState::from_xray_config_with_registry(
                 xray,
@@ -353,19 +548,18 @@ fn load_runtime_config(
         inbounds.push(listener_config);
     }
 
-    Ok(ServerRuntimeConfig {
-        inbounds,
-        inbound_users,
-    })
+    Ok(ServerRuntimeConfig { inbounds })
 }
 
+const DEFAULT_TRACE_FILTER: &str = "rust_xray=debug,tower=warn,hyper=warn,h2=warn,rustls=warn";
+
 fn init_tracing(command: &Command) {
-    let default_level = match command {
+    let default_filter = match command {
         Command::Version => "warn",
-        _ => "info",
+        _ => DEFAULT_TRACE_FILTER,
     };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
@@ -421,10 +615,10 @@ async fn start_xray_api_server(
     xray: &XrayConfig,
     inbound_users: Arc<InboundUserManagers>,
     stats_registry: Arc<StatsRegistry>,
-) -> std::io::Result<tokio::task::JoinHandle<std::io::Result<()>>> {
+) -> std::io::Result<Option<tokio::task::JoinHandle<std::io::Result<()>>>> {
     let Some(api) = xray.api.as_ref() else {
         info!("Xray API disabled (no api block in config)");
-        return Ok(tokio::spawn(async { Ok(()) }));
+        return Ok(None);
     };
 
     info!(api_tag = %api.tag, api_services = ?api.services, "Xray API starting");
@@ -492,7 +686,7 @@ async fn start_xray_api_server(
             .await
     });
 
-    Ok(api_task)
+    Ok(Some(api_task))
 }
 
 async fn run_server(opts: RunOptions) -> std::io::Result<()> {
@@ -550,7 +744,7 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
     let stats_state = StatsState::from_xray_config(&xray, api_dokodemo_inbound_tag(&xray));
     let stats_registry = Arc::clone(&stats_state.registry);
 
-    let mut api_task = start_xray_api_server(
+    let api_task = start_xray_api_server(
         &config_source,
         &xray,
         Arc::clone(&inbound_users),
@@ -631,40 +825,46 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
         });
     }
 
-    loop {
-        tokio::select! {
-            api_result = &mut api_task => {
-                match api_result {
-                    Ok(Ok(())) => {
-                        crate::startup_log::eprintln_bootstrap(
-                            "critical task exited: api server returned",
-                        );
-                        error!("Xray API server task exited unexpectedly");
+    if let Some(mut api_task) = api_task {
+        loop {
+            tokio::select! {
+                api_result = &mut api_task => {
+                    match api_result {
+                        Ok(Ok(())) => {
+                            crate::startup_log::eprintln_bootstrap(
+                                "critical task exited: api server returned",
+                            );
+                            error!("Xray API server task exited unexpectedly");
+                        }
+                        Ok(Err(err)) => {
+                            crate::startup_log::eprintln_bootstrap(format!(
+                                "critical task exited: api server error: {err}"
+                            ));
+                            error!(error = %err, "Xray API server task failed");
+                            return Err(err);
+                        }
+                        Err(join_err) => {
+                            crate::startup_log::eprintln_bootstrap(format!(
+                                "critical task exited: api server join error: {join_err}"
+                            ));
+                            error!(error = %join_err, "Xray API server task join failed");
+                            return Err(std::io::Error::other(join_err));
+                        }
                     }
-                    Ok(Err(err)) => {
-                        crate::startup_log::eprintln_bootstrap(format!(
-                            "critical task exited: api server error: {err}"
-                        ));
-                        error!(error = %err, "Xray API server task failed");
-                        return Err(err);
-                    }
-                    Err(join_err) => {
-                        crate::startup_log::eprintln_bootstrap(format!(
-                            "critical task exited: api server join error: {join_err}"
-                        ));
-                        error!(error = %join_err, "Xray API server task join failed");
-                        return Err(std::io::Error::other(join_err));
-                    }
+                    break;
                 }
-                break;
-            }
-            _ = wait_shutdown_signal() => {
-                info!("rust-xray shutting down after signal");
-                crate::startup_log::eprintln_bootstrap("rust-xray shutting down after signal");
-                api_task.abort();
-                break;
+                _ = wait_shutdown_signal() => {
+                    info!("rust-xray shutting down after signal");
+                    crate::startup_log::eprintln_bootstrap("rust-xray shutting down after signal");
+                    api_task.abort();
+                    break;
+                }
             }
         }
+    } else {
+        wait_shutdown_signal().await;
+        info!("rust-xray shutting down after signal");
+        crate::startup_log::eprintln_bootstrap("rust-xray shutting down after signal");
     }
 
     crate::startup_log::eprintln_bootstrap("run_server returning");
@@ -982,5 +1182,108 @@ mod tests {
             runtime_selection(&config, &proxy_v2_ctx),
             ("127.0.0.1:19507".to_string(), 2)
         );
+    }
+
+    #[test]
+    fn is_early_eof_detects_unexpected_eof_and_message() {
+        let unexpected_eof =
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "connection closed");
+        assert!(is_early_eof(&unexpected_eof));
+
+        let message_only = std::io::Error::other("early eof");
+        assert!(is_early_eof(&message_only));
+
+        let invalid_data = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "inbound preamble is neither TLS ClientHello nor HTTP/1.x request",
+        );
+        assert!(!is_early_eof(&invalid_data));
+    }
+
+    #[test]
+    fn preamble_read_stats_records_preview_up_to_32_bytes() {
+        let mut stats = PreambleReadStats::new();
+        stats.record(&[0x16, 0x03, 0x01]);
+        assert_eq!(stats.bytes_read, 3);
+        assert_eq!(stats.hex_preview(), "160301");
+
+        stats.record(&vec![0xab; 40]);
+        assert_eq!(stats.bytes_read, 43);
+        assert_eq!(stats.preview.len(), 32);
+        assert_eq!(stats.preview[0], 0x16);
+    }
+
+    #[test]
+    fn preamble_read_error_kind_labels_eof_and_reset() {
+        assert_eq!(
+            preamble_read_error_kind(&std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+            "UnexpectedEof"
+        );
+        assert_eq!(
+            preamble_read_error_kind(&std::io::Error::other("early eof")),
+            "early eof"
+        );
+        assert_eq!(
+            preamble_read_error_kind(&std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            "connection reset"
+        );
+    }
+
+    fn pick_free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral port")
+            .local_addr()
+            .expect("local addr")
+            .port()
+    }
+
+    #[tokio::test]
+    async fn start_xray_api_server_skipped_without_api_block() {
+        let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
+        let inbound_users = Arc::new(InboundUserManagers::new());
+        let stats_registry = Arc::new(StatsRegistry::new());
+
+        let handle = start_xray_api_server("", &xray, inbound_users, stats_registry)
+            .await
+            .expect("start api server");
+
+        assert!(handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_xray_api_server_spawned_with_api_block() {
+        let saved_transport = std::env::var("RUST_XRAY_API_TRANSPORT").ok();
+        std::env::set_var("RUST_XRAY_API_TRANSPORT", "plaintext");
+        let api_port = pick_free_port();
+        let config_json = format!(
+            r#"{{
+                "api": {{
+                    "tag": "api",
+                    "listen": "127.0.0.1:{api_port}",
+                    "services": ["StatsService"]
+                }},
+                "inbounds": []
+            }}"#
+        );
+        let xray: XrayConfig = serde_json::from_str(&config_json).expect("parse config");
+        let inbound_users = Arc::new(InboundUserManagers::new());
+        let stats_registry = Arc::new(StatsRegistry::new());
+
+        let handle = start_xray_api_server(
+            "/tmp/rust-xray-test-config.json",
+            &xray,
+            inbound_users,
+            stats_registry,
+        )
+        .await
+        .expect("start api server")
+        .expect("api task should be spawned");
+
+        handle.abort();
+        let _ = handle.await;
+        match saved_transport {
+            Some(value) => std::env::set_var("RUST_XRAY_API_TRANSPORT", value),
+            None => std::env::remove_var("RUST_XRAY_API_TRANSPORT"),
+        }
     }
 }

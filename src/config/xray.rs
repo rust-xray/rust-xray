@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+use crate::dns::DnsConfig;
 use crate::vless::{validate_fallback_configs, FallbackConfig};
 use serde::Deserialize;
 use serde_json::Value;
@@ -111,6 +112,7 @@ pub struct OutboundObject {
 pub struct XrayConfig {
     pub log: Option<LogConfig>,
     pub api: Option<ApiConfig>,
+    pub dns: Option<DnsConfig>,
     pub stats: Option<StatsConfig>,
     pub policy: Option<PolicyConfig>,
     pub routing: Option<RoutingConfig>,
@@ -1630,6 +1632,38 @@ mod tests {
     }
 
     #[test]
+    fn top_level_dns_tcp_server_parse() {
+        let json = r#"{"dns":{"servers":["tcp://1.1.1.1:53"],"queryStrategy":"UseIPv4"}}"#;
+        let config: XrayConfig = serde_json::from_str(json).expect("parse config");
+        let dns = config.dns.expect("dns block");
+        assert_eq!(dns.servers.len(), 1);
+        assert_eq!(dns.servers[0].host, "1.1.1.1");
+        assert_eq!(dns.servers[0].port, 53);
+        assert_eq!(
+            dns.servers[0].transport,
+            crate::dns::DnsServerTransport::Tcp
+        );
+        assert_eq!(dns.query_strategy, crate::dns::QueryStrategy::UseIPv4);
+    }
+
+    #[test]
+    fn top_level_dns_udp_and_doh_parse_without_runtime_support() {
+        let json = r#"{"dns":{"servers":["1.1.1.1","https://dns.google/dns-query"]}}"#;
+        let config: XrayConfig = serde_json::from_str(json).expect("parse config");
+        let dns = config.dns.expect("dns block");
+        assert_eq!(
+            dns.servers[0].transport,
+            crate::dns::DnsServerTransport::Udp
+        );
+        assert_eq!(dns.servers[0].port, 53);
+        assert_eq!(
+            dns.servers[1].transport,
+            crate::dns::DnsServerTransport::Doh
+        );
+        assert_eq!(dns.servers[1].path.as_deref(), Some("/dns-query"));
+    }
+
+    #[test]
     fn parse_minimal_vless_reality_inbound() {
         let config: XrayConfig = serde_json::from_str(MINIMAL_VLESS_REALITY).expect("parse config");
         let inbounds = find_reality_inbounds(&config);
@@ -2959,6 +2993,7 @@ mod tests {
         let config = XrayConfig {
             log: None,
             api: None,
+            dns: None,
             stats: None,
             policy: None,
             routing: None,

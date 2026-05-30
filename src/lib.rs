@@ -6,6 +6,7 @@ pub mod app;
 pub mod cli;
 pub mod codec;
 pub mod config;
+pub mod dns;
 pub mod error;
 pub mod outbound;
 pub mod proxy;

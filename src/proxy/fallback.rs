@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::io::{copy_bidirectional, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::stats::StatsSession;
 use crate::vless::{build_proxy_protocol_v1, build_proxy_protocol_v2, validate_fallback_xver};
@@ -36,6 +36,13 @@ pub async fn relay_fallback_with_xver(
     stats: Option<&StatsSession>,
 ) -> std::io::Result<()> {
     validate_fallback_xver(xver)?;
+
+    debug!(
+        %dest_addr,
+        initial_bytes = initial_client_bytes.len(),
+        xver,
+        "forwarding client bytes to fallback target"
+    );
 
     info!(
         %dest_addr,

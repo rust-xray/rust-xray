@@ -11,6 +11,9 @@ build:
 build-musl:
 	cargo build --target x86_64-unknown-linux-musl
 
+build-musl-release:
+	cargo build --release --target x86_64-unknown-linux-musl
+
 live-smoke:
 	bash scripts/live_reality_smoke/run-live-smoke.sh
 

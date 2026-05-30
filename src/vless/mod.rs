@@ -1,6 +1,7 @@
 pub mod config;
 pub mod fallback;
 pub mod inbound;
+pub mod mux;
 pub mod protocol;
 pub(crate) mod relay_debug;
 pub mod user_manager;

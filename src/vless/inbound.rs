@@ -12,6 +12,8 @@ use crate::reality::tls13::{
     RealityTls13RelaySplit,
 };
 use crate::stats::{StatsSession, StatsState};
+use crate::tls::PrefixedStream;
+use crate::vless::mux::handle_mux_cool_inbound;
 use crate::vless::protocol::{
     encode_vless_response_header, parse_vless_request, VlessCommand, VlessRequest,
 };
@@ -285,11 +287,24 @@ struct VlessTcpRelayPrepared<S> {
     command: VlessCommand,
 }
 
-async fn prepare_vless_tcp_relay<S>(
+struct VlessMuxRelayPrepared<S> {
+    stream: S,
+    vision: Option<(SharedTrafficState, [u8; 16])>,
+    auth: VlessAuthenticatedClient,
+    initial_payload: Vec<u8>,
+    version: u8,
+}
+
+enum VlessRelayPrepared<S> {
+    Tcp(VlessTcpRelayPrepared<S>),
+    Mux(VlessMuxRelayPrepared<S>),
+}
+
+async fn prepare_vless_relay<S>(
     mut stream: S,
     users: &VlessUserManager,
     stats_state: Option<&StatsState>,
-) -> std::io::Result<(VlessTcpRelayPrepared<S>, Option<StatsSession>)>
+) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsSession>)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -365,6 +380,23 @@ where
         "VLESS client authenticated"
     );
 
+    if inbound.request.command == VlessCommand::Mux {
+        prepare_vless_tcp_response(&mut stream, inbound.request.version)
+            .await
+            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
+        return Ok((
+            VlessRelayPrepared::Mux(VlessMuxRelayPrepared {
+                stream,
+                vision,
+                auth,
+                initial_payload,
+                version: inbound.request.version,
+            }),
+            stats,
+        ));
+    }
+
     if inbound.request.command != VlessCommand::Tcp {
         return Err(stage_error(
             RealityAcceptedStage::Vless,
@@ -405,14 +437,14 @@ where
     }
 
     Ok((
-        VlessTcpRelayPrepared {
+        VlessRelayPrepared::Tcp(VlessTcpRelayPrepared {
             stream,
             outbound,
             vision,
             auth,
             destination,
             command: inbound.request.command,
-        },
+        }),
         stats,
     ))
 }
@@ -457,7 +489,14 @@ pub async fn handle_vless_tcp_inbound<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (prepared, stats) = prepare_vless_tcp_relay(stream, users, stats_state).await?;
+    let (prepared, stats) = prepare_vless_relay(stream, users, stats_state).await?;
+
+    let prepared = match prepared {
+        VlessRelayPrepared::Tcp(prepared) => prepared,
+        VlessRelayPrepared::Mux(prepared) => {
+            return run_prepared_mux_relay(prepared, None, stats.as_ref()).await;
+        }
+    };
 
     info!(
         stage = stages::VLESS_RELAY_STARTED,
@@ -495,7 +534,14 @@ pub async fn handle_reality_vless_tcp_inbound<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (prepared, stats) = prepare_vless_tcp_relay(stream, users, stats_state).await?;
+    let (prepared, stats) = prepare_vless_relay(stream, users, stats_state).await?;
+
+    let prepared = match prepared {
+        VlessRelayPrepared::Tcp(prepared) => prepared,
+        VlessRelayPrepared::Mux(prepared) => {
+            return run_prepared_mux_relay(prepared, None, stats.as_ref()).await;
+        }
+    };
 
     info!(
         stage = stages::VLESS_RELAY_STARTED,
@@ -535,6 +581,46 @@ where
         relay_result,
         stats.as_ref(),
     )
+}
+
+async fn run_prepared_mux_relay<S>(
+    prepared: VlessMuxRelayPrepared<S>,
+    direct_relay: Option<ApplicationStreamDirectRelay>,
+    _stats: Option<&StatsSession>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    info!(
+        stage = stages::VLESS_RELAY_STARTED,
+        email = prepared.auth.email.as_deref(),
+        flow = prepared.auth.flow.as_deref(),
+        command = ?VlessCommand::Mux,
+        version = prepared.version,
+        "VLESS mux relay started"
+    );
+
+    let result = if let Some((traffic, user_uuid)) = prepared.vision {
+        let vision_stream =
+            VisionRelayStream::new(prepared.stream, traffic, user_uuid, direct_relay);
+        let prefixed = PrefixedStream::new(vision_stream, prepared.initial_payload);
+        handle_mux_cool_inbound(prefixed).await
+    } else {
+        let prefixed = PrefixedStream::new(prepared.stream, prepared.initial_payload);
+        handle_mux_cool_inbound(prefixed).await
+    };
+
+    result.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
+    info!(
+        stage = stages::VLESS_RELAY_DONE,
+        email = prepared.auth.email.as_deref(),
+        flow = prepared.auth.flow.as_deref(),
+        command = ?VlessCommand::Mux,
+        "VLESS mux relay completed"
+    );
+
+    Ok(())
 }
 
 /// Placeholder entry point for future VLESS inbound handling.
@@ -957,15 +1043,97 @@ mod handle_vless_tcp_inbound_tests {
         assert!(err.to_string().contains("UDP unsupported"));
     }
 
+    fn build_vless_mux_request_bytes(user_id: &[u8; 16], initial_payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(0);
+        buf.extend_from_slice(user_id);
+        buf.push(0);
+        buf.push(0x03);
+        buf.extend_from_slice(initial_payload);
+        buf
+    }
+
     #[test]
-    fn handle_vless_tcp_inbound_mux_command_is_unsupported() {
-        let data = build_vless_request_bytes(&USER_ID, 0x03, 443);
+    fn handle_vless_tcp_inbound_mux_command_is_not_rejected_as_unsupported() {
+        let data = build_vless_mux_request_bytes(&USER_ID, &[]);
         let cursor = std::io::Cursor::new(data);
 
-        let err = block_on(handle_vless_tcp_inbound(cursor, &test_users(), None)).unwrap_err();
+        block_on(handle_vless_tcp_inbound(cursor, &test_users(), None)).unwrap();
+    }
 
-        assert_eq!(err.kind(), ErrorKind::Unsupported);
-        assert!(err.to_string().contains("Mux unsupported"));
+    #[test]
+    fn handle_vless_tcp_inbound_mux_single_tcp_substream_roundtrip() {
+        use crate::vless::mux::{encode_mux_new_tcp, read_mux_frame, MuxFrame};
+        use crate::vless::protocol::VlessDestination;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind outbound listener");
+            let outbound_port = listener.local_addr().expect("local addr").port();
+
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept outbound");
+                let mut received = [0u8; 4];
+                socket
+                    .read_exact(&mut received)
+                    .await
+                    .expect("read outbound payload");
+                assert_eq!(&received, b"PING");
+                socket.write_all(b"PONG").await.expect("write response");
+                socket.shutdown().await.expect("shutdown outbound");
+            });
+
+            let destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), outbound_port);
+            let mux_open = encode_mux_new_tcp(1, &destination, b"PING");
+            let request = build_vless_mux_request_bytes(&USER_ID, &mux_open);
+            let (mut client_io, server_io) = duplex(8192);
+            client_io
+                .write_all(&request)
+                .await
+                .expect("send mux vless request");
+
+            let users = test_users();
+            let handle =
+                tokio::spawn(
+                    async move { handle_vless_tcp_inbound(server_io, &users, None).await },
+                );
+
+            let mut response_header = [0u8; 2];
+            client_io
+                .read_exact(&mut response_header)
+                .await
+                .expect("read vless response header");
+            assert_eq!(
+                response_header,
+                encode_vless_response_header(0, None).as_slice()
+            );
+
+            let frame = read_mux_frame(&mut client_io)
+                .await
+                .expect("read mux response");
+            assert_eq!(
+                frame,
+                MuxFrame::Keep {
+                    id: 1,
+                    destination: None,
+                    data: b"PONG".to_vec()
+                }
+            );
+
+            let frame = read_mux_frame(&mut client_io).await.expect("read mux end");
+            assert_eq!(
+                frame,
+                MuxFrame::End {
+                    id: 1,
+                    data: Vec::new()
+                }
+            );
+
+            drop(client_io);
+            handle.await.expect("join mux handler").unwrap();
+        });
     }
 
     #[test]

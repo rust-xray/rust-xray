@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use serde::Deserialize;
 use serde_json::Value;
+use tracing::debug;
 
 use crate::protocol::structs::ClientHelloPayload;
 use crate::reality::extract_sni_hostname;
@@ -526,13 +527,25 @@ pub fn resolve_fallback_selection(
         )
     })?;
     validate_fallback_xver(selected.config.xver)?;
-    Ok(FallbackSelection {
+    let selection = FallbackSelection {
         dest: selected.config.dest.addr.clone(),
         xver: selected.config.xver,
         kind: selected.kind,
         used_configured_fallback: true,
         matched_alpn: matching_alpn_offer(selected.config, ctx),
-    })
+    };
+    debug!(
+        requested_sni = ?ctx.sni,
+        detected_alpn = ?ctx.alpn,
+        alpn_offers = ?ctx.alpn_offers,
+        detected_http_path = ?ctx.http_path,
+        selected_dest = %selection.dest,
+        match_kind = fallback_match_kind_label(selection.kind),
+        xver = selection.xver,
+        matched_alpn = ?selection.matched_alpn,
+        "VLESS fallback rule matched"
+    );
+    Ok(selection)
 }
 
 pub fn build_proxy_protocol_v2(
