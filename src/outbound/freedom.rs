@@ -1,14 +1,14 @@
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
-use crate::dns::QueryStrategy;
 use crate::outbound::domain_strategy::OutboundDomainStrategy;
 use crate::outbound::resolver::{dns_error_to_io, OutboundDnsResolver};
 use crate::outbound::runtime::OutboundConnectRuntime;
 use crate::vless::protocol::VlessDestination;
 use tokio::io::{copy_bidirectional, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 pub fn format_vless_destination(destination: &VlessDestination) -> String {
     match destination {
@@ -48,6 +48,7 @@ pub async fn connect_tcp_destination_with_resolver(
         uses_dns_engine = strategy.uses_dns_engine(),
         "freedom outbound connect started"
     );
+    let connect_started = Instant::now();
 
     let stream = match destination {
         VlessDestination::Ip(addr, port) => {
@@ -97,7 +98,11 @@ pub async fn connect_tcp_destination_with_resolver(
         }
     };
 
-    debug!(%dest, "freedom outbound connected");
+    debug!(
+        %dest,
+        latency_ms = connect_started.elapsed().as_millis(),
+        "freedom outbound connected"
+    );
     Ok(stream)
 }
 
@@ -139,6 +144,7 @@ where
 mod tests {
     use super::*;
     use crate::dns::DnsError;
+    use crate::dns::QueryStrategy;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::atomic::{AtomicUsize, Ordering};
 

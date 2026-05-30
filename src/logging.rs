@@ -1,4 +1,4 @@
-//! Buffered non-blocking tracing output (stderr) via `tracing-appender`.
+//! Buffered non-blocking tracing output (stdout) via `tracing-appender`.
 
 use tracing::debug;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -11,18 +11,21 @@ const DEFAULT_BUFFERED_LINES: usize = 65_536;
 const ENV_BUFFERED_LINES: &str = "RUST_XRAY_LOG_BUFFERED_LINES";
 const ENV_BACKPRESSURE: &str = "RUST_XRAY_LOG_BACKPRESSURE";
 
-const DEFAULT_TRACE_FILTER: &str = "rust_xray=debug,tower=warn,hyper=warn,h2=warn,rustls=warn";
+/// Used when `RUST_LOG` is unset (`EnvFilter` equivalent to `RUST_LOG=error`).
+const DEFAULT_TRACE_FILTER: &str = "error";
 
 /// Keeps the `tracing-appender` worker thread alive until process exit.
 pub struct LoggingGuard {
     _worker_guard: WorkerGuard,
 }
 
+pub fn default_env_filter(command: &Command) -> &'static str {
+    let _ = command;
+    DEFAULT_TRACE_FILTER
+}
+
 pub fn init_logging(command: &Command) -> std::io::Result<LoggingGuard> {
-    let default_filter = match command {
-        Command::Version => "warn",
-        _ => DEFAULT_TRACE_FILTER,
-    };
+    let default_filter = default_env_filter(command);
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
 
@@ -33,7 +36,7 @@ pub fn init_logging(command: &Command) -> std::io::Result<LoggingGuard> {
     let (non_blocking, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
         .buffered_lines_limit(buffered_lines)
         .lossy(lossy)
-        .finish(std::io::stderr());
+        .finish(std::io::stdout());
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -41,8 +44,13 @@ pub fn init_logging(command: &Command) -> std::io::Result<LoggingGuard> {
         .init();
 
     debug!(
+        writer = "stdout",
+        default_filter,
+        rust_log_override = std::env::var("RUST_LOG").is_ok(),
         buffered_lines_limit = buffered_lines,
-        backpressure, lossy, "async buffered logging enabled"
+        backpressure,
+        lossy,
+        "async buffered logging enabled"
     );
 
     Ok(LoggingGuard {
@@ -97,6 +105,20 @@ mod tests {
         for v in ["1", "true", "yes", "on", "TRUE", "On"] {
             assert!(parse_backpressure(Some(v)), "expected true for {v:?}");
         }
+    }
+
+    #[test]
+    fn default_env_filter_is_error() {
+        use crate::cli::{Command, RunOptions};
+
+        assert_eq!(default_env_filter(&Command::Version), "error");
+        assert_eq!(
+            default_env_filter(&Command::Run(RunOptions {
+                config: "config.json".into(),
+                format: None,
+            })),
+            "error"
+        );
     }
 
     #[test]

@@ -233,7 +233,7 @@ cargo run --bin rust-xray -- ./config.json
 make live-smoke
 ```
 
-With logging (default filter enables `rust_xray=debug` when `RUST_LOG` is unset):
+With logging (default: `error` on stdout when `RUST_LOG` is unset):
 
 ```bash
 RUST_LOG=info cargo run --bin rust-xray -- ./config.json

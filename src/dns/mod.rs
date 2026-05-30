@@ -19,7 +19,7 @@ pub use client::{
     StandardOutboundManager,
 };
 pub use config::{DnsConfig, DnsServerConfig, DnsServerTransport, QueryStrategy};
-pub use engine::{DnsEngine, DnsQueryRequest, DnsQuerySource};
+pub use engine::{DnsEngine, DnsQueryRequest, DnsQuerySource, DnsQueryTrace};
 pub use error::{DnsError, DnsQueryResponse};
 pub use options::{DnsEngineOptions, MuxDnsUpstreamMode};
 pub use packet::{DnsInflightKey, DnsQuestionKey};

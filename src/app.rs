@@ -1,6 +1,8 @@
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use crate::api;
 use crate::cli::{self, Command, RunOptions};
@@ -20,12 +22,13 @@ use crate::outbound::{log_dns_outbounds, OutboundConnectRuntime};
 use crate::protocol::structs::ClientHelloPayload;
 use crate::proxy::relay_fallback_with_xver;
 use crate::reality::{
-    handle_accepted_reality_client, inspect_reality_client_hello, RealityDecision,
+    handle_accepted_reality_client_traced, inspect_reality_client_hello, RealityDecision,
     RealityInspectConfig,
 };
 use crate::runtime::InboundUserManagers;
 use crate::stats::{StatsRegistry, StatsState};
 use crate::tls::{read_client_hello_record, PrefixedStream, TlsClientHelloRecord};
+use crate::vless::mux::MuxSessionTrace;
 use crate::vless::{
     build_fallback_context, build_vless_clients, fallback_match_kind_label,
     looks_like_http_request, resolve_fallback_selection, VlessUserManager,
@@ -34,6 +37,7 @@ use crate::vless::{
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
 const NON_TLS_PREAMBLE_READ_LIMIT: usize = 4096;
 const PREAMBLE_HEX_PREVIEW_MAX: usize = 32;
+static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
 struct InboundListenerConfig {
     reality: RealityInboundRuntime,
@@ -287,16 +291,20 @@ fn is_early_eof(err: &std::io::Error) -> bool {
 async fn handle_client(
     stream: TcpStream,
     config: Arc<InboundListenerConfig>,
+    conn_id: u64,
+    conn_started: Instant,
 ) -> std::io::Result<()> {
     let peer = stream.peer_addr().ok();
     let inbound_tag = config.reality.tag.as_deref().unwrap_or("reality-in");
     let inbound_protocol = config.reality.protocol.as_deref();
 
     debug!(
+        conn_id,
         ?peer,
         inbound_tag,
         inbound_protocol,
         transport = "tcp",
+        elapsed_ms_since_conn_start = conn_started.elapsed().as_millis(),
         "reading inbound preamble"
     );
 
@@ -305,9 +313,11 @@ async fn handle_client(
     match preamble_result {
         Ok(preamble) => {
             debug!(
+                conn_id,
                 ?peer,
                 inbound_tag,
                 preamble_len = preamble_len(&preamble),
+                elapsed_ms_since_conn_start = conn_started.elapsed().as_millis(),
                 "inbound preamble read ok"
             );
             match preamble {
@@ -330,7 +340,7 @@ async fn handle_client(
                     .await;
                 }
                 InboundPreamble::Tls { stream, record } => {
-                    handle_tls_client(stream, config, record, peer).await
+                    handle_tls_client(stream, config, record, peer, conn_id, conn_started).await
                 }
             }
         }
@@ -366,11 +376,15 @@ async fn handle_tls_client(
     config: Arc<InboundListenerConfig>,
     record: TlsClientHelloRecord,
     peer: Option<std::net::SocketAddr>,
+    conn_id: u64,
+    conn_started: Instant,
 ) -> std::io::Result<()> {
     debug!(
+        conn_id,
         ?peer,
         raw_record_len = record.raw_record.len(),
         handshake_payload_len = record.handshake_payload.len(),
+        elapsed_ms_since_conn_start = conn_started.elapsed().as_millis(),
         "ClientHello record read ok"
     );
 
@@ -404,7 +418,7 @@ async fn handle_tls_client(
     match inspect_reality_client_hello(&ch, &record.handshake_message, inspect_cfg) {
         Ok(RealityDecision::Accepted(accepted)) => {
             // Accepted REALITY clients must not be sent to fallback relay.
-            if let Err(err) = handle_accepted_reality_client(
+            if let Err(err) = handle_accepted_reality_client_traced(
                 stream,
                 record,
                 ch,
@@ -413,6 +427,10 @@ async fn handle_tls_client(
                 &config.user_manager,
                 config.reality.mldsa65_seed.as_ref(),
                 config.stats.as_deref(),
+                Some(MuxSessionTrace {
+                    conn_id,
+                    conn_started,
+                }),
             )
             .await
             {
@@ -723,6 +741,18 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
         domain_strategy = ?OutboundConnectRuntime::shared().domain_strategy,
         "dns engine initialized"
     );
+    debug!(
+        default_timeout_ms = crate::dns::DnsEngineOptions::from_env().default_timeout.as_millis(),
+        mux_udp_dns_timeout_ms = crate::dns::DnsEngineOptions::from_env().mux_udp_dns_timeout.as_millis(),
+        mux_udp_dns_total_timeout_ms = crate::dns::DnsEngineOptions::from_env().mux_udp_dns_total_timeout.as_millis(),
+        max_retries = crate::dns::DnsEngineOptions::from_env().max_retries,
+        mux_udp_dns_max_retries = crate::dns::DnsEngineOptions::from_env().mux_udp_dns_max_retries,
+        mux_dns_upstream_mode = crate::dns::DnsEngineOptions::from_env().mux_dns_upstream_mode.as_str(),
+        cache_enabled = crate::dns::DnsEngineOptions::from_env().cache_enabled,
+        disable_cache = dns_engine.disable_cache(),
+        servers = ?dns_engine.dns_server_labels(),
+        "dns engine options"
+    );
 
     if let Some(api) = xray.api.as_ref() {
         info!(api_tag = %api.tag, api_services = ?api.services, "api block present");
@@ -811,11 +841,21 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
             loop {
                 match listener.accept().await {
                     Ok((stream, peer)) => {
-                        debug!(%peer, "REALITY TCP client accepted");
+                        let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
+                        let conn_started = Instant::now();
+                        debug!(conn_id, %peer, elapsed_ms_since_conn_start = 0u128, "REALITY TCP client accepted");
                         let config = Arc::clone(&config);
                         tokio::spawn(async move {
-                            if let Err(err) = handle_client(stream, config).await {
-                                debug!(%peer, error = %err, "connection closed with error");
+                            if let Err(err) =
+                                handle_client(stream, config, conn_id, conn_started).await
+                            {
+                                debug!(
+                                    conn_id,
+                                    %peer,
+                                    error = %err,
+                                    elapsed_ms_since_conn_start = conn_started.elapsed().as_millis(),
+                                    "connection closed with error"
+                                );
                             }
                         });
                     }

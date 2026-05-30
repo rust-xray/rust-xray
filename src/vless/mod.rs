@@ -21,9 +21,9 @@ pub use fallback::{
     FallbackDest, FallbackMatchKind, FallbackSelection,
 };
 pub use inbound::{
-    handle_reality_vless_tcp_inbound, handle_vless_tcp_inbound, is_supported_vless_flow,
-    prepare_vless_tcp_response, read_vless_request, write_vless_response_header,
-    VlessInboundRequest,
+    handle_reality_vless_tcp_inbound, handle_reality_vless_tcp_inbound_traced,
+    handle_vless_tcp_inbound, is_supported_vless_flow, prepare_vless_tcp_response,
+    read_vless_request, write_vless_response_header, VlessInboundRequest,
 };
 pub use protocol::encode_vless_response_header;
 pub use user_manager::{

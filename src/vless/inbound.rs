@@ -13,7 +13,7 @@ use crate::reality::tls13::{
 };
 use crate::stats::{StatsSession, StatsState};
 use crate::tls::PrefixedStream;
-use crate::vless::mux::handle_mux_cool_inbound;
+use crate::vless::mux::{handle_mux_cool_inbound, handle_mux_cool_inbound_traced, MuxSessionTrace};
 use crate::vless::protocol::{
     encode_vless_response_header, parse_vless_request, VlessCommand, VlessRequest,
 };
@@ -517,7 +517,7 @@ where
     let prepared = match prepared {
         VlessRelayPrepared::Tcp(prepared) => prepared,
         VlessRelayPrepared::Mux(prepared) => {
-            return run_prepared_mux_relay(prepared, None, stats.as_ref()).await;
+            return run_prepared_mux_relay(prepared, None, stats.as_ref(), None).await;
         }
     };
 
@@ -559,12 +559,24 @@ pub async fn handle_reality_vless_tcp_inbound<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    handle_reality_vless_tcp_inbound_traced(stream, users, stats_state, None).await
+}
+
+pub async fn handle_reality_vless_tcp_inbound_traced<S>(
+    stream: RealityTls13ApplicationStream<S>,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+    mux_trace: Option<MuxSessionTrace>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let (prepared, stats) = prepare_vless_relay(stream, users, stats_state).await?;
 
     let prepared = match prepared {
         VlessRelayPrepared::Tcp(prepared) => prepared,
         VlessRelayPrepared::Mux(prepared) => {
-            return run_prepared_mux_relay(prepared, None, stats.as_ref()).await;
+            return run_prepared_mux_relay(prepared, None, stats.as_ref(), mux_trace).await;
         }
     };
 
@@ -614,6 +626,7 @@ async fn run_prepared_mux_relay<S>(
     prepared: VlessMuxRelayPrepared<S>,
     direct_relay: Option<ApplicationStreamDirectRelay>,
     _stats: Option<&StatsSession>,
+    mux_trace: Option<MuxSessionTrace>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -632,10 +645,18 @@ where
         let vision_stream =
             VisionRelayStream::new(prepared.stream, traffic, user_uuid, direct_relay);
         let prefixed = PrefixedStream::new(vision_stream, prepared.initial_payload);
-        handle_mux_cool_inbound(prefixed).await
+        if let Some(trace) = mux_trace {
+            handle_mux_cool_inbound_traced(prefixed, trace).await
+        } else {
+            handle_mux_cool_inbound(prefixed).await
+        }
     } else {
         let prefixed = PrefixedStream::new(prepared.stream, prepared.initial_payload);
-        handle_mux_cool_inbound(prefixed).await
+        if let Some(trace) = mux_trace {
+            handle_mux_cool_inbound_traced(prefixed, trace).await
+        } else {
+            handle_mux_cool_inbound(prefixed).await
+        }
     };
 
     result.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
@@ -1099,7 +1120,9 @@ mod handle_vless_tcp_inbound_tests {
 
     #[test]
     fn handle_vless_tcp_inbound_mux_single_tcp_substream_roundtrip() {
-        use crate::vless::mux::{encode_mux_new_tcp, read_mux_frame, MuxFrame};
+        use crate::vless::mux::{
+            encode_mux_new_tcp, read_mux_frame, MuxCommand, MuxFrame, MuxOption, MuxStatus,
+        };
         use crate::vless::protocol::VlessDestination;
         use std::net::{IpAddr, Ipv4Addr};
 
@@ -1151,19 +1174,26 @@ mod handle_vless_tcp_inbound_tests {
                 .expect("read mux response");
             assert_eq!(
                 frame,
-                MuxFrame::Keep {
-                    id: 1,
-                    destination: None,
-                    data: b"PONG".to_vec()
+                MuxFrame {
+                    mux_id: 1,
+                    status: MuxStatus::Keep,
+                    option: MuxOption { has_data: true },
+                    command: MuxCommand::Data {
+                        payload: b"PONG".to_vec()
+                    }
                 }
             );
 
             let frame = read_mux_frame(&mut client_io).await.expect("read mux end");
             assert_eq!(
                 frame,
-                MuxFrame::End {
-                    id: 1,
-                    data: Vec::new()
+                MuxFrame {
+                    mux_id: 1,
+                    status: MuxStatus::End,
+                    option: MuxOption { has_data: false },
+                    command: MuxCommand::Close {
+                        payload: Vec::new()
+                    }
                 }
             );
 

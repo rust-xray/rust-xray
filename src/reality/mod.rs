@@ -43,7 +43,7 @@ pub use mldsa65::{
     MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET, MLDSA65_SEED_LEN, MLDSA65_SIGNATURE_LEN,
     MLDSA65_VERIFY_KEY_LEN,
 };
-pub use server::handle_accepted_reality_client;
+pub use server::{handle_accepted_reality_client, handle_accepted_reality_client_traced};
 pub use session::{
     short_id_prefix_len, validate_reality_client_auth, RealityClientAuth, RealityValidationConfig,
 };

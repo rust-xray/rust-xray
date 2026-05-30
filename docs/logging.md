@@ -1,6 +1,6 @@
 # Logging and performance
 
-rust-xray uses async buffered logging (`tracing-appender` non-blocking writer to stderr) so the hot path does not block on syscall-heavy writes. Formatting and event construction still have a cost; per-record protocol logs are kept off the default INFO path.
+rust-xray uses async buffered logging (`tracing-appender` non-blocking writer to **stdout**) so the hot path does not block on syscall-heavy writes. Formatting and event construction still have a cost; the default filter is **error-only** when `RUST_LOG` is unset.
 
 ## Recommended `RUST_LOG` levels
 
@@ -25,7 +25,7 @@ RUST_LOG=rust_xray=trace,tower=warn,hyper=warn,h2=warn,rustls=warn \
   ./target/debug/rust-xray run -config config.json
 ```
 
-When `RUST_LOG` is unset, the binary uses its built-in default filter (`rust_xray=debug` for `run`, `warn` for `version`).
+When `RUST_LOG` is unset, the binary uses `error` (same as `RUST_LOG=error`). Set `RUST_LOG` for any other level or per-module filter.
 
 ## Buffered logging environment variables
 
@@ -34,7 +34,7 @@ When `RUST_LOG` is unset, the binary uses its built-in default filter (`rust_xra
 | `RUST_XRAY_LOG_BUFFERED_LINES` | `65536` | Queue capacity (lines); invalid values fall back to default |
 | `RUST_XRAY_LOG_BACKPRESSURE` | off (`lossy`) | `1` / `true` / `yes` / `on` → non-lossy mode (senders block when queue is full) |
 
-Async buffered logging is always enabled for tracing output; there is no synchronous stderr `fmt` writer on the hot path.
+Async buffered logging is always enabled for tracing output; there is no synchronous stdout `fmt` writer on the hot path.
 
 ## What you should not see at INFO
 

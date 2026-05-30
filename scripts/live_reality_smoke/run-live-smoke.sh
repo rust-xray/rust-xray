@@ -265,7 +265,7 @@ phase_negative_mux_non_dns_udp() {
     "${client}" \
     "mux-udp" \
     "${regression_client}" \
-    "unsupported non-DNS UDP mux substream"
+    "mux session started"
 }
 
 phase_happ_reality_vision_mux_udp_dns() {

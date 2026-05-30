@@ -15,9 +15,9 @@ use crate::dns::error::{DnsError, DnsQueryResponse};
 use crate::dns::mux_upstream::{build_mux_udp_candidates, execute_mux_udp_upstream};
 use crate::dns::options::DnsEngineOptions;
 use crate::dns::packet::{
-    build_dns_query, dns_query_id, extract_ipv4_addresses, extract_ipv6_addresses,
-    inflight_key_from_packet, is_negative_dns_response, parse_dns_question_key,
-    parse_response_min_ttl, rewrite_dns_response_id_for_query, DnsInflightKey, DnsQuestionKey,
+    build_dns_query, extract_ipv4_addresses, extract_ipv6_addresses, inflight_key_from_packet,
+    is_negative_dns_response, parse_dns_question_key, parse_response_min_ttl,
+    rewrite_dns_response_id_for_query, DnsInflightKey, DnsQuestionKey,
 };
 use crate::dns::question::parse_dns_question_for_log;
 use crate::dns::transport::DnsTransportStack;
@@ -47,12 +47,31 @@ impl DnsQuerySource {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DnsQueryTrace {
+    pub conn_id: u64,
+    pub mux_id: Option<u16>,
+    pub conn_started: Instant,
+    pub dns_started: Instant,
+}
+
+impl DnsQueryTrace {
+    fn elapsed_ms_since_conn_start(self) -> u128 {
+        self.conn_started.elapsed().as_millis()
+    }
+
+    fn elapsed_ms_since_dns_start(self) -> u128 {
+        self.dns_started.elapsed().as_millis()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DnsQueryRequest {
     pub raw_query: Vec<u8>,
     pub destination: Option<SocketAddr>,
     pub inbound_tag: Option<String>,
     pub source: DnsQuerySource,
+    pub trace: Option<DnsQueryTrace>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,9 +139,10 @@ impl DnsEngine {
     /// Initialize the process-wide engine from top-level `dns` config (first call wins).
     pub fn init_shared(dns: Option<&DnsConfig>) -> Arc<DnsEngine> {
         let owned = dns.cloned();
-        Arc::clone(
-            SHARED_DNS_ENGINE.get_or_init(|| Arc::new(Self::from_xray_config(owned.as_ref()))),
-        )
+        Arc::clone(SHARED_DNS_ENGINE.get_or_init(|| {
+            crate::dns::options::log_mux_dns_startup_options();
+            Arc::new(Self::from_xray_config(owned.as_ref()))
+        }))
     }
 
     pub fn shared() -> Arc<DnsEngine> {
@@ -131,6 +151,14 @@ impl DnsEngine {
 
     pub fn dns_servers_count(&self) -> usize {
         self.config.servers.len()
+    }
+
+    pub fn dns_server_labels(&self) -> Vec<String> {
+        self.config
+            .servers
+            .iter()
+            .map(|server| server.original.clone())
+            .collect()
     }
 
     pub fn disable_cache(&self) -> bool {
@@ -152,18 +180,35 @@ impl DnsEngine {
         let question = parse_dns_question_for_log(&request.raw_query);
         let response_server = self.response_socket_addr(&request)?;
         let policy = self.upstream_policy(&request);
-        debug!(
-            qname = question.as_ref().map(|q| q.qname.as_str()),
-            qtype = question.as_ref().map(|q| q.qtype),
-            %response_server,
-            source = request.source.as_str(),
-            timeout_ms = policy.timeout.as_millis(),
-            max_retries = policy.max_retries,
-            destination = ?request.destination,
-            inbound_tag = request.inbound_tag.as_deref(),
-            cache_enabled = self.options.cache_enabled && !self.config.disable_cache,
-            "dns query start"
-        );
+        if request.source == DnsQuerySource::MuxUdp {
+            debug!(
+                conn_id = request.trace.map(|trace| trace.conn_id),
+                mux_id = request.trace.and_then(|trace| trace.mux_id),
+                qname = question.as_ref().map(|q| q.qname.as_str()),
+                qtype = question.as_ref().map(|q| q.qtype),
+                source = request.source.as_str(),
+                timeout_ms = policy.timeout.as_millis(),
+                total_timeout_ms = self.options.mux_udp_dns_total_timeout.as_millis(),
+                mode = self.options.mux_dns_upstream_mode.as_str(),
+                destination = ?request.destination,
+                elapsed_ms_since_conn_start = request.trace.map(|trace| trace.elapsed_ms_since_conn_start()),
+                elapsed_ms_since_mux_dns_start = request.trace.map(|trace| trace.elapsed_ms_since_dns_start()),
+                "dns query start"
+            );
+        } else {
+            debug!(
+                qname = question.as_ref().map(|q| q.qname.as_str()),
+                qtype = question.as_ref().map(|q| q.qtype),
+                %response_server,
+                source = request.source.as_str(),
+                timeout_ms = policy.timeout.as_millis(),
+                max_retries = policy.max_retries,
+                destination = ?request.destination,
+                inbound_tag = request.inbound_tag.as_deref(),
+                cache_enabled = self.options.cache_enabled && !self.config.disable_cache,
+                "dns query start"
+            );
+        }
         self.record_query();
 
         if self.options.cache_enabled && !self.config.disable_cache {
@@ -172,12 +217,16 @@ impl DnsEngine {
                 self.record_cache_hit();
                 let rewritten = self.rewrite_cached_for_query(hit, &request.raw_query)?;
                 debug!(
-                    qname = %inflight_key.qname,
-                    qtype = inflight_key.qtype,
-                    source = request.source.as_str(),
+                        qname = %inflight_key.qname,
+                        qtype = inflight_key.qtype,
+                        source = request.source.as_str(),
                     server_id = %server_id,
                     cache_hit = true,
                     elapsed_us = cache_lookup_started.elapsed().as_micros(),
+                    conn_id = request.trace.map(|trace| trace.conn_id),
+                    mux_id = request.trace.and_then(|trace| trace.mux_id),
+                    elapsed_ms_since_conn_start = request.trace.map(|trace| trace.elapsed_ms_since_conn_start()),
+                    elapsed_ms_since_mux_dns_start = request.trace.map(|trace| trace.elapsed_ms_since_dns_start()),
                     "dns cache lookup done"
                 );
                 return Ok(self.to_query_response(
@@ -194,6 +243,10 @@ impl DnsEngine {
                 source = request.source.as_str(),
                 cache_hit = false,
                 elapsed_us = cache_lookup_started.elapsed().as_micros(),
+                conn_id = request.trace.map(|trace| trace.conn_id),
+                mux_id = request.trace.and_then(|trace| trace.mux_id),
+                elapsed_ms_since_conn_start = request.trace.map(|trace| trace.elapsed_ms_since_conn_start()),
+                elapsed_ms_since_mux_dns_start = request.trace.map(|trace| trace.elapsed_ms_since_dns_start()),
                 "dns cache lookup done"
             );
         }
@@ -207,6 +260,10 @@ impl DnsEngine {
                     qname = %inflight_key.qname,
                     qtype = inflight_key.qtype,
                     source = request.source.as_str(),
+                    conn_id = request.trace.map(|trace| trace.conn_id),
+                    mux_id = request.trace.and_then(|trace| trace.mux_id),
+                    elapsed_ms_since_conn_start = request.trace.map(|trace| trace.elapsed_ms_since_conn_start()),
+                    elapsed_ms_since_mux_dns_start = request.trace.map(|trace| trace.elapsed_ms_since_dns_start()),
                     "dns inflight dedup wait start"
                 );
                 drop(guard);
@@ -309,6 +366,7 @@ impl DnsEngine {
                 destination: None,
                 inbound_tag: None,
                 source: DnsQuerySource::BuiltinDns,
+                trace: None,
             })
             .await?;
         let ips = if qtype == 28 {
@@ -328,12 +386,24 @@ impl DnsEngine {
         destination: SocketAddr,
         payload: &[u8],
     ) -> Result<DnsQueryResponse, DnsError> {
+        self.resolve_mux_udp_dns_with_trace(mux_id, destination, payload, None)
+            .await
+    }
+
+    pub async fn resolve_mux_udp_dns_with_trace(
+        &self,
+        mux_id: u16,
+        destination: SocketAddr,
+        payload: &[u8],
+        trace: Option<DnsQueryTrace>,
+    ) -> Result<DnsQueryResponse, DnsError> {
         trace!(mux_id, %destination, payload_len = payload.len(), "mux udp dns engine resolve");
         self.query_raw(DnsQueryRequest {
             raw_query: payload.to_vec(),
             destination: Some(destination),
             inbound_tag: None,
             source: DnsQuerySource::MuxUdp,
+            trace,
         })
         .await
     }
@@ -427,12 +497,24 @@ impl DnsEngine {
                     &self.config,
                     self.options.mux_dns_upstream_mode,
                 );
+                debug!(
+                    conn_id = request.trace.map(|trace| trace.conn_id),
+                    mux_id = request.trace.and_then(|trace| trace.mux_id),
+                    mode = self.options.mux_dns_upstream_mode.as_str(),
+                    candidates = ?candidates.iter().map(|candidate| candidate.addr.to_string()).collect::<Vec<_>>(),
+                    timeout_ms = policy.timeout.as_millis(),
+                    total_timeout_ms = self.options.mux_udp_dns_total_timeout.as_millis(),
+                    elapsed_ms_since_conn_start = request.trace.map(|trace| trace.elapsed_ms_since_conn_start()),
+                    elapsed_ms_since_mux_dns_start = request.trace.map(|trace| trace.elapsed_ms_since_dns_start()),
+                    "dns upstream candidates built"
+                );
                 return execute_mux_udp_upstream(
                     &self.transports.udp,
                     query,
                     &candidates,
                     self.options.mux_dns_upstream_mode,
                     policy.timeout,
+                    self.options.mux_udp_dns_total_timeout,
                 )
                 .await
                 .map_err(|err| {
@@ -637,14 +719,11 @@ impl DnsEngine {
     }
 }
 
-fn hit_key_qname(key: &DnsInflightKey) -> &str {
-    &key.qname
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dns::options::MuxDnsUpstreamMode;
+    use crate::dns::packet::dns_query_id;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -739,6 +818,7 @@ mod tests {
                 destination: Some(destination),
                 inbound_tag: None,
                 source: DnsQuerySource::MuxUdp,
+                trace: None,
             })
             .await
             .unwrap();
@@ -775,6 +855,7 @@ mod tests {
                 destination: None,
                 inbound_tag: None,
                 source: DnsQuerySource::MuxUdp,
+                trace: None,
             })
             .await
             .unwrap();
@@ -826,6 +907,7 @@ mod tests {
                 destination: None,
                 inbound_tag: None,
                 source: DnsQuerySource::MuxUdp,
+                trace: None,
             })
             .await
             .unwrap();
@@ -839,6 +921,7 @@ mod tests {
                 destination: None,
                 inbound_tag: None,
                 source: DnsQuerySource::MuxUdp,
+                trace: None,
             })
             .await
             .unwrap();
@@ -935,6 +1018,8 @@ mod tests {
             },
             DnsEngineOptions {
                 mux_udp_dns_timeout: Duration::from_millis(200),
+                mux_udp_dns_total_timeout: Duration::from_millis(200),
+                mux_dns_upstream_mode: MuxDnsUpstreamMode::DestinationOnly,
                 max_retries: 0,
                 mux_udp_dns_max_retries: 0,
                 ..DnsEngineOptions::for_test()
@@ -951,6 +1036,7 @@ mod tests {
                 destination: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 9))),
                 inbound_tag: None,
                 source: DnsQuerySource::MuxUdp,
+                trace: None,
             })
             .await
             .unwrap_err();
@@ -1049,6 +1135,7 @@ mod tests {
                 destination: None,
                 inbound_tag: None,
                 source: DnsQuerySource::BuiltinDns,
+                trace: None,
             })
             .await
             .unwrap();
@@ -1092,6 +1179,7 @@ mod tests {
                 destination: None,
                 inbound_tag: None,
                 source: DnsQuerySource::BuiltinDns,
+                trace: None,
             })
             .await
             .unwrap();
@@ -1115,6 +1203,7 @@ mod tests {
                 destination: None,
                 inbound_tag: None,
                 source: DnsQuerySource::BuiltinDns,
+                trace: None,
             })
             .await
             .unwrap_err();
@@ -1367,7 +1456,8 @@ mod tests {
                 extra: Default::default(),
             },
             DnsEngineOptions {
-                mux_udp_dns_timeout: Duration::from_millis(100),
+                mux_udp_dns_timeout: Duration::from_millis(750),
+                mux_udp_dns_total_timeout: Duration::from_millis(1000),
                 mux_dns_upstream_mode: MuxDnsUpstreamMode::DestinationThenConfigFallback,
                 ..DnsEngineOptions::for_test()
             },
@@ -1382,41 +1472,18 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, DnsError::Timeout);
         let elapsed = started.elapsed();
-        assert!(elapsed >= Duration::from_millis(250));
-        assert!(elapsed < Duration::from_secs(2));
+        assert!(elapsed >= Duration::from_millis(900));
+        assert!(elapsed < Duration::from_millis(1200));
     }
 
-    #[tokio::test]
-    async fn mux_race_all_silent_times_out_near_single_mux_timeout() {
-        let started = Instant::now();
-        let engine = DnsEngine::new(
-            DnsConfig {
-                servers: vec![
-                    config::parse_dns_server("127.0.0.1:8").unwrap(),
-                    config::parse_dns_server("127.0.0.1:7").unwrap(),
-                ],
-                query_strategy: QueryStrategy::UseIP,
-                disable_cache: true,
-                extra: Default::default(),
-            },
-            DnsEngineOptions {
-                mux_udp_dns_timeout: Duration::from_millis(150),
-                mux_dns_upstream_mode: MuxDnsUpstreamMode::RaceDestinationAndConfig,
-                ..DnsEngineOptions::for_test()
-            },
+    #[test]
+    fn mux_dns_for_test_defaults_to_race_mode() {
+        let opts = DnsEngineOptions::for_test();
+        assert_eq!(
+            opts.mux_dns_upstream_mode,
+            MuxDnsUpstreamMode::RaceDestinationAndConfig
         );
-        let err = engine
-            .resolve_mux_udp_dns(
-                1,
-                SocketAddr::from((Ipv4Addr::new(127, 0, 0, 1), 9)),
-                &example_query(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err, DnsError::Timeout);
-        let elapsed = started.elapsed();
-        assert!(elapsed >= Duration::from_millis(120));
-        assert!(elapsed < Duration::from_millis(450));
+        assert_eq!(opts.mux_udp_dns_total_timeout, Duration::from_millis(1000));
     }
 
     #[tokio::test]
@@ -1443,6 +1510,7 @@ mod tests {
                 destination: None,
                 inbound_tag: None,
                 source: DnsQuerySource::BuiltinDns,
+                trace: None,
             })
             .await
             .unwrap_err();

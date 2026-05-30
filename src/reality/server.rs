@@ -8,7 +8,8 @@ use crate::protocol::structs::ClientHelloPayload;
 use crate::reality::Mldsa65Seed;
 use crate::stats::StatsState;
 use crate::tls::{PrefixedStream, TlsClientHelloRecord};
-use crate::vless::handle_reality_vless_tcp_inbound;
+use crate::vless::handle_reality_vless_tcp_inbound_traced;
+use crate::vless::mux::MuxSessionTrace;
 use crate::vless::VlessUserManager;
 
 use super::decision::RealityAccepted;
@@ -33,8 +34,35 @@ pub async fn handle_accepted_reality_client(
     mldsa65_seed: Option<&Mldsa65Seed>,
     stats_state: Option<&StatsState>,
 ) -> std::io::Result<()> {
+    handle_accepted_reality_client_traced(
+        client,
+        record,
+        client_hello_payload,
+        accepted,
+        dest_addr,
+        users,
+        mldsa65_seed,
+        stats_state,
+        None,
+    )
+    .await
+}
+
+pub async fn handle_accepted_reality_client_traced(
+    client: TcpStream,
+    record: TlsClientHelloRecord,
+    client_hello_payload: ClientHelloPayload,
+    accepted: RealityAccepted,
+    dest_addr: &str,
+    users: &VlessUserManager,
+    mldsa65_seed: Option<&Mldsa65Seed>,
+    stats_state: Option<&StatsState>,
+    mux_trace: Option<MuxSessionTrace>,
+) -> std::io::Result<()> {
     let path_started = Instant::now();
     info!(
+        conn_id = mux_trace.map(|trace| trace.conn_id),
+        elapsed_ms_since_conn_start = mux_trace.map(|trace| trace.conn_started.elapsed().as_millis()),
         stage = stages::ACCEPTED_START,
         sni = ?accepted.sni,
         client_version = ?accepted.client.client_version,
@@ -46,7 +74,13 @@ pub async fn handle_accepted_reality_client(
         "REALITY accepted path started"
     );
 
-    debug!(stage = stages::DEST_CONNECT_START, %dest_addr, "connecting to dest");
+    debug!(
+        conn_id = mux_trace.map(|trace| trace.conn_id),
+        elapsed_ms_since_conn_start = mux_trace.map(|trace| trace.conn_started.elapsed().as_millis()),
+        stage = stages::DEST_CONNECT_START,
+        %dest_addr,
+        "connecting to dest"
+    );
     let mut dest = timeout(ACCEPTED_DEST_CONNECT_TIMEOUT, TcpStream::connect(dest_addr))
         .await
         .map_err(|_| {
@@ -63,7 +97,13 @@ pub async fn handle_accepted_reality_client(
         })?
         .map_err(|err| stage_error(RealityAcceptedStage::DestConnect, err))?;
 
-    debug!(stage = stages::DEST_CONNECT_OK, %dest_addr, "dest TCP connected");
+    debug!(
+        conn_id = mux_trace.map(|trace| trace.conn_id),
+        elapsed_ms_since_conn_start = mux_trace.map(|trace| trace.conn_started.elapsed().as_millis()),
+        stage = stages::DEST_CONNECT_OK,
+        %dest_addr,
+        "dest TCP connected"
+    );
 
     debug!(
         stage = stages::DEST_SERVER_HELLO_OBSERVED,
@@ -103,6 +143,9 @@ pub async fn handle_accepted_reality_client(
     )
     .await?;
     debug!(
+        conn_id = mux_trace.map(|trace| trace.conn_id),
+        elapsed_ms_since_conn_start =
+            mux_trace.map(|trace| trace.conn_started.elapsed().as_millis()),
         stage = stages::TLS13_APPLICATION_STREAM_READY,
         duration_ms = handshake_started.elapsed().as_millis(),
         cipher_suite,
@@ -117,7 +160,7 @@ pub async fn handle_accepted_reality_client(
         "handing off to VLESS inbound"
     );
 
-    handle_reality_vless_tcp_inbound(tls_app_stream, users, stats_state).await?;
+    handle_reality_vless_tcp_inbound_traced(tls_app_stream, users, stats_state, mux_trace).await?;
 
     debug!(
         stage = stages::VLESS_RELAY_DONE,
