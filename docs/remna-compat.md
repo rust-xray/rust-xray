@@ -1,5 +1,8 @@
 # Remna / Remnawave compatibility smoke
 
+**Project compatibility status:** [compatibility-status.md](./compatibility-status.md)  
+**Scope here:** gRPC API, panel-like config load, dynamic users — not full routing.
+
 End-to-end smoke that checks whether `rust-xray` can replace the upstream **Xray**
 binary for Remna/Remnawave-style deployments (CLI, panel-like config, gRPC API,
 dynamic VLESS users, stats).

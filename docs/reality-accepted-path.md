@@ -1,5 +1,10 @@
 # REALITY accepted path — developer notes
 
+> **Runtime status:** For what works today in live smoke (accepted TLS 1.3 +
+> VLESS + Vision, fallback, API), see
+> **[compatibility-status.md](./compatibility-status.md)**. This file focuses on
+> handshake architecture and upstream mapping for contributors.
+
 This document explains how upstream Xray/XTLS implements the REALITY **accepted**
 path, what rust-xray already has, and why a naive “patch ServerHello bytes”
 approach is insufficient.
@@ -7,9 +12,9 @@ approach is insufficient.
 It is **not** an implementation spec. It is a guardrail for future work so we do
 not ship a broken camouflage handshake.
 
-**Valid REALITY clients still stop at `Unsupported` after dest ServerHello
-observation and TLS 1.3 state setup.** This is **expected**. The project is **not**
-a drop-in Xray-core replacement.
+**This project is not a drop-in Xray-core replacement and is not production-ready.**
+Some sections below describe historical scaffolding states; trust
+[compatibility-status.md](./compatibility-status.md) for current end-to-end behavior.
 
 ## Upstream REALITY accepted path (Xray / XTLS)
 
@@ -107,8 +112,8 @@ Live matrix remains `scripts/live_reality_smoke/run-live-smoke.sh` unchanged.
 - **Client Finished verification** — `readClientFinished` equivalent.
 - **Encrypted application-data stream** — post-handshake record wrapper.
 - **Real VLESS handoff after TLS handshake** — `handle_vless_tcp_inbound` unreachable.
-- **Vision** — metadata only.
-- **`mldsa65`** — not implemented.
+- **Vision** — DIRECT MVP implemented (live smoke); splice/zero-copy not implemented.
+- **`mldsa65Seed`** — experimental runtime baseline when configured ([baseline doc](./reality-mldsa65-runtime-baseline.md)); **ML-KEM not implemented**.
 - **Fallback limits** — `limitFallbackUpload` / `limitFallbackDownload`.
 
 ### Explicitly not connected yet

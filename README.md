@@ -13,26 +13,49 @@
 **This is not a drop-in replacement for Xray-core.** Do not treat this project
 as a production Xray replacement. It is **not production-ready**.
 
-## Status (experiment branch)
+**Compatibility status (authoritative):** **[docs/compatibility-status.md](docs/compatibility-status.md)**
 
-### Implemented and validated
+## Compatibility Status (summary)
 
-- REALITY pre-auth (AEAD, policy, SNI) and fallback relay to `dest` / `target` for
-  invalid REALITY clients
-- REALITY cert HMAC patch (Ed25519 DER on accepted path)
-- TLS 1.3 accepted path (handshake + application stream adapter)
-- VLESS TCP inbound, UUID auth, flow validation, freedom outbound relay
-- VLESS flow `""` and `xtls-rprx-vision` (Vision DIRECT MVP: padding + `COMMAND_DIRECT`)
-- Fragmented / coalesced TLS ClientHello parser (TCP fragmentation, multi-record)
-- VLESS custom string user ID → UUIDv5 mapping (Xray-compatible)
+See **[docs/compatibility-status.md](docs/compatibility-status.md)** for the full
+matrix. Short version:
+
+### Working
+
+- REALITY TCP/raw inbound, pre-auth (SNI, AEAD, policy), and **accepted** TLS 1.3 path
+- VLESS TCP inbound: UUID auth, custom string ID → UUIDv5, `flow=""` and `xtls-rprx-vision` (Vision DIRECT MVP)
 - REALITY accepted-path cipher suites: AES128-GCM, AES256-GCM, ChaCha20-Poly1305
-- VLESS fallback selection: default, SNI/name, HTTP path, ALPN, PROXY v1/v2 (`xver=1|2`)
-- Transport validator: `network: "tcp"` (legacy alias) and `"raw"` for REALITY
+- VLESS fallback: default, SNI/name, HTTP path, ALPN (`http/1.1`, `h2`), PROXY v1/v2 (`xver=1|2`)
+- Network aliases: `raw` and legacy `tcp`
+- Basic Remnawave/Xray gRPC API: `StatsService` (`QueryStats`, `GetStats`, `GetSysStats`) when `api` block is present
+- **ML-DSA-65 baseline (experimental):** valid `mldsa65Seed` accepted, invalid seed rejected at startup, live smoke passes ([details](docs/reality-mldsa65-runtime-baseline.md))
 
 Accepted path **does not fallback** on failure — handshake/VLESS errors close the
 connection.
 
-### Live smoke (Xray-core 26.3.27)
+### Partial
+
+- **VLESS Mux:** partial parser and session support (`command=Mux` accepted, response header sent, mux relay/session starts, Mux.Cool frame parser for TCP/UDP metadata)
+- **Happ Proxy Utility:** reaches REALITY → TLS 1.3 → VLESS auth → Mux session; **blocked** because UDP DNS inside VLESS Mux is parsed but not fully relayed yet
+- Remnawave-style configs: load + REALITY inbound + API; routing/rules/balancers not executed
+
+### Not yet implemented
+
+- Full UDP mux relay, DNS UDP inside Mux (domain `:53` + resolver), XUDP, full Mux.Cool runtime
+- VLESS `command=Udp` (non-Mux)
+- REALITY over XHTTP / gRPC / WebSocket transport runtime
+- **ML-KEM** hybrid KEM (separate from ML-DSA-65; not implemented)
+- Full routing, balancers, outbound ecosystem, DoH, Vision splice/zero-copy beyond DIRECT MVP
+- Full Xray-core drop-in compatibility
+
+**DNS note:** DNS-over-TCP via a future DNS/outbound module does **not** solve
+Happ's current **UDP DNS over VLESS Mux** path by itself.
+
+### Next milestone
+
+Minimal **VLESS Mux UDP DNS relay for port 53** (Happ-compatible single-substream path).
+
+## Live smoke (Xray-core client matrix)
 
 From repo root:
 
@@ -50,21 +73,23 @@ Validated scenarios include:
 - VLESS custom string user ID end-to-end
 - Fallback matrix (default, SNI/name, HTTP path, ALPN, PROXY v1/v2)
 - Cipher suite smoke (AES128 / AES256 / ChaCha20)
+- ML-DSA-65 baseline (4/4 checks when enabled in fixture)
 - Negative transport configs (`xhttp`, `grpc`, `ws` + REALITY rejected at startup)
 
-Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/README.md)**.
+Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/README.md)**,
+**[docs/compatibility-status.md](docs/compatibility-status.md)**.
 
-### Remaining unsupported / not implemented
+### Remaining gaps (see compatibility doc)
 
-- UDP / Mux / XUDP VLESS runtime
-- REALITY over XHTTP / gRPC transport runtime
-- mldsa65 / ML-KEM post-quantum REALITY extensions
-- Routing, rules, balancers, full outbound ecosystem
+- VLESS Mux partial only; UDP DNS over Mux not complete for Happ
+- UDP / XUDP non-Mux commands; full routing/outbounds
+- REALITY over XHTTP / gRPC / WebSocket runtime
+- ML-KEM (ML-DSA-65 baseline is experimental — see docs)
 - Vision splice / zero-copy beyond DIRECT MVP
 - Fallback rate limits (`limitFallbackUpload` / `limitFallbackDownload`)
 - TLS 1.3 CCM cipher suites (0x1304, 0x1305)
 
-Developer documentation: **[docs/reality-accepted-path.md](docs/reality-accepted-path.md)**.
+Developer documentation: **[docs/reality-accepted-path.md](docs/reality-accepted-path.md)** (handshake internals; see compatibility doc for runtime status).
 
 ## TLS 1.3 cipher suite matrix (REALITY accepted path)
 
@@ -198,10 +223,11 @@ cargo run --bin rust-xray -- ./config.json
 make live-smoke
 ```
 
-With logging:
+With logging (default filter enables `rust_xray=debug` when `RUST_LOG` is unset):
 
 ```bash
 RUST_LOG=info cargo run --bin rust-xray -- ./config.json
+RUST_LOG=rust_xray=debug cargo run --bin rust-xray -- ./config.json
 ```
 
 ### Decision flow
@@ -224,7 +250,8 @@ RUST_LOG=info cargo run --bin rust-xray -- ./config.json
 | `REALITY TLS 1.3 handshake complete` | Handshake finished in code |
 | `REALITY VLESS handler started` | VLESS read/auth starting |
 | `unknown vless client id` | VLESS auth failed |
-| `unsupported vless command` | UDP/Mux |
+| `unsupported vless command` | VLESS `command=Udp` (non-Mux) not implemented |
+| `mux udp dns` / `closing substream` | Mux UDP frame parsed; full UDP DNS relay not complete (Happ path) |
 | `REALITY accepted path failed` | Handshake/VLESS error (no fallback) |
 
 ## Структура проекта
@@ -251,5 +278,9 @@ docs/reality-accepted-path.md
 - **Not an Xray-core replacement** and **not production-ready** (experiment branch).
 - Accepted path errors do not fallback (see policy matrix above for pre-auth fallback cases).
 - Vision DIRECT MVP only — no full splice/zero-copy beyond padding + DIRECT relay.
-- UDP / Mux / XUDP, REALITY over XHTTP/gRPC, mldsa65 / ML-KEM, routing not implemented.
+- VLESS Mux: partial parser/session; UDP DNS over Mux not complete for Happ.
+- VLESS `command=Udp` / XUDP; REALITY over XHTTP/gRPC/WebSocket; full routing/outbounds not implemented.
+- ML-DSA-65 cert signing: experimental baseline when `mldsa65Seed` is set; **ML-KEM not implemented**.
 - TLS 1.3 CCM cipher suites (0x1304, 0x1305) rejected on accepted path.
+
+Full matrix: **[docs/compatibility-status.md](docs/compatibility-status.md)**.

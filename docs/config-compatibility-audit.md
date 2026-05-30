@@ -5,6 +5,8 @@ Branch: `experiment`
 Scope: **VLESS + REALITY + Vision** server inbound config as parsed by `src/config/xray.rs`.  
 Upstream reference: [XTLS/Xray-core](https://github.com/XTLS/Xray-core) `main` — `infra/conf/transport_internet.go` (`REALITYConfig`, `StreamConfig`), `infra/conf/vless.go` (`VLessInboundConfig`), `transport/internet/reality/config.proto`.
 
+**Runtime compatibility summary:** [compatibility-status.md](./compatibility-status.md)
+
 **No runtime changes** were made for this audit. Behavior described here reflects the current code path.
 
 **Update (startup compatibility policy):** `validate_reality_inbound_config_policy` in `src/config/xray.rs` now handles panel-generated extras at startup (via `first_reality_inbound_runtime` / `validate_vless_reality_inbound_stream`):
@@ -34,7 +36,7 @@ Upstream reference: [XTLS/Xray-core](https://github.com/XTLS/Xray-core) `main` �
 
 ### Out of scope (baseline already PASS — not re-audited here)
 
-Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, TLS cipher matrix, ML-DSA-65 seed runtime, UDP/Mux/XUDP negatives, unsupported transport negatives — see existing tests and `docs/reality-mldsa65-runtime-baseline.md`.
+Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, TLS cipher matrix, ML-DSA-65 seed runtime (experimental baseline), UDP/Mux/XUDP negatives, unsupported transport negatives — see [compatibility-status.md](./compatibility-status.md), live smoke, and `docs/reality-mldsa65-runtime-baseline.md`.
 
 ---
 

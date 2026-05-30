@@ -1,5 +1,7 @@
 # Live REALITY smoke test
 
+**Compatibility status:** [docs/compatibility-status.md](../../docs/compatibility-status.md)
+
 **Manual local testing only.** This is a smoke configuration for exercising the
 REALITY accepted path with a real Xray client against `rust-xray`. **Not for
 production.**
@@ -54,10 +56,12 @@ bash scripts/live_reality_smoke/run-live-smoke.sh
 The automated runner executes regression checks, Vision stress coverage (100 sequential
 + 50 parallel requests, 100MB download), negative/flow-mismatch cases, network alias
 (`raw` vs legacy `tcp`), HTTP (`--http1.1` / `--http2`) and TLS (`--tls-max 1.2` /
-default 1.3) modes, VLESS `fallbacks[]` routing (default, SNI/name, HTTP path, PROXY v1
-`xver=1`), then writes a local report under `/tmp/rust-xray-live-smoke-*/report.txt`
-with accepted-path counters, Vision DIRECT command counts, AES-GCM decrypt failures, and
-curl status summary.
+default 1.3) modes, VLESS `fallbacks[]` routing (default, SNI/name, HTTP path, ALPN,
+PROXY v1/v2), cipher forcing, ML-DSA-65 baseline checks, then writes a local report
+under `/tmp/rust-xray-live-smoke-*/report.txt` with accepted-path counters, Vision
+DIRECT command counts, AES-GCM decrypt failures, and curl status summary.
+
+Pass/fail expectations vs upstream: [docs/compatibility-status.md](../../docs/compatibility-status.md).
 
 Optional environment variables for `run-live-smoke.sh`:
 

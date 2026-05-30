@@ -1,5 +1,8 @@
 # REALITY ML-DSA-65 Runtime Baseline
 
+**Status:** experimental baseline on `experiment` (not full PQ roadmap).  
+**Runtime matrix:** [compatibility-status.md](./compatibility-status.md)
+
 This document records the confirmed live smoke baseline for built-in ML-DSA-65
 REALITY support. It is intended as a regression guard for later REALITY/Vision
 work.
@@ -19,7 +22,7 @@ Confirmed PASS coverage:
 - fallback matrix PASS: default, SNI/name, HTTP path, ALPN http/1.1, ALPN h2,
   ALPN h2 curl, xver=1 PROXY v1, xver=2 PROXY v2
 - cipher matrix PASS: AES128, AES256, ChaCha20
-- UDP/Mux/XUDP negative PASS
+- UDP/Mux/XUDP negative PASS (non-Mux UDP / XUDP rejected; Mux is partial — see [compatibility-status.md](../../docs/compatibility-status.md))
 
 ## Invariants
 
