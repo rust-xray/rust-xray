@@ -1289,6 +1289,7 @@ version = "0.1.0"
 dependencies = [
  "aead",
  "aes-gcm",
+ "async-trait",
  "base64",
  "bytes",
  "chacha20poly1305",

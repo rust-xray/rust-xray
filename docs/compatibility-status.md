@@ -15,6 +15,7 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 - [Config compatibility audit](./config-compatibility-audit.md) — field-level parse policy
 - [REALITY ML-DSA-65 runtime baseline](./reality-mldsa65-runtime-baseline.md) — PQ cert signing smoke
 - [REALITY accepted path (developer notes)](./reality-accepted-path.md) — handshake internals
+- [DNS future work](./dns-future.md) — dokodemo-door, hijack, FakeDNS (TODO)
 
 ---
 
@@ -38,6 +39,8 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | Fallback `xver=2` PROXY v2 | Working | Live smoke + golden vector |
 | Network alias `raw` / legacy `tcp` | Working | Same REALITY TCP runtime |
 | StatsService API (basic) | Working | `QueryStats`, `GetStats`, `GetSysStats` when `api` block present |
+| DNS engine core (cache, dedup, UDP/TCP) | Working | `DnsEngine` in-process; numeric IP servers; no system resolver on engine path |
+| Mux UDP DNS (Happ baseline) | Working | `DnsEngine` via `resolve_mux_udp_dns`; numeric `:53` (e.g. `1.1.1.1:53`) |
 
 Accepted REALITY clients **do not** fall back on handshake/VLESS failure — the
 connection closes (by design).
@@ -49,7 +52,8 @@ connection closes (by design).
 | Area | Status | Notes |
 |------|--------|-------|
 | VLESS `command=Mux` (Happ baseline) | **Experimental working** | REALITY → TLS 1.3 → VLESS auth → `command=Mux` → response header → mux session start; live smoke + Happ traces |
-| UDP DNS over VLESS Mux (port 53) | **Experimental working** | Numeric `:53` targets (e.g. `1.1.1.1:53`); query forwarded, response received, mux UDP response frame sent |
+| UDP DNS over VLESS Mux (port 53) | **Experimental working** | `DnsEngine` cache/UDP transport; logs `mux udp dns engine query started` / `response sent` |
+| Outbound domain resolve (`UseIP` / `UseIPv4` / `UseIPv6`) | **Experimental** | Freedom connect uses `DnsEngine.lookup_ip` when `routing.domainStrategy` or `dns.queryStrategy` requires it |
 | Happ Proxy Utility baseline | **Experimental working** | REALITY/VLESS/Vision/Mux path reaches mux session; UDP DNS inside Mux works for numeric `:53` (live smoke validated) |
 | ML-DSA-65 baseline | **Experimental** | Valid `mldsa65Seed` accepted; invalid seed rejected at startup; raw Vision smoke passes; no cargo feature gate (see [baseline doc](./reality-mldsa65-runtime-baseline.md)) |
 
@@ -65,8 +69,11 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 |------|--------|-------|
 | Mux.Cool frame parser | Partial | `New` / `Keep` / `End` / `KeepAlive`; TCP and UDP frame metadata parsed |
 | Mux TCP substream | Partial | Single active TCP substream to freedom outbound (no parallel substreams) |
-| Mux UDP DNS (domain `:53`) | Partial | Numeric `:53` relay works; domain `:53` needs resolver integration (substream closed) |
-| Remnawave / panel configs | Partial | Config load + API + REALITY inbound; routing/rules/balancers not executed |
+| Mux UDP DNS (domain `:53`) | Partial | Domain `:53` mux targets still closed (numeric IP DNS works) |
+| Outbound routing / rules / balancers | Partial | `RoutingDnsRuntime` skeleton; freedom dial uses domain strategy only |
+| Remnawave / panel configs | Partial | Config load + API + REALITY inbound; full routing execution not implemented |
+| DNS engine — DoH / hostname servers | Partial | `https://` parsed; queries return explicit unsupported |
+| DNS engine — `protocol: "dns"` outbound | Partial | Config tolerated; placeholder only (see [dns-future.md](./dns-future.md)) |
 
 ---
 
@@ -82,17 +89,20 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | DNS UDP relay inside Mux (domain names without resolver) | Not implemented |
 | Full routing / rules / balancers | Not implemented |
 | Full outbound ecosystem | Not implemented |
+| FakeDNS | Not implemented |
+| DNS inbound / dokodemo-door hijack | Not implemented |
+| Full Xray DNS module compatibility | Not implemented |
 | REALITY over XHTTP / gRPC / WebSocket runtime | Not implemented (configs rejected at startup) |
 | DoH through outbound | Not implemented |
-| Full DNS module compatibility | Not implemented |
-| DNS-over-TCP through VLESS outbound / routing | Not implemented (separate future task) |
+| DNS-over-TCP through VLESS outbound / routing | Not implemented (see [dns-future.md](./dns-future.md)) |
 | Vision splice / zero-copy beyond DIRECT MVP | Not implemented |
 | ML-KEM / hybrid KEM on REALITY handshake | Not implemented (separate from ML-DSA-65; see [design doc](./reality-mlkem-design.md)) |
 | Full Xray-core drop-in compatibility | Not implemented |
 
-**DNS clarification:** DNS-over-TCP through a future DNS/outbound/routing module is a
-**separate** task. It does **not** replace the current Happ path, which uses
-**UDP DNS inside VLESS Mux** (`network=udp`, destination `:53`).
+**DNS clarification:** Built-in `DnsEngine` serves Mux UDP DNS and optional freedom
+outbound resolve (`UseIP` / `UseIPv4` / `UseIPv6`). It does **not** replace full Xray DNS
+(routing rules, FakeDNS, dokodemo-door, DNS outbound egress). Happ baseline still uses
+**UDP DNS inside VLESS Mux** to numeric `:53` (e.g. `1.1.1.1:53`).
 
 ---
 
@@ -109,9 +119,9 @@ REALITY TCP accept
   → VLESS response header sent
   → mux relay started / mux session started
   → Mux UDP frames (network=udp, destination=1.1.1.1:53, status=0x01 New, status=0x02 packet)
-  → mux udp dns query forwarded
-  → mux udp dns response received
-  → mux udp response frame sent
+  → mux udp dns engine query started
+  → dns query start / dns upstream response received
+  → mux udp dns engine response sent
 ```
 
 **Baseline status:** Happ-compatible REALITY/VLESS/Vision/Mux path with **numeric UDP
@@ -146,5 +156,5 @@ mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`).
 
 Last full live smoke report on `experiment` (local): Vision sequential/parallel/download PASS,
 fallback default/SNI/path/ALPN/xver PASS, ML-DSA-65 checks 4/4,
-Happ mux UDP DNS baseline PASS (`mux udp dns query forwarded`, `mux udp dns response received`,
-`mux udp response frame sent`), `aes_gcm_decrypt_failed=0`.
+Happ mux UDP DNS baseline PASS (`mux udp dns engine query started`, `mux udp dns engine response sent`,
+`dns query start`), `aes_gcm_decrypt_failed=0`.

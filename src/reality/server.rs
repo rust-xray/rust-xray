@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -33,6 +33,7 @@ pub async fn handle_accepted_reality_client(
     mldsa65_seed: Option<&Mldsa65Seed>,
     stats_state: Option<&StatsState>,
 ) -> std::io::Result<()> {
+    let path_started = Instant::now();
     info!(
         stage = stages::ACCEPTED_START,
         sni = ?accepted.sni,
@@ -90,6 +91,7 @@ pub async fn handle_accepted_reality_client(
 
     let client = PrefixedStream::new(client, record.trailing_bytes.clone());
 
+    let handshake_started = Instant::now();
     let tls_app_stream = complete_reality_tls13_handshake(
         client,
         &client_hello_payload,
@@ -100,6 +102,12 @@ pub async fn handle_accepted_reality_client(
         state,
     )
     .await?;
+    debug!(
+        stage = stages::TLS13_APPLICATION_STREAM_READY,
+        duration_ms = handshake_started.elapsed().as_millis(),
+        cipher_suite,
+        "REALITY TLS 1.3 handshake completed"
+    );
 
     debug!(
         stage = stages::VLESS_START,
@@ -111,6 +119,12 @@ pub async fn handle_accepted_reality_client(
 
     handle_reality_vless_tcp_inbound(tls_app_stream, users, stats_state).await?;
 
+    debug!(
+        stage = stages::VLESS_RELAY_DONE,
+        %dest_addr,
+        duration_ms = path_started.elapsed().as_millis(),
+        "REALITY accepted path completed"
+    );
     info!(stage = stages::VLESS_RELAY_DONE, %dest_addr, "REALITY accepted path complete");
 
     Ok(())

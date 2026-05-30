@@ -50,6 +50,17 @@ Under `RUST_LOG=info` with normal traffic, these should **not** appear repeatedl
 
 They remain available at `trace` (TLS/Vision/mux frames) or `debug` (mux UDP DNS, VLESS request parsed).
 
+### Latency diagnostics (`RUST_LOG=debug`)
+
+Connection-level timings (not per TLS record):
+
+- `REALITY TLS 1.3 handshake completed` — `duration_ms`
+- `REALITY accepted path completed` — `duration_ms`
+- `VLESS auth completed` — `duration_ms`
+- `vless relay completed` / `vless mux relay completed` — `duration_ms`
+- `mux udp dns completed` — `latency_ms` per DNS substream
+- `mux session completed` — `duration_ms`
+
 ## Optional debug env flags
 
 | Variable | Effect |

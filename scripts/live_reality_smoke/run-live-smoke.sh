@@ -932,8 +932,7 @@ smoke_validate_final_report() {
     smoke_assert_report_contains "PASS happ reality vision mux udp dns" &&
     smoke_assert_report_contains "PASS vless mux udp dns 1.1.1.1:53" &&
     smoke_assert_report_metric_at_least "mux_udp_dns_query_forwarded" 1 &&
-    smoke_assert_report_metric_at_least "mux_udp_dns_response_received" 1 &&
-    smoke_assert_report_metric_at_least "mux_udp_response_frame_sent" 1 &&
+    smoke_assert_report_metric_at_least "mux_udp_dns_completed" 1 &&
     smoke_assert_report_metric_at_least "forbidden_udp_mux_substream_not_implemented" 0 &&
     smoke_assert_report_contains "forbidden_udp_mux_substream_not_implemented: 0" &&
     smoke_assert_report_contains "forbidden_udp_mux_packet_not_implemented: 0"

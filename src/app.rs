@@ -15,6 +15,8 @@ use crate::config::{
     redact_config_source, resolve_api_listen, RealityInboundRuntime, RealityMldsa65RuntimeMode,
     XrayConfig,
 };
+use crate::dns::DnsEngine;
+use crate::outbound::{log_dns_outbounds, OutboundConnectRuntime};
 use crate::protocol::structs::ClientHelloPayload;
 use crate::proxy::relay_fallback_with_xver;
 use crate::reality::{
@@ -710,6 +712,15 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
         has_api = xray.api.is_some(),
         "config loaded OK"
     );
+    DnsEngine::init_shared(xray.dns.as_ref());
+    OutboundConnectRuntime::init_shared(&xray);
+    log_dns_outbounds(&xray.outbounds);
+    info!(
+        dns_servers = xray.dns.as_ref().map(|dns| dns.servers.len()).unwrap_or(0),
+        domain_strategy = ?OutboundConnectRuntime::shared().domain_strategy,
+        "DNS engine initialized for mux, outbound resolve, and builtin queries"
+    );
+
     if let Some(api) = xray.api.as_ref() {
         info!(api_tag = %api.tag, api_services = ?api.services, "api block present");
         if let Ok(Some((listen, source, tag))) = resolve_api_listen(&xray) {

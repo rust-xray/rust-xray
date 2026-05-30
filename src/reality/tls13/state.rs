@@ -463,11 +463,6 @@ where
         "generated ServerHello"
     );
 
-    stream
-        .write_all(&server_hello_record)
-        .await
-        .map_err(|err| stage_error(RealityAcceptedStage::ServerHello, err))?;
-
     let transcript_hash = state
         .update_transcript_client_server_hello(client_hello_message)
         .map_err(|err| stage_error(RealityAcceptedStage::Transcript, err))?;
@@ -507,8 +502,12 @@ where
         "built encrypted server handshake records"
     );
 
+    let mut server_handshake_out =
+        Vec::with_capacity(server_hello_record.len() + encrypted_handshake_records.len());
+    server_handshake_out.extend_from_slice(&server_hello_record);
+    server_handshake_out.extend_from_slice(&encrypted_handshake_records);
     stream
-        .write_all(&encrypted_handshake_records)
+        .write_all(&server_handshake_out)
         .await
         .map_err(|err| stage_error(RealityAcceptedStage::ServerHandshakeRecords, err))?;
     stream

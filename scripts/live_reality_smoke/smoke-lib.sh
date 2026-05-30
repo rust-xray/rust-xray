@@ -261,11 +261,12 @@ smoke_decrypt_failure_count() {
 smoke_expect_happ_mux_udp_dns_baseline() {
   local pattern
   local required_patterns=(
-    "mux udp dns query forwarded"
-    "mux udp dns response received"
-    "mux udp response frame sent"
+    "mux udp dns engine query started"
+    "mux udp dns engine response sent"
+    "dns query start"
   )
   local forbidden_patterns=(
+    "mux udp dns using temporary direct udp path"
     "UDP mux substream is not implemented"
     "UDP mux packet is not implemented"
   )
@@ -504,10 +505,9 @@ smoke_write_report() {
     grep -Ec 'AES-(128|256)-GCM decrypt failed|ChaCha20-Poly1305 decrypt failed|TLS application-stream record decrypt failed' \
       "${SMOKE_SERVER_LOG}" || true
   )"
-  local mux_query mux_response mux_frame mux_forbidden_substream mux_forbidden_packet
-  mux_query="$(smoke_count_log 'mux udp dns query forwarded')"
-  mux_response="$(smoke_count_log 'mux udp dns response received')"
-  mux_frame="$(smoke_count_log 'mux udp response frame sent')"
+  local mux_query mux_completed mux_forbidden_substream mux_forbidden_packet
+  mux_query="$(smoke_count_log 'mux udp dns engine query started')"
+  mux_completed="$(smoke_count_log 'mux udp dns engine response sent')"
   mux_forbidden_substream="$(smoke_count_log 'UDP mux substream is not implemented')"
   mux_forbidden_packet="$(smoke_count_log 'UDP mux packet is not implemented')"
 
@@ -526,8 +526,7 @@ smoke_write_report() {
     echo
     echo "[happ mux baseline]"
     echo "mux_udp_dns_query_forwarded: ${mux_query}"
-    echo "mux_udp_dns_response_received: ${mux_response}"
-    echo "mux_udp_response_frame_sent: ${mux_frame}"
+    echo "mux_udp_dns_completed: ${mux_completed}"
     echo "forbidden_udp_mux_substream_not_implemented: ${mux_forbidden_substream}"
     echo "forbidden_udp_mux_packet_not_implemented: ${mux_forbidden_packet}"
     echo

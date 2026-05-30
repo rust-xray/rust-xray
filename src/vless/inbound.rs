@@ -26,7 +26,9 @@ use crate::vless::vision::{
     is_vision_flow, new_shared_traffic_state, parse_vless_request_flow, SharedTrafficState,
     VisionRelayStream, FLOW_XTLS_RPRX_VISION,
 };
+use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
 use tracing::{debug, info, warn};
 
 const MAX_VLESS_HEADER_SIZE: usize = 4096;
@@ -308,12 +310,20 @@ async fn prepare_vless_relay<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let vless_started = Instant::now();
     let inbound = read_vless_request(&mut stream)
         .await
         .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
 
     let auth = authenticate_vless_client(&inbound.request, users)
         .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+    debug!(
+        stage = stages::VLESS_AUTH_OK,
+        duration_ms = vless_started.elapsed().as_millis(),
+        user_id = %auth.id,
+        command = ?inbound.request.command,
+        "VLESS auth completed"
+    );
     let stats = stats_state.and_then(|state| state.session(auth.email.clone(), auth.level));
     let destination = format_vless_destination(&inbound.request.destination);
 
@@ -459,6 +469,7 @@ fn finish_vless_tcp_relay(
     finished: VlessTcpRelayFinished,
     relay_result: std::io::Result<(u64, u64)>,
     stats: Option<&StatsSession>,
+    relay_started: Instant,
 ) -> std::io::Result<()> {
     let (inbound_to_outbound, outbound_to_inbound) =
         relay_result.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
@@ -466,6 +477,18 @@ fn finish_vless_tcp_relay(
     if let Some(stats) = stats {
         stats.record_relay(inbound_to_outbound, outbound_to_inbound);
     }
+
+    debug!(
+        stage = stages::VLESS_RELAY_DONE,
+        email = finished.auth.email.as_deref(),
+        flow = finished.auth.flow.as_deref(),
+        command = ?finished.command,
+        destination = %finished.destination,
+        duration_ms = relay_started.elapsed().as_millis(),
+        inbound_to_outbound,
+        outbound_to_inbound,
+        "vless relay completed"
+    );
 
     info!(
         stage = stages::VLESS_RELAY_DONE,
@@ -512,6 +535,7 @@ where
         command,
     } = prepared;
 
+    let relay_started = Instant::now();
     let relay_result =
         relay_vless_tcp_bidirectional(stream, &mut outbound, vision, None, stats.as_ref()).await;
 
@@ -523,6 +547,7 @@ where
         },
         relay_result,
         stats.as_ref(),
+        relay_started,
     )
 }
 
@@ -563,6 +588,7 @@ where
         direct_relay,
     } = stream.split_for_relay()?;
     let relay = RealityTls13RelayClient::new(reader, writer, direct_relay.clone());
+    let relay_started = Instant::now();
     let relay_result = relay_vless_tcp_bidirectional(
         relay,
         &mut outbound,
@@ -580,6 +606,7 @@ where
         },
         relay_result,
         stats.as_ref(),
+        relay_started,
     )
 }
 
@@ -600,6 +627,7 @@ where
         "VLESS mux relay started"
     );
 
+    let mux_started = Instant::now();
     let result = if let Some((traffic, user_uuid)) = prepared.vision {
         let vision_stream =
             VisionRelayStream::new(prepared.stream, traffic, user_uuid, direct_relay);
@@ -612,6 +640,14 @@ where
 
     result.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
 
+    debug!(
+        stage = stages::VLESS_RELAY_DONE,
+        email = prepared.auth.email.as_deref(),
+        flow = prepared.auth.flow.as_deref(),
+        command = ?VlessCommand::Mux,
+        duration_ms = mux_started.elapsed().as_millis(),
+        "vless mux relay completed"
+    );
     info!(
         stage = stages::VLESS_RELAY_DONE,
         email = prepared.auth.email.as_deref(),
