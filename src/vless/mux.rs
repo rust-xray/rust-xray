@@ -22,6 +22,25 @@ const MUX_NETWORK_UDP: u8 = 0x02;
 const MAX_MUX_METADATA_LEN: usize = 512;
 const MAX_MUX_DATA_LEN: usize = 65_535;
 
+/// Outbound mux frames plus optional first-DNS latency trace for DEBUG diagnostics.
+pub(crate) struct MuxFrameActions {
+    pub frames: Vec<Vec<u8>>,
+    pub dns_latency_trace: Option<MuxUdpDnsLatencyTrace>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MuxUdpDnsLatencyTrace {
+    pub mux_id: u16,
+    pub received_at: Instant,
+}
+
+fn mux_actions(frames: Vec<Vec<u8>>) -> MuxFrameActions {
+    MuxFrameActions {
+        frames,
+        dns_latency_trace: None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MuxNetwork {
     Tcp,
@@ -264,13 +283,15 @@ fn append_mux_udp_dns_close(id: u16, response: Option<Vec<u8>>) -> Vec<u8> {
     }
 }
 
-async fn write_mux_out_frames<S>(stream: &mut S, frames: &[Vec<u8>]) -> std::io::Result<()>
+async fn write_mux_out_frames<S>(stream: &mut S, actions: &MuxFrameActions) -> std::io::Result<()>
 where
     S: AsyncWrite + Unpin,
 {
+    let frames = &actions.frames;
     if frames.is_empty() {
         return Ok(());
     }
+    let write_started = Instant::now();
     if frames.len() == 1 {
         stream.write_all(&frames[0]).await?;
     } else {
@@ -282,6 +303,16 @@ where
         stream.write_all(&buf).await?;
     }
     stream.flush().await?;
+    if let Some(trace) = actions.dns_latency_trace {
+        let frame_bytes: usize = frames.iter().map(Vec::len).sum();
+        debug!(
+            mux_id = trace.mux_id,
+            frame_bytes,
+            write_ms = write_started.elapsed().as_millis(),
+            total_latency_ms = trace.received_at.elapsed().as_millis(),
+            "mux udp dns response frame written"
+        );
+    }
     Ok(())
 }
 
@@ -505,12 +536,16 @@ where
                 read = outbound.read(&mut buf) => {
                     let read = read?;
                     if read == 0 {
-                        write_mux_out_frames(&mut stream, &[encode_mux_end(*id)]).await?;
+                        write_mux_out_frames(
+                            &mut stream,
+                            &mux_actions(vec![encode_mux_end(*id)]),
+                        )
+                        .await?;
                         debug!(mux_id = *id, "mux substream relay completed");
                         active = None;
                     } else {
                         let frame = encode_mux_keep_data(*id, &buf[..read])?;
-                        write_mux_out_frames(&mut stream, &[frame]).await?;
+                        write_mux_out_frames(&mut stream, &mux_actions(vec![frame])).await?;
                     }
                 }
             }
@@ -538,7 +573,7 @@ async fn handle_client_frame(
     active: &mut Option<(u16, TcpStream)>,
     dns: &Arc<DnsEngine>,
     frame: MuxFrame,
-) -> std::io::Result<Vec<Vec<u8>>> {
+) -> std::io::Result<MuxFrameActions> {
     match frame {
         MuxFrame::New {
             id,
@@ -583,7 +618,7 @@ async fn handle_client_frame(
         MuxFrame::Keep { id, data, .. } => {
             let Some((active_id, outbound)) = active.as_mut() else {
                 warn!(mux_id = id, "mux keep frame without active substream");
-                return Ok(Vec::new());
+                return Ok(mux_actions(Vec::new()));
             };
             if *active_id != id {
                 warn!(
@@ -603,7 +638,7 @@ async fn handle_client_frame(
         MuxFrame::End { id, data } => {
             let Some((active_id, mut outbound)) = active.take() else {
                 debug!(mux_id = id, "mux end frame without active substream");
-                return Ok(Vec::new());
+                return Ok(mux_actions(Vec::new()));
             };
             if active_id != id {
                 warn!(
@@ -626,7 +661,7 @@ async fn handle_client_frame(
             debug!(mux_id = id, "mux keepalive");
         }
     }
-    Ok(Vec::new())
+    Ok(mux_actions(Vec::new()))
 }
 
 const MUX_DNS_LEGACY_DIRECT_ENV: &str = "RUST_XRAY_DNS_LEGACY_MUX_DIRECT";
@@ -662,7 +697,7 @@ async fn resolve_mux_udp_dns_packet(
             payload_len = data.len(),
             "mux udp dns using temporary direct udp path"
         );
-        let timeout = DnsEngineOptions::default().default_timeout;
+        let timeout = DnsEngineOptions::from_env().mux_udp_dns_timeout;
         let raw = relay_mux_udp_dns_legacy_direct(target, data, timeout).await?;
         return Ok(DnsQueryResponse {
             raw_response: raw,
@@ -717,8 +752,18 @@ async fn handle_udp_mux_packet(
     destination: VlessDestination,
     data: Vec<u8>,
     dns: &Arc<DnsEngine>,
-) -> std::io::Result<Vec<Vec<u8>>> {
+) -> std::io::Result<MuxFrameActions> {
+    let received_at = Instant::now();
     let destination_label = format_vless_destination(&destination);
+    let target = udp_socket_addr_without_dns(&destination);
+    debug!(
+        mux_id = id,
+        %destination_label,
+        destination = ?target,
+        payload_len = data.len(),
+        "mux udp dns received"
+    );
+
     if !is_supported_udp_dns_destination(&destination) {
         warn!(
             mux_id = id,
@@ -727,10 +772,10 @@ async fn handle_udp_mux_packet(
             payload_len = data.len(),
             "unsupported non-DNS UDP mux substream; closing substream"
         );
-        return Ok(vec![append_mux_udp_dns_close(id, None)]);
+        return Ok(mux_actions(vec![append_mux_udp_dns_close(id, None)]));
     }
 
-    let Some(target) = udp_socket_addr_without_dns(&destination) else {
+    let Some(target) = target else {
         warn!(
             mux_id = id,
             network = "udp",
@@ -738,38 +783,66 @@ async fn handle_udp_mux_packet(
             payload_len = data.len(),
             "UDP mux DNS domain destination requires resolver support; closing substream"
         );
-        return Ok(vec![append_mux_udp_dns_close(id, None)]);
+        return Ok(mux_actions(vec![append_mux_udp_dns_close(id, None)]));
     };
 
     debug!(
         mux_id = id,
+        %target,
         destination = %destination_label,
         payload_len = data.len(),
+        engine_elapsed_ms = received_at.elapsed().as_millis(),
         "mux udp dns engine query started"
     );
-    let started = Instant::now();
     match resolve_mux_udp_dns_packet(dns, id, target, &data).await {
         Ok(response) => {
+            let encode_started = Instant::now();
             let frame = encode_mux_udp_packet(id, &destination, &response.raw_response)?;
             debug!(
                 mux_id = id,
                 destination = %destination_label,
                 response_len = response.raw_response.len(),
                 cache_hit = response.cached,
-                latency_ms = started.elapsed().as_millis(),
-                "mux udp dns engine response sent"
+                encode_ms = encode_started.elapsed().as_millis(),
+                engine_latency_ms = response.latency.as_millis(),
+                elapsed_ms = received_at.elapsed().as_millis(),
+                "mux udp dns response frame encoded"
             );
-            Ok(vec![append_mux_udp_dns_close(id, Some(frame))])
-        }
-        Err(err) if mux_dns_non_fatal_error(&err) => {
-            warn!(
+            debug!(
                 mux_id = id,
                 destination = %destination_label,
-                error = %err,
-                latency_ms = started.elapsed().as_millis(),
-                "mux udp dns engine error"
+                response_len = response.raw_response.len(),
+                cache_hit = response.cached,
+                latency_ms = received_at.elapsed().as_millis(),
+                "mux udp dns engine response sent"
             );
-            Ok(vec![append_mux_udp_dns_close(id, None)])
+            Ok(MuxFrameActions {
+                frames: vec![append_mux_udp_dns_close(id, Some(frame))],
+                dns_latency_trace: Some(MuxUdpDnsLatencyTrace {
+                    mux_id: id,
+                    received_at,
+                }),
+            })
+        }
+        Err(err) if mux_dns_non_fatal_error(&err) => {
+            if matches!(err, DnsError::Timeout) {
+                debug!(
+                    mux_id = id,
+                    destination = %destination_label,
+                    error = %err,
+                    total_latency_ms = received_at.elapsed().as_millis(),
+                    "mux udp dns engine timeout"
+                );
+            } else {
+                warn!(
+                    mux_id = id,
+                    destination = %destination_label,
+                    error = %err,
+                    total_latency_ms = received_at.elapsed().as_millis(),
+                    "mux udp dns engine error"
+                );
+            }
+            Ok(mux_actions(vec![append_mux_udp_dns_close(id, None)]))
         }
         Err(err) => Err(err.into()),
     }
@@ -1100,9 +1173,10 @@ mod tests {
                     extra: Default::default(),
                 },
                 DnsEngineOptions {
-                    default_timeout: Duration::from_millis(100),
+                    mux_udp_dns_timeout: Duration::from_millis(100),
                     max_retries: 0,
-                    ..DnsEngineOptions::default()
+                    mux_udp_dns_max_retries: 0,
+                    ..DnsEngineOptions::for_test()
                 },
             ));
             let handle =
@@ -1171,9 +1245,10 @@ mod tests {
                     extra: Default::default(),
                 },
                 DnsEngineOptions {
-                    default_timeout: Duration::from_secs(2),
+                    mux_udp_dns_timeout: Duration::from_secs(2),
                     max_retries: 0,
-                    ..DnsEngineOptions::default()
+                    mux_udp_dns_max_retries: 0,
+                    ..DnsEngineOptions::for_test()
                 },
             ));
 

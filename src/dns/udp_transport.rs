@@ -62,25 +62,27 @@ impl UdpDnsTransport {
             pending.insert(key, tx);
         }
 
+        let send_started = std::time::Instant::now();
         if let Err(err) = dispatcher.socket.send_to(query, server).await {
             dispatcher.pending.lock().await.remove(&key);
             return Err(err.into());
         }
 
         debug!(
-            %server,
+            server = %server,
             query_len = query.len(),
             dns_id = expected_id,
-            "dns upstream query sent"
+            elapsed_ms = send_started.elapsed().as_millis(),
+            "dns upstream send done"
         );
 
-        let started = std::time::Instant::now();
+        let wait_started = std::time::Instant::now();
         match time::timeout(timeout, rx).await {
             Ok(Ok(response)) => {
                 debug!(
-                    %server,
+                    server = %server,
                     response_len = response.len(),
-                    latency_ms = started.elapsed().as_millis(),
+                    latency_ms = wait_started.elapsed().as_millis(),
                     dns_id = expected_id,
                     "dns upstream response received"
                 );
@@ -92,7 +94,12 @@ impl UdpDnsTransport {
             }
             Err(_) => {
                 dispatcher.pending.lock().await.remove(&key);
-                warn!(%server, dns_id = expected_id, "dns upstream timeout");
+                debug!(
+                    server = %server,
+                    dns_id = expected_id,
+                    timeout_ms = timeout.as_millis(),
+                    "dns upstream timeout"
+                );
                 Err(DnsError::Timeout)
             }
         }

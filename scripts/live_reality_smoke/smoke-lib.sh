@@ -261,9 +261,12 @@ smoke_decrypt_failure_count() {
 smoke_expect_happ_mux_udp_dns_baseline() {
   local pattern
   local required_patterns=(
+    "mux udp dns received"
     "mux udp dns engine query started"
-    "mux udp dns engine response sent"
     "dns query start"
+    "mux udp dns response frame encoded"
+    "mux udp dns response frame written"
+    "mux udp dns engine response sent"
   )
   local forbidden_patterns=(
     "mux udp dns using temporary direct udp path"
@@ -506,8 +509,8 @@ smoke_write_report() {
       "${SMOKE_SERVER_LOG}" || true
   )"
   local mux_query mux_completed mux_forbidden_substream mux_forbidden_packet
-  mux_query="$(smoke_count_log 'mux udp dns engine query started')"
-  mux_completed="$(smoke_count_log 'mux udp dns engine response sent')"
+  mux_query="$(smoke_count_log 'mux udp dns received')"
+  mux_completed="$(smoke_count_log 'mux udp dns response frame written')"
   mux_forbidden_substream="$(smoke_count_log 'UDP mux substream is not implemented')"
   mux_forbidden_packet="$(smoke_count_log 'UDP mux packet is not implemented')"
 

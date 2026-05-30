@@ -12,6 +12,8 @@ use crate::dns::cache::{CachedDnsResponse, DnsCache};
 use crate::dns::config::{self};
 use crate::dns::config::{DnsConfig, QueryStrategy};
 use crate::dns::error::{DnsError, DnsQueryResponse};
+use crate::dns::mux_upstream::{build_mux_udp_candidates, execute_mux_udp_upstream};
+use crate::dns::options::DnsEngineOptions;
 use crate::dns::packet::{
     build_dns_query, dns_query_id, extract_ipv4_addresses, extract_ipv6_addresses,
     inflight_key_from_packet, is_negative_dns_response, parse_dns_question_key,
@@ -53,27 +55,10 @@ pub struct DnsQueryRequest {
     pub source: DnsQuerySource,
 }
 
-#[derive(Debug, Clone)]
-pub struct DnsEngineOptions {
-    pub default_timeout: Duration,
-    pub max_retries: usize,
-    pub cache_enabled: bool,
-    pub cache_max_entries: usize,
-    pub cache_min_ttl: Duration,
-    pub cache_max_ttl: Duration,
-}
-
-impl Default for DnsEngineOptions {
-    fn default() -> Self {
-        Self {
-            default_timeout: Duration::from_secs(5),
-            max_retries: 1,
-            cache_enabled: true,
-            cache_max_entries: 4096,
-            cache_min_ttl: Duration::from_secs(30),
-            cache_max_ttl: Duration::from_secs(3600),
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+struct UpstreamPolicy {
+    timeout: Duration,
+    max_retries: usize,
 }
 
 #[derive(Default)]
@@ -135,9 +120,9 @@ impl DnsEngine {
     /// Initialize the process-wide engine from top-level `dns` config (first call wins).
     pub fn init_shared(dns: Option<&DnsConfig>) -> Arc<DnsEngine> {
         let owned = dns.cloned();
-        Arc::clone(SHARED_DNS_ENGINE.get_or_init(|| {
-            Arc::new(Self::from_xray_config(owned.as_ref()))
-        }))
+        Arc::clone(
+            SHARED_DNS_ENGINE.get_or_init(|| Arc::new(Self::from_xray_config(owned.as_ref()))),
+        )
     }
 
     pub fn shared() -> Arc<DnsEngine> {
@@ -166,11 +151,15 @@ impl DnsEngine {
         let inflight_key = inflight_key_from_packet(&request.raw_query)?;
         let question = parse_dns_question_for_log(&request.raw_query);
         let response_server = self.response_socket_addr(&request)?;
+        let policy = self.upstream_policy(&request);
         debug!(
             qname = question.as_ref().map(|q| q.qname.as_str()),
             qtype = question.as_ref().map(|q| q.qtype),
             %response_server,
             source = request.source.as_str(),
+            timeout_ms = policy.timeout.as_millis(),
+            max_retries = policy.max_retries,
+            destination = ?request.destination,
             inbound_tag = request.inbound_tag.as_deref(),
             cache_enabled = self.options.cache_enabled && !self.config.disable_cache,
             "dns query start"
@@ -178,21 +167,18 @@ impl DnsEngine {
         self.record_query();
 
         if self.options.cache_enabled && !self.config.disable_cache {
+            let cache_lookup_started = Instant::now();
             if let Some((hit, server_id)) = self.cache_lookup(&request.raw_query, &request) {
                 self.record_cache_hit();
-                let cached_dns_id = dns_query_id(&hit.raw_response);
-                let query_dns_id = dns_query_id(&request.raw_query);
                 let rewritten = self.rewrite_cached_for_query(hit, &request.raw_query)?;
                 debug!(
                     qname = %inflight_key.qname,
                     qtype = inflight_key.qtype,
-                    server_id = %server_id,
                     source = request.source.as_str(),
+                    server_id = %server_id,
                     cache_hit = true,
-                    cached_dns_id = ?cached_dns_id,
-                    query_dns_id = ?query_dns_id,
-                    rewritten_dns_id = ?dns_query_id(&rewritten.raw_response),
-                    "dns cache hit"
+                    elapsed_us = cache_lookup_started.elapsed().as_micros(),
+                    "dns cache lookup done"
                 );
                 return Ok(self.to_query_response(
                     rewritten,
@@ -202,21 +188,36 @@ impl DnsEngine {
                 ));
             }
             self.record_cache_miss();
+            debug!(
+                qname = %inflight_key.qname,
+                qtype = inflight_key.qtype,
+                source = request.source.as_str(),
+                cache_hit = false,
+                elapsed_us = cache_lookup_started.elapsed().as_micros(),
+                "dns cache lookup done"
+            );
         }
 
         let leader = {
             let mut guard = self.inflight.lock().await;
             if let Some(existing) = guard.get(&inflight_key).cloned() {
                 self.record_inflight_dedup_hit();
+                let inflight_wait_started = Instant::now();
                 debug!(
                     qname = %inflight_key.qname,
                     qtype = inflight_key.qtype,
                     source = request.source.as_str(),
-                    "dns in-flight dedup hit"
+                    "dns inflight dedup wait start"
                 );
                 drop(guard);
                 return self
-                    .wait_inflight(existing, &request.raw_query, response_server, started)
+                    .wait_inflight(
+                        existing,
+                        &request.raw_query,
+                        response_server,
+                        inflight_wait_started,
+                        request.source,
+                    )
                     .await
                     .map(|cached| {
                         self.to_query_response(cached, response_server, false, started.elapsed())
@@ -357,17 +358,32 @@ impl DnsEngine {
         entry: Arc<InflightQuery>,
         current_query: &[u8],
         _server: SocketAddr,
-        _started: Instant,
+        wait_started: Instant,
+        source: DnsQuerySource,
     ) -> Result<CachedDnsResponse, DnsError> {
         loop {
             if let Some(result) = entry.result.lock().await.clone() {
-                return result
-                    .and_then(|cached| self.rewrite_cached_for_query(cached, current_query));
+                let outcome =
+                    result.and_then(|cached| self.rewrite_cached_for_query(cached, current_query));
+                debug!(
+                    source = source.as_str(),
+                    elapsed_us = wait_started.elapsed().as_micros(),
+                    ok = outcome.is_ok(),
+                    "dns inflight dedup wait done"
+                );
+                return outcome;
             }
             entry.notify.notified().await;
             if let Some(result) = entry.result.lock().await.clone() {
-                return result
-                    .and_then(|cached| self.rewrite_cached_for_query(cached, current_query));
+                let outcome =
+                    result.and_then(|cached| self.rewrite_cached_for_query(cached, current_query));
+                debug!(
+                    source = source.as_str(),
+                    elapsed_us = wait_started.elapsed().as_micros(),
+                    ok = outcome.is_ok(),
+                    "dns inflight dedup wait done"
+                );
+                return outcome;
             }
         }
     }
@@ -384,18 +400,55 @@ impl DnsEngine {
         })
     }
 
+    fn upstream_policy(&self, request: &DnsQueryRequest) -> UpstreamPolicy {
+        if request.source == DnsQuerySource::MuxUdp || request.destination.is_some() {
+            UpstreamPolicy {
+                timeout: self.options.mux_udp_dns_timeout,
+                max_retries: self.options.mux_udp_dns_max_retries,
+            }
+        } else {
+            UpstreamPolicy {
+                timeout: self.options.default_timeout,
+                max_retries: self.options.max_retries,
+            }
+        }
+    }
+
     async fn execute_upstream(
         &self,
         request: &DnsQueryRequest,
         query: &[u8],
     ) -> Result<(Vec<u8>, String), DnsError> {
-        if let Some(destination) = request.destination {
+        let policy = self.upstream_policy(request);
+        if request.source == DnsQuerySource::MuxUdp {
+            if let Some(destination) = request.destination {
+                let candidates = build_mux_udp_candidates(
+                    destination,
+                    &self.config,
+                    self.options.mux_dns_upstream_mode,
+                );
+                return execute_mux_udp_upstream(
+                    &self.transports.udp,
+                    query,
+                    &candidates,
+                    self.options.mux_dns_upstream_mode,
+                    policy.timeout,
+                )
+                .await
+                .map_err(|err| {
+                    if matches!(err, DnsError::Timeout) {
+                        self.record_timeout();
+                    }
+                    err
+                });
+            }
+        } else if let Some(destination) = request.destination {
             let mut attempt = 0usize;
             loop {
                 let result = self
                     .transports
                     .udp
-                    .query_at(destination, query, self.options.default_timeout)
+                    .query_at(destination, query, policy.timeout)
                     .await;
                 match result {
                     Ok(response) => {
@@ -403,7 +456,7 @@ impl DnsEngine {
                     }
                     Err(DnsError::Timeout) => {
                         self.record_timeout();
-                        if attempt >= self.options.max_retries {
+                        if attempt >= policy.max_retries {
                             return Err(DnsError::Timeout);
                         }
                     }
@@ -430,17 +483,13 @@ impl DnsEngine {
 
             let mut attempt = 0usize;
             loop {
-                match self
-                    .transports
-                    .query(query, server, self.options.default_timeout)
-                    .await
-                {
+                match self.transports.query(query, server, policy.timeout).await {
                     Ok(response) => return Ok((response, server.original.clone())),
                     Err(err @ DnsError::MalformedQuery) => return Err(err),
                     Err(err @ DnsError::Timeout) => {
                         self.record_timeout();
                         last_err = Some(err);
-                        if attempt >= self.options.max_retries {
+                        if attempt >= policy.max_retries {
                             break;
                         }
                     }
@@ -501,7 +550,18 @@ impl DnsEngine {
     }
 
     fn cache_server_ids(&self, request: &DnsQueryRequest) -> Vec<String> {
-        if let Some(destination) = request.destination {
+        if request.source == DnsQuerySource::MuxUdp {
+            if let Some(destination) = request.destination {
+                return build_mux_udp_candidates(
+                    destination,
+                    &self.config,
+                    self.options.mux_dns_upstream_mode,
+                )
+                .into_iter()
+                .map(|candidate| candidate.server_id)
+                .collect();
+            }
+        } else if let Some(destination) = request.destination {
             return vec![format!("mux:{destination}")];
         }
         self.config
@@ -584,6 +644,7 @@ fn hit_key_qname(key: &DnsInflightKey) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dns::options::MuxDnsUpstreamMode;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -752,9 +813,10 @@ mod tests {
                 extra: Default::default(),
             },
             DnsEngineOptions {
-                default_timeout: Duration::from_secs(2),
+                mux_udp_dns_timeout: Duration::from_secs(2),
                 max_retries: 0,
-                ..DnsEngineOptions::default()
+                mux_udp_dns_max_retries: 0,
+                ..DnsEngineOptions::for_test()
             },
         );
 
@@ -872,9 +934,10 @@ mod tests {
                 extra: Default::default(),
             },
             DnsEngineOptions {
-                default_timeout: Duration::from_millis(200),
+                mux_udp_dns_timeout: Duration::from_millis(200),
                 max_retries: 0,
-                ..DnsEngineOptions::default()
+                mux_udp_dns_max_retries: 0,
+                ..DnsEngineOptions::for_test()
             },
         );
         let key = parse_dns_question_key(&example_query(), "127.0.0.1").unwrap();
@@ -921,9 +984,10 @@ mod tests {
                 extra: Default::default(),
             },
             DnsEngineOptions {
-                default_timeout: Duration::from_secs(2),
+                mux_udp_dns_timeout: Duration::from_secs(2),
                 max_retries: 0,
-                ..DnsEngineOptions::default()
+                mux_udp_dns_max_retries: 0,
+                ..DnsEngineOptions::for_test()
             },
         );
 
@@ -975,7 +1039,7 @@ mod tests {
             DnsEngineOptions {
                 default_timeout: Duration::from_secs(2),
                 max_retries: 0,
-                ..DnsEngineOptions::default()
+                ..DnsEngineOptions::for_test()
             },
         );
 
@@ -1018,7 +1082,7 @@ mod tests {
             DnsEngineOptions {
                 default_timeout: Duration::from_millis(150),
                 max_retries: 0,
-                ..DnsEngineOptions::default()
+                ..DnsEngineOptions::for_test()
             },
         );
 
@@ -1092,10 +1156,11 @@ mod tests {
                 extra: Default::default(),
             },
             DnsEngineOptions {
-                default_timeout: Duration::from_secs(2),
+                mux_udp_dns_timeout: Duration::from_secs(2),
                 max_retries: 0,
+                mux_udp_dns_max_retries: 0,
                 cache_enabled: false,
-                ..DnsEngineOptions::default()
+                ..DnsEngineOptions::for_test()
             },
         ));
 
@@ -1119,6 +1184,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_returns_dns_error_timeout() {
+        let started = Instant::now();
         let engine = DnsEngine::new(
             DnsConfig {
                 servers: vec![config::parse_dns_server("127.0.0.1").unwrap()],
@@ -1127,9 +1193,12 @@ mod tests {
                 extra: Default::default(),
             },
             DnsEngineOptions {
-                default_timeout: Duration::from_millis(100),
+                default_timeout: Duration::from_secs(5),
+                mux_udp_dns_timeout: Duration::from_millis(100),
                 max_retries: 0,
-                ..DnsEngineOptions::default()
+                mux_udp_dns_max_retries: 0,
+                mux_dns_upstream_mode: MuxDnsUpstreamMode::DestinationOnly,
+                ..DnsEngineOptions::for_test()
             },
         );
         let err = engine
@@ -1141,6 +1210,245 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, DnsError::Timeout);
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(1));
+        assert!(elapsed >= Duration::from_millis(80));
+    }
+
+    #[tokio::test]
+    async fn mux_udp_request_uses_mux_timeout_not_default() {
+        let started = Instant::now();
+        let engine = DnsEngine::new(
+            DnsConfig {
+                servers: vec![config::parse_dns_server("127.0.0.1").unwrap()],
+                query_strategy: QueryStrategy::UseIP,
+                disable_cache: false,
+                extra: Default::default(),
+            },
+            DnsEngineOptions {
+                default_timeout: Duration::from_secs(5),
+                mux_udp_dns_timeout: Duration::from_millis(200),
+                max_retries: 0,
+                mux_udp_dns_max_retries: 0,
+                mux_dns_upstream_mode: MuxDnsUpstreamMode::DestinationOnly,
+                ..DnsEngineOptions::for_test()
+            },
+        );
+        let err = engine
+            .resolve_mux_udp_dns(
+                1,
+                SocketAddr::from((Ipv4Addr::new(127, 0, 0, 1), 9)),
+                &example_query(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, DnsError::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn mux_fallback_destination_silent_config_server_responds() {
+        let upstream_count = Arc::new(AtomicUsize::new(0));
+        let upstream_task = Arc::clone(&upstream_count);
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let good_port = udp.local_addr().unwrap().port();
+        let expected_query = example_query();
+        let expected_response = example_response();
+        let query_task = expected_query.clone();
+        let response_task = expected_response.clone();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let (read, peer) = match udp.recv_from(&mut buf).await {
+                    Ok(value) => value,
+                    Err(_) => break,
+                };
+                upstream_task.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(&buf[..read], query_task.as_slice());
+                udp.send_to(&response_task, peer).await.unwrap();
+            }
+        });
+
+        let engine = DnsEngine::new(
+            DnsConfig {
+                servers: vec![config::parse_dns_server(&format!("127.0.0.1:{good_port}")).unwrap()],
+                query_strategy: QueryStrategy::UseIP,
+                disable_cache: false,
+                extra: Default::default(),
+            },
+            DnsEngineOptions {
+                mux_udp_dns_timeout: Duration::from_millis(150),
+                mux_dns_upstream_mode: MuxDnsUpstreamMode::DestinationThenConfigFallback,
+                ..DnsEngineOptions::for_test()
+            },
+        );
+
+        let started = Instant::now();
+        let response = engine
+            .resolve_mux_udp_dns(
+                1,
+                SocketAddr::from((Ipv4Addr::new(127, 0, 0, 1), 9)),
+                &expected_query,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.raw_response, expected_response);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(upstream_count.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test]
+    async fn mux_fallback_uses_destination_when_it_responds() {
+        let upstream_count = Arc::new(AtomicUsize::new(0));
+        let upstream_task = Arc::clone(&upstream_count);
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dest_port = udp.local_addr().unwrap().port();
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let silent_port = silent.local_addr().unwrap().port();
+        let _silent_hold = silent;
+        let expected_query = example_query();
+        let expected_response = example_response();
+        let query_task = expected_query.clone();
+        let response_task = expected_response.clone();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let (read, peer) = match udp.recv_from(&mut buf).await {
+                    Ok(value) => value,
+                    Err(_) => break,
+                };
+                upstream_task.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(&buf[..read], query_task.as_slice());
+                udp.send_to(&response_task, peer).await.unwrap();
+            }
+        });
+
+        let engine = DnsEngine::new(
+            DnsConfig {
+                servers: vec![
+                    config::parse_dns_server(&format!("127.0.0.1:{silent_port}")).unwrap(),
+                ],
+                query_strategy: QueryStrategy::UseIP,
+                disable_cache: false,
+                extra: Default::default(),
+            },
+            DnsEngineOptions {
+                mux_udp_dns_timeout: Duration::from_millis(200),
+                mux_dns_upstream_mode: MuxDnsUpstreamMode::DestinationThenConfigFallback,
+                ..DnsEngineOptions::for_test()
+            },
+        );
+
+        let response = engine
+            .resolve_mux_udp_dns(
+                1,
+                SocketAddr::from((Ipv4Addr::LOCALHOST, dest_port)),
+                &expected_query,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.raw_response, expected_response);
+        assert_eq!(upstream_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn mux_fallback_all_silent_times_out_near_mux_timeout_per_candidate() {
+        let started = Instant::now();
+        let engine = DnsEngine::new(
+            DnsConfig {
+                servers: vec![
+                    config::parse_dns_server("127.0.0.1:8").unwrap(),
+                    config::parse_dns_server("127.0.0.1:7").unwrap(),
+                ],
+                query_strategy: QueryStrategy::UseIP,
+                disable_cache: true,
+                extra: Default::default(),
+            },
+            DnsEngineOptions {
+                mux_udp_dns_timeout: Duration::from_millis(100),
+                mux_dns_upstream_mode: MuxDnsUpstreamMode::DestinationThenConfigFallback,
+                ..DnsEngineOptions::for_test()
+            },
+        );
+        let err = engine
+            .resolve_mux_udp_dns(
+                1,
+                SocketAddr::from((Ipv4Addr::new(127, 0, 0, 1), 9)),
+                &example_query(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, DnsError::Timeout);
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(250));
+        assert!(elapsed < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn mux_race_all_silent_times_out_near_single_mux_timeout() {
+        let started = Instant::now();
+        let engine = DnsEngine::new(
+            DnsConfig {
+                servers: vec![
+                    config::parse_dns_server("127.0.0.1:8").unwrap(),
+                    config::parse_dns_server("127.0.0.1:7").unwrap(),
+                ],
+                query_strategy: QueryStrategy::UseIP,
+                disable_cache: true,
+                extra: Default::default(),
+            },
+            DnsEngineOptions {
+                mux_udp_dns_timeout: Duration::from_millis(150),
+                mux_dns_upstream_mode: MuxDnsUpstreamMode::RaceDestinationAndConfig,
+                ..DnsEngineOptions::for_test()
+            },
+        );
+        let err = engine
+            .resolve_mux_udp_dns(
+                1,
+                SocketAddr::from((Ipv4Addr::new(127, 0, 0, 1), 9)),
+                &example_query(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, DnsError::Timeout);
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(120));
+        assert!(elapsed < Duration::from_millis(450));
+    }
+
+    #[tokio::test]
+    async fn builtin_dns_request_uses_default_timeout_policy() {
+        let started = Instant::now();
+        let engine = DnsEngine::new(
+            DnsConfig {
+                servers: vec![config::parse_dns_server("127.0.0.1:9").unwrap()],
+                query_strategy: QueryStrategy::UseIP,
+                disable_cache: true,
+                extra: Default::default(),
+            },
+            DnsEngineOptions {
+                default_timeout: Duration::from_millis(200),
+                mux_udp_dns_timeout: Duration::from_secs(5),
+                max_retries: 0,
+                mux_udp_dns_max_retries: 0,
+                ..DnsEngineOptions::for_test()
+            },
+        );
+        let err = engine
+            .query_raw(DnsQueryRequest {
+                raw_query: example_query(),
+                destination: None,
+                inbound_tag: None,
+                source: DnsQuerySource::BuiltinDns,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err, DnsError::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(started.elapsed() >= Duration::from_millis(150));
     }
 
     #[tokio::test]
