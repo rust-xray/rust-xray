@@ -1,6 +1,6 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tracing::info;
+use tracing::debug;
 
 use crate::protocol::structs::ClientHelloPayload;
 use crate::tls::records::build_handshake_record;
@@ -260,7 +260,7 @@ pub fn prepare_reality_tls13_state(
     let observed = extract_observed_server_hello(&dest_handshake)?;
     let state = RealityTls13ServerState::new(accepted, observed)?;
 
-    info!(
+    debug!(
         stage = stages::TLS13_STATE_CREATED,
         cipher_suite = state.suite.name,
         cipher_suite_id = format!("0x{:04x}", state.suite.id),

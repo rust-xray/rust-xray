@@ -8,6 +8,7 @@ pub mod codec;
 pub mod config;
 pub mod dns;
 pub mod error;
+pub mod logging;
 pub mod outbound;
 pub mod proxy;
 pub mod reality;

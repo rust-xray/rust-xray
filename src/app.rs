@@ -551,18 +551,6 @@ fn load_runtime_config(
     Ok(ServerRuntimeConfig { inbounds })
 }
 
-const DEFAULT_TRACE_FILTER: &str = "rust_xray=debug,tower=warn,hyper=warn,h2=warn,rustls=warn";
-
-fn init_tracing(command: &Command) {
-    let default_filter = match command {
-        Command::Version => "warn",
-        _ => DEFAULT_TRACE_FILTER,
-    };
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
-}
-
 fn stage_error(stage: &str, err: std::io::Error) -> std::io::Error {
     crate::startup_log::eprintln_stage(stage, &err);
     std::io::Error::new(err.kind(), format!("{stage}: {err}"))
@@ -593,7 +581,7 @@ pub async fn main_entry() -> std::io::Result<()> {
         crate::startup_log::log_server_bootstrap(&raw_args, opts);
     }
 
-    init_tracing(&command);
+    let _logging_guard = crate::logging::init_logging(&command)?;
     dispatch(command).await
 }
 
@@ -809,7 +797,7 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
             loop {
                 match listener.accept().await {
                     Ok((stream, peer)) => {
-                        info!(%peer, "REALITY TCP client accepted");
+                        debug!(%peer, "REALITY TCP client accepted");
                         let config = Arc::clone(&config);
                         tokio::spawn(async move {
                             if let Err(err) = handle_client(stream, config).await {

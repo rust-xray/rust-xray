@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::io::{Error, ErrorKind};
 
 use tokio::io::{AsyncRead, AsyncWriteExt};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::protocol::structs::ClientHelloPayload;
 use crate::reality::certificate::{
@@ -285,7 +285,7 @@ impl RealityTls13ServerState {
             auth_key: &self.accepted.auth.auth_key,
             mode: certificate_patch_mode,
         })?;
-        info!(
+        debug!(
             cert_der_len = cert_der.len(),
             cert_public_key_len = ephemeral_cert.public_key_raw.len(),
             "REALITY certificate signature patched"
@@ -454,7 +454,7 @@ where
     let server_hello_record = build_handshake_record(server_hello_message)
         .map_err(|err| stage_error(RealityAcceptedStage::ServerHello, err))?;
 
-    info!(
+    debug!(
         stage = stages::TLS13_SERVER_HELLO_GENERATED,
         sni = ?state.accepted.sni,
         cipher_suite = state.suite.name,
@@ -472,7 +472,7 @@ where
         .update_transcript_client_server_hello(client_hello_message)
         .map_err(|err| stage_error(RealityAcceptedStage::Transcript, err))?;
 
-    info!(
+    debug!(
         stage = stages::TLS13_TRANSCRIPT_CLIENT_SERVER_HELLO_UPDATED,
         cipher_suite = state.suite.name,
         transcript_hash_len = transcript_hash.len(),
@@ -483,7 +483,7 @@ where
         .derive_handshake_secrets(&transcript_hash)
         .map_err(|err| stage_error(RealityAcceptedStage::HandshakeSecrets, err))?;
 
-    info!(
+    debug!(
         stage = stages::TLS13_HANDSHAKE_SECRETS_DERIVED,
         cipher_suite = state.suite.name,
         "derived handshake traffic secrets"
@@ -500,7 +500,7 @@ where
         .build_encrypted_server_handshake_records(certificate_patch_mode)
         .map_err(|err| stage_error(RealityAcceptedStage::ServerHandshakeRecords, err))?;
 
-    info!(
+    debug!(
         stage = stages::TLS13_SERVER_ENCRYPTED_HANDSHAKE_BUILT,
         cipher_suite = state.suite.name,
         encrypted_handshake_records_len = encrypted_handshake_records.len(),
@@ -516,7 +516,7 @@ where
         .await
         .map_err(|err| stage_error(RealityAcceptedStage::ServerHandshakeRecords, err))?;
 
-    info!(
+    debug!(
         stage = stages::TLS13_SERVER_ENCRYPTED_HANDSHAKE_SENT,
         encrypted_handshake_records_len = encrypted_handshake_records.len(),
         "sent encrypted server handshake records"
@@ -552,7 +552,7 @@ where
     )
     .map_err(|err| stage_error(RealityAcceptedStage::ClientFinishedRead, err))?;
 
-    info!(
+    debug!(
         stage = stages::TLS13_CLIENT_FINISHED_READ,
         client_finished_message_len = client_finished_message.len(),
         "decrypted client Finished handshake message"
@@ -571,7 +571,7 @@ where
         ));
     }
 
-    info!(
+    debug!(
         stage = stages::TLS13_CLIENT_FINISHED_VERIFIED,
         cipher_suite = state.suite.name,
         "client Finished verified"
@@ -581,7 +581,7 @@ where
         .derive_application_secrets()
         .map_err(|err| stage_error(RealityAcceptedStage::ApplicationSecrets, err))?;
 
-    info!(
+    debug!(
         stage = stages::TLS13_APPLICATION_SECRETS_DERIVED,
         cipher_suite = state.suite.name,
         "derived application traffic secrets"
@@ -666,7 +666,7 @@ fn decrypt_client_finished_handshake_message(
 
     if tls13_inner_plaintext_content_type(&inner_plaintext) == Some(TLS_RECORD_ALERT) {
         let alert_bytes = tls13_inner_plaintext_body(&inner_plaintext).unwrap_or_default();
-        info!(
+        warn!(
             stage = stages::TLS13_CLIENT_FINISHED_READ,
             inner_content_type = TLS_RECORD_ALERT,
             alert_bytes_hex = hex_encode_diagnostics(&alert_bytes),
@@ -684,7 +684,7 @@ fn decrypt_client_finished_handshake_message(
         .map_err(|err| client_finished_decrypt_error(encrypted_record_len, sequence, err))?;
 
     if handshake_message.first() != Some(&HANDSHAKE_TYPE_FINISHED) {
-        info!(
+        warn!(
             stage = stages::TLS13_CLIENT_FINISHED_READ,
             inner_content_type = tls13_inner_plaintext_content_type(&inner_plaintext)
                 .unwrap_or(TLS_RECORD_HANDSHAKE),

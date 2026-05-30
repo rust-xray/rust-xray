@@ -22,7 +22,7 @@ use bytes::BytesMut;
 use tokio::io::{
     split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, trace, warn};
 
 use crate::reality::stages;
 use crate::tls::records::{
@@ -114,7 +114,7 @@ fn log_application_stream_encrypt_start(
     plaintext: &[u8],
 ) {
     if debug_tls_record_prefix_enabled() {
-        info!(
+        trace!(
             stage = stages::TLS13_APPLICATION_STREAM_ENCRYPT,
             direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
             encrypt_sequence,
@@ -125,7 +125,7 @@ fn log_application_stream_encrypt_start(
             "encrypt TLS application-stream record"
         );
     } else {
-        info!(
+        trace!(
             stage = stages::TLS13_APPLICATION_STREAM_ENCRYPT,
             direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
             encrypt_sequence,
@@ -141,7 +141,7 @@ fn log_application_stream_encrypt_complete(record: &[u8]) {
     let record_total_len = record.len();
 
     if debug_tls_record_prefix_enabled() {
-        info!(
+        trace!(
             stage = stages::TLS13_APPLICATION_STREAM_ENCRYPT,
             direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
             encrypted_record_payload_len,
@@ -151,7 +151,7 @@ fn log_application_stream_encrypt_complete(record: &[u8]) {
             "encrypted TLS application-stream record"
         );
     } else {
-        info!(
+        trace!(
             stage = stages::TLS13_APPLICATION_STREAM_ENCRYPT,
             direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
             encrypted_record_payload_len,
@@ -162,7 +162,7 @@ fn log_application_stream_encrypt_complete(record: &[u8]) {
 }
 
 fn log_application_stream_writer_flush() {
-    info!(
+    trace!(
         stage = stages::TLS13_APPLICATION_STREAM_FLUSH,
         direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
         "flush TLS application-stream writer"
@@ -173,7 +173,7 @@ fn log_application_stream_writer_shutdown(
     pending_ciphertext_len: usize,
     transport_shutdown_called: bool,
 ) {
-    info!(
+    trace!(
         stage = stages::TLS13_APPLICATION_STREAM_SHUTDOWN,
         direction = TLS13_APPLICATION_STREAM_WRITE_DIRECTION,
         pending_ciphertext_len,
@@ -211,7 +211,7 @@ fn log_application_stream_decrypt_attempt(
     if debug_tls_record_prefix_enabled() {
         let nonce_hex = tls13_record_nonce_hex(&decryptor.keys.iv, decryptor.sequence)
             .unwrap_or_else(|_| "invalid".to_string());
-        info!(
+        trace!(
             stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
             direction = TLS13_APPLICATION_STREAM_DIRECTION,
             decrypt_sequence_before = meta.decrypt_sequence,
@@ -226,7 +226,7 @@ fn log_application_stream_decrypt_attempt(
             "attempting client application-data TLS record decrypt"
         );
     } else {
-        info!(
+        trace!(
             stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
             direction = TLS13_APPLICATION_STREAM_DIRECTION,
             decrypt_sequence_before = meta.decrypt_sequence,
@@ -263,7 +263,7 @@ fn log_application_stream_inner_plaintext(
         }
     };
 
-    info!(
+    trace!(
         stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
         direction = TLS13_APPLICATION_STREAM_DIRECTION,
         decrypt_sequence,
@@ -315,7 +315,7 @@ impl ApplicationStreamRecordMeta {
 }
 
 fn log_application_stream_record(meta: &ApplicationStreamRecordMeta) {
-    info!(
+    trace!(
         stage = stages::TLS13_APPLICATION_STREAM_RECORD,
         direction = TLS13_APPLICATION_STREAM_DIRECTION,
         decrypt_sequence = meta.decrypt_sequence,
@@ -336,7 +336,7 @@ fn log_application_stream_record_decrypt_failure(
         return;
     }
 
-    info!(
+    trace!(
         stage = stages::TLS13_APPLICATION_STREAM_RECORD,
         direction = TLS13_APPLICATION_STREAM_DIRECTION,
         decrypt_sequence = meta.decrypt_sequence,
@@ -439,7 +439,7 @@ fn handle_application_stream_post_handshake(
                 Error::new(err.kind(), format!("TLS 1.3 KeyUpdate parse failed: {err}"))
             })?;
 
-            info!(
+            debug!(
                 stage = stages::TLS13_APPLICATION_STREAM_KEY_UPDATE,
                 direction = TLS13_APPLICATION_STREAM_DIRECTION,
                 decrypt_sequence,
@@ -480,7 +480,7 @@ fn parse_application_stream_tls_alert(
     let alert_level = alert_bytes[0];
     let alert_description = alert_bytes[1];
 
-    info!(
+    debug!(
         stage = stages::TLS13_APPLICATION_STREAM_ALERT,
         alert_level, alert_description, decrypt_sequence, "received TLS application-stream alert"
     );
@@ -615,7 +615,7 @@ where
                 );
             }
             TlsRecordContentType::ApplicationData => {
-                info!(
+                debug!(
                     stage = stages::TLS13_CLIENT_FINISHED_READ,
                     skipped_ccs_count = skipped_ccs,
                     encrypted_record_len = record.raw.len(),
@@ -624,7 +624,7 @@ where
                 return Ok(record);
             }
             TlsRecordContentType::Alert => {
-                info!(
+                warn!(
                     stage = stages::TLS13_CLIENT_FINISHED_READ,
                     skipped_ccs_count = skipped_ccs,
                     alert_record_len = record.raw.len(),
@@ -717,14 +717,14 @@ impl ApplicationStreamDirectRelay {
         if self.reader_direct.swap(true, Ordering::SeqCst) {
             return;
         }
-        info!("switching REALITY application stream to raw direct relay");
+        debug!("switching REALITY application stream to raw direct relay");
     }
 
     pub fn enable_writer(&self) {
         if self.writer_direct.swap(true, Ordering::SeqCst) {
             return;
         }
-        info!("switching REALITY application stream writer to raw direct relay");
+        debug!("switching REALITY application stream writer to raw direct relay");
     }
 }
 
@@ -832,7 +832,7 @@ impl Tls13ClientReadState {
             return Err(application_stream_record_error(err, &meta, cipher_suite));
         }
 
-        info!(
+        trace!(
             stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
             direction = TLS13_APPLICATION_STREAM_DIRECTION,
             tls_record_content_type = %meta.content_type_name,
@@ -871,7 +871,7 @@ impl Tls13ClientReadState {
         .map_err(|err| application_stream_decrypt_error(err, &meta, cipher_suite))?;
 
         if let ApplicationStreamRecord::Plaintext(plaintext) = &result {
-            info!(
+            trace!(
                 stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
                 direction = TLS13_APPLICATION_STREAM_DIRECTION,
                 decrypt_sequence = meta.decrypt_sequence,
@@ -883,7 +883,7 @@ impl Tls13ClientReadState {
             );
             if debug_vless_plaintext_enabled() {
                 let (preview_hex, preview_len) = vless_plaintext_debug_preview(plaintext);
-                info!(
+                trace!(
                     stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
                     debug_plaintext_enabled = true,
                     decrypt_sequence = meta.decrypt_sequence,

@@ -27,7 +27,7 @@ use crate::vless::vision::{
     VisionRelayStream, FLOW_XTLS_RPRX_VISION,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const MAX_VLESS_HEADER_SIZE: usize = 4096;
 
@@ -178,7 +178,7 @@ pub async fn prepare_vless_tcp_response<W: AsyncWrite + Unpin>(
     if crate::vless::relay_debug::debug_relay_prefix_enabled() {
         log_vless_response_header_prefix(&header, version, header_len);
     } else {
-        info!(
+        debug!(
             stage = stages::VLESS_RESPONSE_HEADER_SENT,
             version, header_len, "sent VLESS response header"
         );
@@ -264,7 +264,7 @@ where
         .as_ref()
         .is_some_and(ApplicationStreamDirectRelay::is_enabled)
     {
-        info!("vision direct relay completed");
+        debug!("vision direct relay completed");
     }
 
     relay_result
@@ -354,7 +354,7 @@ where
             state.unpad_uplink_chunk(&raw_initial_payload)?
         };
         vision = Some((traffic, user_uuid));
-        info!(
+        debug!(
             stage = stages::VLESS_AUTH_OK,
             user_id = %auth.id,
             request_flow = request_flow.as_deref(),
@@ -369,7 +369,7 @@ where
         &initial_payload,
     );
 
-    info!(
+    debug!(
         stage = stages::VLESS_AUTH_OK,
         user_id = %auth.id,
         email = auth.email.as_deref(),
@@ -411,7 +411,7 @@ where
         .await
         .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
 
-    info!(
+    debug!(
         stage = stages::VLESS_OUTBOUND_CONNECTED,
         %destination,
         "VLESS outbound TCP connected"
@@ -429,7 +429,7 @@ where
         if let Some(stats) = stats.as_ref() {
             stats.record_uplink(initial_payload.len() as u64);
         }
-        info!(
+        debug!(
             stage = stages::VLESS_INITIAL_PAYLOAD_FORWARDED,
             initial_payload_len = initial_payload.len(),
             "forwarded VLESS initial payload to outbound"

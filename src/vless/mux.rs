@@ -413,7 +413,7 @@ fn log_mux_frame_parsed(
         _ => None,
     };
     let address_type = metadata.get(7).copied();
-    debug!(
+    trace!(
         mux_id = id,
         metadata_len = metadata.len(),
         status = format_args!("0x{status:02x}"),
@@ -468,7 +468,7 @@ where
                     if read == 0 {
                         stream.write_all(&encode_mux_end(*id)).await?;
                         stream.flush().await?;
-                        info!(mux_id = *id, "mux substream relay completed");
+                        debug!(mux_id = *id, "mux substream relay completed");
                         active = None;
                     } else {
                         let frame = encode_mux_keep_data(*id, &buf[..read])?;
@@ -507,7 +507,7 @@ async fn handle_client_frame(
             data,
         } => {
             if destination.network == MuxNetwork::Udp {
-                info!(mux_id = id, "mux udp substream opened");
+                debug!(mux_id = id, "mux udp substream opened");
                 return handle_udp_mux_packet(id, destination.destination, data).await;
             }
             if active.is_some() {
@@ -531,7 +531,7 @@ async fn handle_client_frame(
             if !data.is_empty() {
                 outbound.write_all(&data).await?;
             }
-            info!(mux_id = id, destination = %destination_label, "mux substream opened");
+            debug!(mux_id = id, destination = %destination_label, "mux substream opened");
             *active = Some((id, outbound));
         }
         MuxFrame::Keep {
@@ -581,7 +581,7 @@ async fn handle_client_frame(
                 outbound.write_all(&data).await?;
             }
             let _ = outbound.shutdown().await;
-            info!(mux_id = id, "mux substream close");
+            debug!(mux_id = id, "mux substream close");
         }
         MuxFrame::KeepAlive { id } => {
             debug!(mux_id = id, "mux keepalive");
@@ -649,7 +649,7 @@ async fn relay_udp_dns_direct(
 
     let start = Instant::now();
     socket.send_to(query, target).await?;
-    info!(
+    debug!(
         mux_id = id,
         destination = %destination_label,
         payload_len = query.len(),
@@ -673,7 +673,7 @@ async fn relay_udp_dns_direct(
         };
     response.truncate(received);
     let latency_ms = start.elapsed().as_millis();
-    info!(
+    debug!(
         mux_id = id,
         destination = %destination_label,
         response_len = response.len(),

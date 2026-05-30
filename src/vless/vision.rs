@@ -230,7 +230,7 @@ pub fn xtls_padding(
         out.extend_from_slice(&pad);
     }
 
-    debug!(
+    trace!(
         command,
         content_len,
         padding_len,
@@ -347,7 +347,7 @@ pub fn xtls_unpadding(
             break;
         }
 
-        debug!(
+        trace!(
             command = direction.current_command,
             content_len = output.len(),
             "vision unpadding block read"
@@ -371,7 +371,7 @@ pub fn xtls_unpadding(
                 break;
             }
             cmd if cmd == i32::from(COMMAND_PADDING_DIRECT) => {
-                info!("vision direct command received");
+                debug!("vision direct command received");
                 direction.within_padding_buffers = false;
                 direction.direct_copy = true;
                 direction.remaining_command = -1;

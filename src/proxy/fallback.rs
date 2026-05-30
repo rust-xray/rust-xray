@@ -51,7 +51,7 @@ pub async fn relay_fallback_with_xver(
         "fallback relay started"
     );
 
-    info!(%dest_addr, xver, "fallback target connect started");
+    debug!(%dest_addr, xver, "fallback target connect started");
     let mut dest = timeout(FALLBACK_CONNECT_TIMEOUT, TcpStream::connect(dest_addr))
         .await
         .map_err(|_| {
@@ -63,7 +63,7 @@ pub async fn relay_fallback_with_xver(
                 ),
             )
         })??;
-    info!(%dest_addr, xver, "fallback target connected");
+    debug!(%dest_addr, xver, "fallback target connected");
 
     if xver == 1 || xver == 2 {
         let peer = client.peer_addr()?;

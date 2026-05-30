@@ -45,7 +45,7 @@ pub async fn handle_accepted_reality_client(
         "REALITY accepted path started"
     );
 
-    info!(stage = stages::DEST_CONNECT_START, %dest_addr, "connecting to dest");
+    debug!(stage = stages::DEST_CONNECT_START, %dest_addr, "connecting to dest");
     let mut dest = timeout(ACCEPTED_DEST_CONNECT_TIMEOUT, TcpStream::connect(dest_addr))
         .await
         .map_err(|_| {
@@ -62,7 +62,7 @@ pub async fn handle_accepted_reality_client(
         })?
         .map_err(|err| stage_error(RealityAcceptedStage::DestConnect, err))?;
 
-    info!(stage = stages::DEST_CONNECT_OK, %dest_addr, "dest TCP connected");
+    debug!(stage = stages::DEST_CONNECT_OK, %dest_addr, "dest TCP connected");
 
     debug!(
         stage = stages::DEST_SERVER_HELLO_OBSERVED,
@@ -75,7 +75,7 @@ pub async fn handle_accepted_reality_client(
         .map_err(|err| stage_error(RealityAcceptedStage::DestServerHello, err))?;
     let server_hello_original = dest_handshake.raw_server_bytes.clone();
 
-    info!(
+    debug!(
         stage = stages::DEST_SERVER_HELLO_OBSERVED,
         %dest_addr,
         dest_record_count = dest_handshake.records.len(),
@@ -101,7 +101,7 @@ pub async fn handle_accepted_reality_client(
     )
     .await?;
 
-    info!(
+    debug!(
         stage = stages::VLESS_START,
         %dest_addr,
         cipher_suite,

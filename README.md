@@ -240,6 +240,10 @@ RUST_LOG=info cargo run --bin rust-xray -- ./config.json
 RUST_LOG=rust_xray=debug cargo run --bin rust-xray -- ./config.json
 ```
 
+See **[docs/logging.md](docs/logging.md)** for performance-oriented log levels (`warn` / `info` / `trace`) and buffered logging env vars.
+
+For reproducible latency comparison with Go Xray-core, see **[docs/latency-measurement.md](docs/latency-measurement.md)** and `scripts/latency/measure-latency.sh`.
+
 ### Decision flow
 
 1. Load config, bind on `listen:port`.
@@ -261,7 +265,7 @@ RUST_LOG=rust_xray=debug cargo run --bin rust-xray -- ./config.json
 | `REALITY VLESS handler started` | VLESS read/auth starting |
 | `unknown vless client id` | VLESS auth failed |
 | `unsupported vless command` | VLESS `command=Udp` (non-Mux) not implemented |
-| `mux udp dns query forwarded` | Mux UDP DNS query relay started (Happ baseline, numeric `:53`) |
+| `mux udp dns query forwarded` | Mux UDP DNS query relay started (Happ baseline, numeric `:53`; **debug** level) |
 | `unsupported non-DNS UDP mux substream` | Generic UDP over Mux not implemented (non-`:53` ports) |
 | `REALITY accepted path failed` | Handshake/VLESS error (no fallback) |
 

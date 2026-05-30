@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use tracing::info;
+use tracing::{debug, trace};
 
 use crate::reality::stages;
 
@@ -27,7 +27,7 @@ pub fn log_vless_response_header_prefix(header: &[u8], version: u8, header_len: 
         return;
     }
 
-    info!(
+    trace!(
         stage = stages::VLESS_RESPONSE_HEADER_SENT,
         version,
         header_len,
@@ -43,7 +43,7 @@ pub fn log_outbound_stream_first_write(payload: &[u8]) {
         return;
     }
 
-    info!(
+    trace!(
         stage = stages::VLESS_OUTBOUND_STREAM_FIRST_WRITE,
         prefix_hex = relay_prefix_hex(payload),
         len = payload.len(),
@@ -58,7 +58,7 @@ pub fn log_outbound_to_client_first_write(payload: &[u8], written_len: usize) {
         return;
     }
 
-    info!(
+    trace!(
         stage = stages::VLESS_OUTBOUND_TO_CLIENT_FIRST_WRITE,
         prefix_hex = relay_prefix_hex(&payload[..written_len.min(payload.len())]),
         len = written_len,
@@ -75,14 +75,14 @@ pub fn log_vless_request_diagnostics(
     forward_initial_payload: &[u8],
 ) {
     if debug_relay_prefix_enabled() {
-        info!(
+        trace!(
             stage = stages::VLESS_RAW_PLAINTEXT,
             raw_plaintext_len = raw_initial_payload.len(),
             raw_plaintext_prefix_hex = relay_prefix_hex(raw_initial_payload),
             debug_relay_prefix_enabled = true,
             "VLESS raw decrypted initial plaintext before outbound forwarding prep"
         );
-        info!(
+        trace!(
             stage = stages::VLESS_REQUEST_PARSED,
             version,
             additional_info_len,
@@ -94,7 +94,7 @@ pub fn log_vless_request_diagnostics(
         return;
     }
 
-    info!(
+    debug!(
         stage = stages::VLESS_REQUEST_PARSED,
         version,
         additional_info_len,

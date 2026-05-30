@@ -2,7 +2,7 @@ use crate::vless::protocol::VlessDestination;
 use std::net::IpAddr;
 use tokio::io::{copy_bidirectional, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tracing::info;
+use tracing::debug;
 
 pub fn format_vless_destination(destination: &VlessDestination) -> String {
     match destination {
@@ -16,7 +16,7 @@ pub fn format_vless_destination(destination: &VlessDestination) -> String {
 
 pub async fn connect_tcp_destination(destination: &VlessDestination) -> std::io::Result<TcpStream> {
     let dest = format_vless_destination(destination);
-    info!(%dest, "freedom outbound connect started");
+    debug!(%dest, "freedom outbound connect started");
 
     let stream = match destination {
         VlessDestination::Ip(addr, port) => TcpStream::connect((*addr, *port)).await?,
@@ -25,7 +25,7 @@ pub async fn connect_tcp_destination(destination: &VlessDestination) -> std::io:
         }
     };
 
-    info!(%dest, "freedom outbound connected");
+    debug!(%dest, "freedom outbound connected");
     Ok(stream)
 }
 
@@ -55,7 +55,7 @@ where
         stats.record_relay(inbound_to_outbound, outbound_to_inbound);
     }
 
-    info!(
+    debug!(
         inbound_to_outbound,
         outbound_to_inbound, "freedom relay ended"
     );
