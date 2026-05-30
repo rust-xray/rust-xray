@@ -38,10 +38,24 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | Fallback `xver=2` PROXY v2 | Working | Live smoke + golden vector |
 | Network alias `raw` / legacy `tcp` | Working | Same REALITY TCP runtime |
 | StatsService API (basic) | Working | `QueryStats`, `GetStats`, `GetSysStats` when `api` block present |
-| ML-DSA-65 baseline | **Experimental** | Valid `mldsa65Seed` accepted; invalid seed rejected at startup; raw Vision smoke passes; no cargo feature gate (see [baseline doc](./reality-mldsa65-runtime-baseline.md)) |
 
 Accepted REALITY clients **do not** fall back on handshake/VLESS failure — the
 connection closes (by design).
+
+---
+
+## Experimental
+
+| Area | Status | Notes |
+|------|--------|-------|
+| VLESS `command=Mux` (Happ baseline) | **Experimental working** | REALITY → TLS 1.3 → VLESS auth → `command=Mux` → response header → mux session start; live smoke + Happ traces |
+| UDP DNS over VLESS Mux (port 53) | **Experimental working** | Numeric `:53` targets (e.g. `1.1.1.1:53`); query forwarded, response received, mux UDP response frame sent |
+| Happ Proxy Utility baseline | **Experimental working** | REALITY/VLESS/Vision/Mux path reaches mux session; UDP DNS inside Mux works for numeric `:53` (live smoke validated) |
+| ML-DSA-65 baseline | **Experimental** | Valid `mldsa65Seed` accepted; invalid seed rejected at startup; raw Vision smoke passes; no cargo feature gate (see [baseline doc](./reality-mldsa65-runtime-baseline.md)) |
+
+**VLESS Mux wording (accurate):** not full Xray-core Mux.Cool parity. The Happ
+baseline path (Vision + Mux + numeric UDP DNS on port 53) is smoke-validated.
+Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomplete.
 
 ---
 
@@ -49,16 +63,10 @@ connection closes (by design).
 
 | Area | Status | Notes |
 |------|--------|-------|
-| VLESS `command=Mux` | Partial | Command accepted; VLESS response header sent; mux relay + session start |
-| Mux.Cool frame parser | Partial | `New` / `Keep` / `End` / `KeepAlive`; TCP and UDP frame metadata |
+| Mux.Cool frame parser | Partial | `New` / `Keep` / `End` / `KeepAlive`; TCP and UDP frame metadata parsed |
 | Mux TCP substream | Partial | Single active TCP substream to freedom outbound (no parallel substreams) |
-| Mux UDP DNS (port 53) | Partial | Frames parsed; direct UDP relay attempted for **numeric** `:53` targets only; domain `:53` needs resolver (substream closed) |
+| Mux UDP DNS (domain `:53`) | Partial | Numeric `:53` relay works; domain `:53` needs resolver integration (substream closed) |
 | Remnawave / panel configs | Partial | Config load + API + REALITY inbound; routing/rules/balancers not executed |
-| Happ Proxy Utility | **Blocked on Mux UDP** | Reaches mux session; UDP DNS inside Mux not fully relayed (see below) |
-
-**VLESS Mux wording (accurate):** partial parser and session support exist. UDP
-DNS over Mux is parsed and logged; full Happ-compatible UDP mux relay is **not**
-complete.
 
 ---
 
@@ -66,29 +74,31 @@ complete.
 
 | Area | Status |
 |------|--------|
-| UDP over VLESS (non-Mux command) | Not implemented |
-| Full UDP mux relay (all destinations / parallel substreams) | Not implemented |
-| DNS UDP relay inside Mux (domain names, resolver integration) | Not implemented |
-| XUDP | Not implemented |
 | Full Mux.Cool runtime | Not implemented |
+| Generic UDP over VLESS Mux (non-DNS / non-`:53`) | Not implemented |
+| UDP over VLESS (non-Mux `command=Udp`) | Not implemented |
+| XUDP | Not implemented |
+| Full UDP mux relay (all destinations / parallel substreams) | Not implemented |
+| DNS UDP relay inside Mux (domain names without resolver) | Not implemented |
 | Full routing / rules / balancers | Not implemented |
 | Full outbound ecosystem | Not implemented |
 | REALITY over XHTTP / gRPC / WebSocket runtime | Not implemented (configs rejected at startup) |
 | DoH through outbound | Not implemented |
 | Full DNS module compatibility | Not implemented |
+| DNS-over-TCP through VLESS outbound / routing | Not implemented (separate future task) |
 | Vision splice / zero-copy beyond DIRECT MVP | Not implemented |
 | ML-KEM / hybrid KEM on REALITY handshake | Not implemented (separate from ML-DSA-65; see [design doc](./reality-mlkem-design.md)) |
 | Full Xray-core drop-in compatibility | Not implemented |
 
-**DNS clarification:** DNS-over-TCP through a future DNS/outbound module is a
-**separate** task. It does **not** by itself solve Happ's current path, which
-uses **UDP DNS inside VLESS Mux** (`network=udp`, destination `:53`).
+**DNS clarification:** DNS-over-TCP through a future DNS/outbound/routing module is a
+**separate** task. It does **not** replace the current Happ path, which uses
+**UDP DNS inside VLESS Mux** (`network=udp`, destination `:53`).
 
 ---
 
 ## Current Happ Status
 
-Happ Proxy Utility (live traces) typically reaches:
+Happ Proxy Utility (live traces + live smoke) typically reaches:
 
 ```text
 REALITY TCP accept
@@ -98,25 +108,31 @@ REALITY TCP accept
   → command=Mux
   → VLESS response header sent
   → mux relay started / mux session started
-  → Mux UDP frames parsed (e.g. network=udp, destination=1.1.1.1:53, status=0x01 New, status=0x02 packet)
+  → Mux UDP frames (network=udp, destination=1.1.1.1:53, status=0x01 New, status=0x02 packet)
+  → mux udp dns query forwarded
+  → mux udp dns response received
+  → mux udp response frame sent
 ```
 
-**Current blocker:** UDP mux substream is not fully relayed for Happ. rust-xray
-parses Mux UDP frames but closes or short-circuits the substream when full UDP
-DNS relay (especially domain `:53` via resolver) is unavailable. This is **not**
-fixed by DNS-over-TCP outbound alone.
+**Baseline status:** Happ-compatible REALITY/VLESS/Vision/Mux path with **numeric UDP
+DNS on port 53** is **experimental working** (live smoke: `PASS happ reality vision
+mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`).
 
-**Not the primary Happ blocker:** plain VLESS TCP, Vision DIRECT, or REALITY
-fallback matrix (those paths are smoke-validated separately).
+**Remaining gaps (not baseline blockers):**
+
+- Domain `:53` mux destinations (resolver hook)
+- Generic UDP over Mux (non-DNS ports)
+- Full Mux.Cool runtime (parallel substreams, full frame lifecycle)
+- XUDP
 
 ---
 
 ## Next Milestone
 
-1. **Minimal VLESS Mux UDP DNS relay for port 53** — numeric and domain targets,
-   single-substream Happ path, response frames back on the mux session.
-2. Resolver hook for `Domain:53` mux destinations (without claiming full DNS module).
-3. Keep REALITY/Vision/fallback/API smoke green (`aes_gcm_decrypt_failed=0`, ML-DSA-65 baseline).
+1. **Domain `:53` mux destinations** — resolver hook without claiming full DNS module.
+2. **Generic UDP over Mux** — beyond port-53 DNS baseline.
+3. **Full Mux.Cool runtime** — parallel substreams, complete frame lifecycle.
+4. Keep REALITY/Vision/fallback/API/Happ-baseline smoke green (`aes_gcm_decrypt_failed=0`, ML-DSA-65 baseline).
 
 ---
 
@@ -124,9 +140,11 @@ fallback matrix (those paths are smoke-validated separately).
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Live REALITY smoke | `make live-smoke` | Vision, fallback matrix, ciphers, ML-DSA-65, transport negatives |
+| Live REALITY smoke | `make live-smoke` | Vision, fallback matrix, ciphers, ML-DSA-65, Happ mux UDP DNS baseline, transport negatives |
 | Remna compat | `bash scripts/remna_compat/run-local-api-smoke.sh` | gRPC StatsService, panel fixture load |
 | Config audit tests | `cargo test` | Parse policy, fallback selection unit tests |
 
 Last full live smoke report on `experiment` (local): Vision sequential/parallel/download PASS,
-fallback default/SNI/path/ALPN/xver PASS, ML-DSA-65 checks 4/4, `aes_gcm_decrypt_failed=0`.
+fallback default/SNI/path/ALPN/xver PASS, ML-DSA-65 checks 4/4,
+Happ mux UDP DNS baseline PASS (`mux udp dns query forwarded`, `mux udp dns response received`,
+`mux udp response frame sent`), `aes_gcm_decrypt_failed=0`.

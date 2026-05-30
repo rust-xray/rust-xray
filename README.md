@@ -28,32 +28,40 @@ matrix. Short version:
 - VLESS fallback: default, SNI/name, HTTP path, ALPN (`http/1.1`, `h2`), PROXY v1/v2 (`xver=1|2`)
 - Network aliases: `raw` and legacy `tcp`
 - Basic Remnawave/Xray gRPC API: `StatsService` (`QueryStats`, `GetStats`, `GetSysStats`) when `api` block is present
-- **ML-DSA-65 baseline (experimental):** valid `mldsa65Seed` accepted, invalid seed rejected at startup, live smoke passes ([details](docs/reality-mldsa65-runtime-baseline.md))
 
 Accepted path **does not fallback** on failure — handshake/VLESS errors close the
 connection.
 
+### Experimental
+
+- **VLESS Mux (Happ baseline):** REALITY → TLS 1.3 → VLESS auth → `command=Mux` → mux session start (live smoke validated)
+- **UDP DNS over VLESS Mux (port 53):** numeric `:53` targets (e.g. `1.1.1.1:53`) — query forwarded, response received, mux UDP response frame sent
+- **Happ Proxy Utility baseline:** REALITY/VLESS/Vision/Mux path with numeric UDP DNS on port 53 works (experimental)
+- **ML-DSA-65 baseline (experimental):** valid `mldsa65Seed` accepted, invalid seed rejected at startup, live smoke passes ([details](docs/reality-mldsa65-runtime-baseline.md))
+
 ### Partial
 
-- **VLESS Mux:** partial parser and session support (`command=Mux` accepted, response header sent, mux relay/session starts, Mux.Cool frame parser for TCP/UDP metadata)
-- **Happ Proxy Utility:** reaches REALITY → TLS 1.3 → VLESS auth → Mux session; **blocked** because UDP DNS inside VLESS Mux is parsed but not fully relayed yet
+- Mux.Cool frame parser and single TCP substream (no parallel substreams)
+- Mux UDP DNS for **domain** `:53` targets (resolver hook not wired)
 - Remnawave-style configs: load + REALITY inbound + API; routing/rules/balancers not executed
 
 ### Not yet implemented
 
-- Full UDP mux relay, DNS UDP inside Mux (domain `:53` + resolver), XUDP, full Mux.Cool runtime
+- Full Mux.Cool runtime, generic UDP over Mux (non-`:53`), XUDP
 - VLESS `command=Udp` (non-Mux)
 - REALITY over XHTTP / gRPC / WebSocket transport runtime
 - **ML-KEM** hybrid KEM (separate from ML-DSA-65; not implemented)
 - Full routing, balancers, outbound ecosystem, DoH, Vision splice/zero-copy beyond DIRECT MVP
+- DNS-over-TCP through VLESS outbound/routing (separate future task)
 - Full Xray-core drop-in compatibility
 
-**DNS note:** DNS-over-TCP via a future DNS/outbound module does **not** solve
+**DNS note:** DNS-over-TCP via a future DNS/outbound module does **not** replace
 Happ's current **UDP DNS over VLESS Mux** path by itself.
 
 ### Next milestone
 
-Minimal **VLESS Mux UDP DNS relay for port 53** (Happ-compatible single-substream path).
+Domain `:53` mux destinations, generic UDP over Mux, full Mux.Cool runtime — see
+[compatibility-status.md](docs/compatibility-status.md).
 
 ## Live smoke (Xray-core client matrix)
 
@@ -74,6 +82,7 @@ Validated scenarios include:
 - Fallback matrix (default, SNI/name, HTTP path, ALPN, PROXY v1/v2)
 - Cipher suite smoke (AES128 / AES256 / ChaCha20)
 - ML-DSA-65 baseline (4/4 checks when enabled in fixture)
+- Happ baseline: REALITY/Vision/Mux + UDP DNS `1.1.1.1:53` (`PASS happ reality vision mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`)
 - Negative transport configs (`xhttp`, `grpc`, `ws` + REALITY rejected at startup)
 
 Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/README.md)**,
@@ -81,11 +90,12 @@ Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/REA
 
 ### Remaining gaps (see compatibility doc)
 
-- VLESS Mux partial only; UDP DNS over Mux not complete for Happ
-- UDP / XUDP non-Mux commands; full routing/outbounds
+- Full Mux.Cool runtime; generic UDP over Mux; domain `:53` mux resolver; XUDP
+- VLESS `command=Udp` (non-Mux); full routing/outbounds
 - REALITY over XHTTP / gRPC / WebSocket runtime
 - ML-KEM (ML-DSA-65 baseline is experimental — see docs)
 - Vision splice / zero-copy beyond DIRECT MVP
+- DNS-over-TCP through VLESS outbound/routing (separate future task)
 - Fallback rate limits (`limitFallbackUpload` / `limitFallbackDownload`)
 - TLS 1.3 CCM cipher suites (0x1304, 0x1305)
 
@@ -251,7 +261,8 @@ RUST_LOG=rust_xray=debug cargo run --bin rust-xray -- ./config.json
 | `REALITY VLESS handler started` | VLESS read/auth starting |
 | `unknown vless client id` | VLESS auth failed |
 | `unsupported vless command` | VLESS `command=Udp` (non-Mux) not implemented |
-| `mux udp dns` / `closing substream` | Mux UDP frame parsed; full UDP DNS relay not complete (Happ path) |
+| `mux udp dns query forwarded` | Mux UDP DNS query relay started (Happ baseline, numeric `:53`) |
+| `unsupported non-DNS UDP mux substream` | Generic UDP over Mux not implemented (non-`:53` ports) |
 | `REALITY accepted path failed` | Handshake/VLESS error (no fallback) |
 
 ## Структура проекта
@@ -278,7 +289,7 @@ docs/reality-accepted-path.md
 - **Not an Xray-core replacement** and **not production-ready** (experiment branch).
 - Accepted path errors do not fallback (see policy matrix above for pre-auth fallback cases).
 - Vision DIRECT MVP only — no full splice/zero-copy beyond padding + DIRECT relay.
-- VLESS Mux: partial parser/session; UDP DNS over Mux not complete for Happ.
+- VLESS Mux: experimental Happ baseline (Vision + Mux + numeric UDP DNS `:53`); full Mux.Cool / generic UDP / XUDP not implemented.
 - VLESS `command=Udp` / XUDP; REALITY over XHTTP/gRPC/WebSocket; full routing/outbounds not implemented.
 - ML-DSA-65 cert signing: experimental baseline when `mldsa65Seed` is set; **ML-KEM not implemented**.
 - TLS 1.3 CCM cipher suites (0x1304, 0x1305) rejected on accepted path.

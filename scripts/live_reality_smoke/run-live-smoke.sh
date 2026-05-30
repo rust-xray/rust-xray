@@ -143,6 +143,20 @@ client_config() {
   printf '%s\n' "${output}"
 }
 
+happ_mux_vision_client_config() {
+  local output="${SMOKE_WORK_DIR}/client-happ-mux-vision.json"
+  smoke_write_client_config \
+    "${CLIENT_TEMPLATE}" \
+    "${output}" \
+    "xtls-rprx-vision" \
+    "11111111-1111-1111-1111-111111111111" \
+    "0123456789abcdef" \
+    "www.microsoft.com" \
+    "" \
+    "1"
+  printf '%s\n' "${output}"
+}
+
 negative_client_config() {
   local suffix="$1"
   local flow="${2:-}"
@@ -181,6 +195,12 @@ run_negative_vless_phase() {
       -x "socks5h://127.0.0.1:${SMOKE_SOCKS_PORT}" \
       "${SMOKE_QUICK_URL}" >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
     python3 "${SCRIPT_DIR}/vless-negative-probe.py" "${probe_mode}" "${SMOKE_SOCKS_PORT}" \
+      >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+  elif [[ "${probe_mode}" == "mux-udp" ]]; then
+    curl -sS -o /dev/null -m 10 \
+      -x "socks5h://127.0.0.1:${SMOKE_SOCKS_PORT}" \
+      "${SMOKE_QUICK_URL}" >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+    python3 "${SCRIPT_DIR}/vless-negative-probe.py" mux-udp "${SMOKE_SOCKS_PORT}" "1.1.1.1" 54 \
       >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
   else
     python3 "${SCRIPT_DIR}/vless-negative-probe.py" "${probe_mode}" "${SMOKE_SOCKS_PORT}" \
@@ -231,23 +251,54 @@ phase_negative_udp_vision() {
     "udp-dns" \
     "${regression_client}" \
     "doesn't support UDP" \
-    "UDP unsupported" \
-    "Mux unsupported"
+    "UDP unsupported"
+}
+
+phase_negative_mux_non_dns_udp() {
+  local client regression_client
+  client="$(negative_client_config mux-non-dns "xtls-rprx-vision" 1 "")"
+  regression_client="$(client_config mux-non-dns-regression "xtls-rprx-vision")"
+  SMOKE_REGRESSION_SERVER_CONFIG="${SERVER_VISION}"
+  run_negative_vless_phase \
+    "negative-mux-non-dns-udp" \
+    "${SERVER_VISION}" \
+    "${client}" \
+    "mux-udp" \
+    "${regression_client}" \
+    "unsupported non-DNS UDP mux substream"
+}
+
+phase_happ_reality_vision_mux_udp_dns() {
+  local client saved_rust_log
+  client="$(happ_mux_vision_client_config)"
+  smoke_stop_stack
+  saved_rust_log="${SMOKE_RUST_LOG}"
+  SMOKE_RUST_LOG="rust_xray=debug,tower=warn,hyper=warn,h2=warn,rustls=warn"
+  smoke_start_stack "${SERVER_VISION}" "${client}"
+  curl -sS -o /dev/null -m 10 \
+    -x "socks5h://127.0.0.1:${SMOKE_SOCKS_PORT}" \
+    "${SMOKE_QUICK_URL}" >>"${SMOKE_WORK_DIR}/happ-mux-udp-dns.log" 2>&1 || true
+  if ! python3 "${SCRIPT_DIR}/mux-udp-dns-probe.py" "${SMOKE_SOCKS_PORT}" "1.1.1.1" 53 \
+    >>"${SMOKE_WORK_DIR}/happ-mux-udp-dns.log" 2>&1; then
+    SMOKE_RUST_LOG="${saved_rust_log}"
+    fail_phase "happ reality vision mux udp dns"
+    fail_phase "vless mux udp dns 1.1.1.1:53"
+    return 1
+  fi
+  sleep 0.5
+  if ! smoke_expect_happ_mux_udp_dns_baseline; then
+    SMOKE_RUST_LOG="${saved_rust_log}"
+    fail_phase "happ reality vision mux udp dns"
+    fail_phase "vless mux udp dns 1.1.1.1:53"
+    return 1
+  fi
+  SMOKE_RUST_LOG="${saved_rust_log}"
+  pass_phase "happ reality vision mux udp dns"
+  pass_phase "vless mux udp dns 1.1.1.1:53"
 }
 
 phase_negative_mux() {
-  local client regression_client
-  client="$(negative_client_config mux "" 1 "")"
-  regression_client="$(client_config mux-regression "")"
-  SMOKE_REGRESSION_SERVER_CONFIG="${SERVER_EMPTY}"
-  run_negative_vless_phase \
-    "negative-mux" \
-    "${SERVER_EMPTY}" \
-    "${client}" \
-    "mux-cool" \
-    "${regression_client}" \
-    "Mux unsupported" \
-    "unsupported vless command"
+  phase_negative_mux_non_dns_udp
 }
 
 phase_negative_xudp() {
@@ -268,7 +319,7 @@ run_negative_vless_phases() {
   run_phase "negative UDP DNS via SOCKS" phase_negative_udp_dns
   run_phase "negative UDP 443 / QUIC attempt" phase_negative_udp_quic
   run_phase "negative UDP + Vision flow" phase_negative_udp_vision
-  run_phase "negative Mux request" phase_negative_mux
+  run_phase "negative Mux non-DNS UDP" phase_negative_mux
   run_phase "negative XUDP request" phase_negative_xudp
 }
 
@@ -845,6 +896,23 @@ smoke_assert_report_contains() {
   fi
 }
 
+smoke_assert_report_metric_at_least() {
+  local key="$1"
+  local min="$2"
+  local line value
+
+  line="$(grep -E "^${key}:" "${SMOKE_REPORT_PATH}" || true)"
+  if [[ -z "${line}" ]]; then
+    echo "error: live smoke report missing metric: ${key}" >&2
+    return 1
+  fi
+  value="${line##*: }"
+  if [[ "${value}" -lt "${min}" ]]; then
+    echo "error: live smoke report metric ${key}=${value} expected >= ${min}" >&2
+    return 1
+  fi
+}
+
 smoke_validate_final_report() {
   smoke_assert_report_contains "curl_checks_failed: 0" &&
     smoke_assert_report_contains "aes_gcm_decrypt_failed: 0" &&
@@ -860,7 +928,15 @@ smoke_validate_final_report() {
     smoke_assert_report_contains "PASS fallback xver=2 PROXY v2" &&
     smoke_assert_report_contains "PASS cipher force AES128" &&
     smoke_assert_report_contains "PASS cipher force AES256" &&
-    smoke_assert_report_contains "PASS cipher force CHACHA20"
+    smoke_assert_report_contains "PASS cipher force CHACHA20" &&
+    smoke_assert_report_contains "PASS happ reality vision mux udp dns" &&
+    smoke_assert_report_contains "PASS vless mux udp dns 1.1.1.1:53" &&
+    smoke_assert_report_metric_at_least "mux_udp_dns_query_forwarded" 1 &&
+    smoke_assert_report_metric_at_least "mux_udp_dns_response_received" 1 &&
+    smoke_assert_report_metric_at_least "mux_udp_response_frame_sent" 1 &&
+    smoke_assert_report_metric_at_least "forbidden_udp_mux_substream_not_implemented" 0 &&
+    smoke_assert_report_contains "forbidden_udp_mux_substream_not_implemented: 0" &&
+    smoke_assert_report_contains "forbidden_udp_mux_packet_not_implemented: 0"
 }
 
 main() {
@@ -910,6 +986,8 @@ main() {
   run_fallback_phases
 
   run_cipher_phases
+
+  run_phase "happ reality vision mux udp dns baseline" phase_happ_reality_vision_mux_udp_dns
 
   run_negative_vless_phases
 

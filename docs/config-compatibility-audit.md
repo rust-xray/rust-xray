@@ -36,7 +36,7 @@ Upstream reference: [XTLS/Xray-core](https://github.com/XTLS/Xray-core) `main` �
 
 ### Out of scope (baseline already PASS — not re-audited here)
 
-Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, TLS cipher matrix, ML-DSA-65 seed runtime (experimental baseline), UDP/Mux/XUDP negatives, unsupported transport negatives — see [compatibility-status.md](./compatibility-status.md), live smoke, and `docs/reality-mldsa65-runtime-baseline.md`.
+Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, TLS cipher matrix, ML-DSA-65 seed runtime (experimental baseline), Happ mux UDP DNS baseline, UDP/Mux/XUDP negatives, unsupported transport negatives — see [compatibility-status.md](./compatibility-status.md), live smoke, and `docs/reality-mldsa65-runtime-baseline.md`.
 
 ---
 

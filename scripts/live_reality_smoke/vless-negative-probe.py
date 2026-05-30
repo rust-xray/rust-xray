@@ -117,26 +117,37 @@ def minimal_dns_query() -> bytes:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 5):
         print(
-            "usage: vless-negative-probe.py <mode> <socks_port>\n"
-            "modes: udp-dns udp-quic mux-cool",
+            "usage: vless-negative-probe.py <mode> <socks_port> [dest_host dest_port]\n"
+            "modes: udp-dns udp-quic mux-cool mux-udp",
             file=sys.stderr,
         )
         return 2
 
     mode = sys.argv[1]
     port = int(sys.argv[2])
+    dest_host = sys.argv[3] if len(sys.argv) >= 4 else None
+    dest_port = int(sys.argv[4]) if len(sys.argv) >= 5 else None
 
     if mode == "udp-dns":
-        socks5_udp_send("127.0.0.1", port, "8.8.8.8", 53, minimal_dns_query())
+        host = dest_host or "8.8.8.8"
+        dport = dest_port if dest_port is not None else 53
+        socks5_udp_send("127.0.0.1", port, host, dport, minimal_dns_query())
         return 0
     if mode == "udp-quic":
-        socks5_udp_send("127.0.0.1", port, "1.1.1.1", 443, b"\x00")
+        host = dest_host or "1.1.1.1"
+        dport = dest_port if dest_port is not None else 443
+        socks5_udp_send("127.0.0.1", port, host, dport, b"\x00")
         return 0
     if mode == "mux-cool":
         # Xray maps v1.mux.cool to VLESS command Mux (0x03).
         socks5_tcp_connect("127.0.0.1", port, "v1.mux.cool", 666, b"\x00")
+        return 0
+    if mode == "mux-udp":
+        host = dest_host or "1.1.1.1"
+        dport = dest_port if dest_port is not None else 54
+        socks5_udp_send("127.0.0.1", port, host, dport, b"\x00")
         return 0
 
     print(f"unknown mode: {mode}", file=sys.stderr)

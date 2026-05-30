@@ -36,6 +36,7 @@ The private key is intentionally public for deterministic CI/fixture testing.
 | `rust-xray-server.raw.fixture.json` | Vision server with `streamSettings.network: "raw"` |
 | `run-smoke.sh` | Helper: checks tools, writes client config, prints 3-terminal commands |
 | `run-live-smoke.sh` | Automated compatibility/stress suite + local report |
+| `mux-udp-dns-probe.py` | SOCKS5 UDP DNS probe for Happ mux baseline (`1.1.1.1:53`) |
 | `rust-xray-server.fallbacks.fixture.json` | REALITY server with VLESS `fallbacks[]` for smoke |
 | `fallback-tcp-servers.py` / `fallback-probe.py` | Local fallback target listeners and TLS trigger helper |
 | `smoke-lib.sh` | Shared helpers for `run-live-smoke.sh` |
@@ -57,9 +58,11 @@ The automated runner executes regression checks, Vision stress coverage (100 seq
 + 50 parallel requests, 100MB download), negative/flow-mismatch cases, network alias
 (`raw` vs legacy `tcp`), HTTP (`--http1.1` / `--http2`) and TLS (`--tls-max 1.2` /
 default 1.3) modes, VLESS `fallbacks[]` routing (default, SNI/name, HTTP path, ALPN,
-PROXY v1/v2), cipher forcing, ML-DSA-65 baseline checks, then writes a local report
+PROXY v1/v2), cipher forcing, ML-DSA-65 baseline checks, Happ mux UDP DNS baseline (REALITY/Vision/Mux + `1.1.1.1:53`, server log at
+`rust_xray=debug` for `mux udp response frame sent`), then writes a local report
 under `/tmp/rust-xray-live-smoke-*/report.txt` with accepted-path counters, Vision
-DIRECT command counts, AES-GCM decrypt failures, and curl status summary.
+DIRECT command counts, Happ mux baseline log grep counts, AES-GCM decrypt failures,
+and curl status summary.
 
 Pass/fail expectations vs upstream: [docs/compatibility-status.md](../../docs/compatibility-status.md).
 

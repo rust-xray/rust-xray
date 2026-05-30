@@ -159,6 +159,7 @@ smoke_write_client_config() {
   local short_id="${5:-0123456789abcdef}"
   local server_name="${6:-www.microsoft.com}"
   local mldsa65_verify="${7:-}"
+  local mux_enabled="${8:-0}"
 
   SMOKE_TEMPLATE="${template_path}" \
     SMOKE_OUTPUT="${output_path}" \
@@ -167,6 +168,7 @@ smoke_write_client_config() {
     SMOKE_SHORT_ID="${short_id}" \
     SMOKE_SERVER_NAME="${server_name}" \
     SMOKE_MLDSA65_VERIFY="${mldsa65_verify}" \
+    SMOKE_MUX_ENABLED="${mux_enabled}" \
     SMOKE_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
     python3 - <<'PY'
 import json
@@ -193,6 +195,11 @@ reality["serverName"] = os.environ["SMOKE_SERVER_NAME"]
 mldsa65_verify = os.environ.get("SMOKE_MLDSA65_VERIFY", "")
 if mldsa65_verify:
     reality["mldsa65Verify"] = mldsa65_verify
+
+if os.environ.get("SMOKE_MUX_ENABLED") == "1":
+    cfg["outbounds"][0]["mux"] = {"enabled": True, "concurrency": 8}
+elif "mux" in cfg["outbounds"][0]:
+    del cfg["outbounds"][0]["mux"]
 
 output.write_text(json.dumps(cfg, indent=2) + "\n")
 PY
@@ -249,6 +256,35 @@ PY
 smoke_decrypt_failure_count() {
   grep -Ec 'AES-(128|256)-GCM decrypt failed|ChaCha20-Poly1305 decrypt failed|TLS application-stream record decrypt failed' \
     "${SMOKE_SERVER_LOG}" || true
+}
+
+smoke_expect_happ_mux_udp_dns_baseline() {
+  local pattern
+  local required_patterns=(
+    "mux udp dns query forwarded"
+    "mux udp dns response received"
+    "mux udp response frame sent"
+  )
+  local forbidden_patterns=(
+    "UDP mux substream is not implemented"
+    "UDP mux packet is not implemented"
+  )
+
+  for pattern in "${required_patterns[@]}"; do
+    if ! smoke_log_contains "${pattern}"; then
+      echo "error: Happ mux UDP DNS baseline missing required log: ${pattern}" >&2
+      return 1
+    fi
+  done
+
+  for pattern in "${forbidden_patterns[@]}"; do
+    if smoke_log_contains "${pattern}"; then
+      echo "error: Happ mux UDP DNS baseline saw forbidden regression log: ${pattern}" >&2
+      return 1
+    fi
+  done
+
+  return 0
 }
 
 smoke_log_matches_any() {
@@ -468,6 +504,12 @@ smoke_write_report() {
     grep -Ec 'AES-(128|256)-GCM decrypt failed|ChaCha20-Poly1305 decrypt failed|TLS application-stream record decrypt failed' \
       "${SMOKE_SERVER_LOG}" || true
   )"
+  local mux_query mux_response mux_frame mux_forbidden_substream mux_forbidden_packet
+  mux_query="$(smoke_count_log 'mux udp dns query forwarded')"
+  mux_response="$(smoke_count_log 'mux udp dns response received')"
+  mux_frame="$(smoke_count_log 'mux udp response frame sent')"
+  mux_forbidden_substream="$(smoke_count_log 'UDP mux substream is not implemented')"
+  mux_forbidden_packet="$(smoke_count_log 'UDP mux packet is not implemented')"
 
   {
     echo "rust-xray live smoke report"
@@ -481,6 +523,13 @@ smoke_write_report() {
     echo "vless_tcp_relay_completed: ${relay_completed}"
     echo "vision_direct_command_received: ${vision_direct}"
     echo "aes_gcm_decrypt_failed: ${decrypt_failed}"
+    echo
+    echo "[happ mux baseline]"
+    echo "mux_udp_dns_query_forwarded: ${mux_query}"
+    echo "mux_udp_dns_response_received: ${mux_response}"
+    echo "mux_udp_response_frame_sent: ${mux_frame}"
+    echo "forbidden_udp_mux_substream_not_implemented: ${mux_forbidden_substream}"
+    echo "forbidden_udp_mux_packet_not_implemented: ${mux_forbidden_packet}"
     echo
     echo "[curl summary]"
     echo "curl_checks_passed: ${SMOKE_CURL_PASSED}"
