@@ -18,14 +18,14 @@ pub trait DnsTransport: Send + Sync {
 }
 
 pub struct DnsTransportStack {
-    pub(crate) udp: tokio::sync::Mutex<UdpDnsTransport>,
+    pub(crate) udp: UdpDnsTransport,
     tcp: TcpDnsTransport,
 }
 
 impl Default for DnsTransportStack {
     fn default() -> Self {
         Self {
-            udp: tokio::sync::Mutex::new(UdpDnsTransport::default()),
+            udp: UdpDnsTransport::default(),
             tcp: TcpDnsTransport,
         }
     }
@@ -39,10 +39,7 @@ impl DnsTransportStack {
         timeout: Duration,
     ) -> Result<Vec<u8>, DnsError> {
         match server.transport {
-            DnsServerTransport::Udp => {
-                let mut udp = self.udp.lock().await;
-                udp.query(query, server, timeout).await
-            }
+            DnsServerTransport::Udp => self.udp.query(query, server, timeout).await,
             DnsServerTransport::Tcp => self.tcp.query(query, server, timeout).await,
             DnsServerTransport::Doh | DnsServerTransport::DohLocal => {
                 Err(DnsError::UnsupportedTransport(format!(

@@ -712,13 +712,16 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
         has_api = xray.api.is_some(),
         "config loaded OK"
     );
-    DnsEngine::init_shared(xray.dns.as_ref());
+    let dns_engine = DnsEngine::init_shared(xray.dns.as_ref());
     OutboundConnectRuntime::init_shared(&xray);
     log_dns_outbounds(&xray.outbounds);
     info!(
-        dns_servers = xray.dns.as_ref().map(|dns| dns.servers.len()).unwrap_or(0),
+        dns_servers = dns_engine.dns_servers_count(),
+        disable_cache = dns_engine.disable_cache(),
+        query_strategy = ?dns_engine.query_strategy(),
+        has_top_level_dns = xray.dns.is_some(),
         domain_strategy = ?OutboundConnectRuntime::shared().domain_strategy,
-        "DNS engine initialized for mux, outbound resolve, and builtin queries"
+        "dns engine initialized"
     );
 
     if let Some(api) = xray.api.as_ref() {

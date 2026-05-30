@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
+use tokio::sync::{oneshot, Mutex, OnceCell};
 use tokio::time;
 use tracing::{debug, trace, warn};
 
@@ -11,15 +14,27 @@ use crate::dns::packet::dns_query_id;
 
 const MAX_UDP_DNS_PACKET: usize = 65_535;
 
-#[derive(Debug, Default)]
+type PendingKey = (SocketAddr, u16);
+
+#[derive(Clone, Default)]
 pub struct UdpDnsTransport {
-    v4: Option<UdpSocket>,
-    v6: Option<UdpSocket>,
+    inner: Arc<UdpDnsTransportInner>,
+}
+
+#[derive(Default)]
+struct UdpDnsTransportInner {
+    v4: OnceCell<Arc<UdpSocketDispatcher>>,
+    v6: OnceCell<Arc<UdpSocketDispatcher>>,
+}
+
+struct UdpSocketDispatcher {
+    socket: Arc<UdpSocket>,
+    pending: Mutex<HashMap<PendingKey, oneshot::Sender<Vec<u8>>>>,
 }
 
 impl UdpDnsTransport {
     pub async fn query(
-        &mut self,
+        &self,
         query: &[u8],
         server: &DnsServerConfig,
         timeout: Duration,
@@ -29,14 +44,29 @@ impl UdpDnsTransport {
     }
 
     pub async fn query_at(
-        &mut self,
+        &self,
         server: SocketAddr,
         query: &[u8],
         timeout: Duration,
     ) -> Result<Vec<u8>, DnsError> {
         let expected_id = dns_query_id(query).ok_or(DnsError::MalformedQuery)?;
-        let socket = self.socket_for(server).await?;
-        socket.send_to(query, server).await?;
+        let dispatcher = self.dispatcher_for(server).await?;
+        let key = (server, expected_id);
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = dispatcher.pending.lock().await;
+            if pending.contains_key(&key) {
+                return Err(DnsError::Upstream);
+            }
+            pending.insert(key, tx);
+        }
+
+        if let Err(err) = dispatcher.socket.send_to(query, server).await {
+            dispatcher.pending.lock().await.remove(&key);
+            return Err(err.into());
+        }
+
         debug!(
             %server,
             query_len = query.len(),
@@ -45,76 +75,105 @@ impl UdpDnsTransport {
         );
 
         let started = std::time::Instant::now();
-        let deadline = started + timeout;
-        let mut buf = vec![0u8; MAX_UDP_DNS_PACKET];
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                warn!(%server, dns_id = expected_id, "dns upstream timeout");
-                return Err(DnsError::Timeout);
-            }
-            let received = match time::timeout(remaining, socket.recv_from(&mut buf)).await {
-                Ok(Ok((len, peer))) => {
-                    if peer != server {
-                        trace!(%peer, %server, "dns upstream ignored packet from unexpected peer");
-                        continue;
-                    }
-                    len
-                }
-                Ok(Err(err)) => return Err(err.into()),
-                Err(_) => {
-                    warn!(%server, dns_id = expected_id, "dns upstream timeout");
-                    return Err(DnsError::Timeout);
-                }
-            };
-            let response = &buf[..received];
-            let response_id = dns_query_id(response).ok_or(DnsError::MalformedQuery)?;
-            if response_id != expected_id {
-                trace!(
-                    expected_id,
-                    response_id,
-                    response_len = received,
-                    "dns upstream ignored mismatched transaction id"
+        match time::timeout(timeout, rx).await {
+            Ok(Ok(response)) => {
+                debug!(
+                    %server,
+                    response_len = response.len(),
+                    latency_ms = started.elapsed().as_millis(),
+                    dns_id = expected_id,
+                    "dns upstream response received"
                 );
-                continue;
+                Ok(response)
             }
-            debug!(
-                %server,
-                response_len = received,
-                latency_ms = started.elapsed().as_millis(),
-                dns_id = response_id,
-                "dns upstream response received"
-            );
-            return Ok(response.to_vec());
+            Ok(Err(_)) => {
+                dispatcher.pending.lock().await.remove(&key);
+                Err(DnsError::Upstream)
+            }
+            Err(_) => {
+                dispatcher.pending.lock().await.remove(&key);
+                warn!(%server, dns_id = expected_id, "dns upstream timeout");
+                Err(DnsError::Timeout)
+            }
         }
     }
 
-    async fn socket_for(&mut self, server: SocketAddr) -> Result<&UdpSocket, DnsError> {
-        if server.is_ipv4() {
-            if self.v4.is_none() {
-                self.v4 = Some(
-                    UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
-                        .await
-                        .map_err(DnsError::from)?,
-                );
-                debug!(family = "ipv4", "dns udp transport socket bound");
-            } else {
-                trace!(family = "ipv4", "dns udp transport socket reused");
-            }
-            return Ok(self.v4.as_ref().expect("ipv4 dns udp socket"));
-        }
-
-        if self.v6.is_none() {
-            self.v6 = Some(
-                UdpSocket::bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)))
-                    .await
-                    .map_err(DnsError::from)?,
-            );
-            debug!(family = "ipv6", "dns udp transport socket bound");
+    async fn dispatcher_for(
+        &self,
+        server: SocketAddr,
+    ) -> Result<Arc<UdpSocketDispatcher>, DnsError> {
+        let cell = if server.is_ipv4() {
+            &self.inner.v4
         } else {
-            trace!(family = "ipv6", "dns udp transport socket reused");
+            &self.inner.v6
+        };
+        let bind_ip = if server.is_ipv4() {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        };
+        Ok(Arc::clone(
+            cell.get_or_try_init(|| Self::bind_dispatcher(bind_ip))
+                .await?,
+        ))
+    }
+
+    async fn bind_dispatcher(bind_ip: IpAddr) -> Result<Arc<UdpSocketDispatcher>, DnsError> {
+        let socket = Arc::new(
+            UdpSocket::bind(SocketAddr::new(bind_ip, 0))
+                .await
+                .map_err(DnsError::from)?,
+        );
+        let family = if bind_ip.is_ipv4() { "ipv4" } else { "ipv6" };
+        debug!(family, "dns udp transport socket bound");
+
+        let dispatcher = Arc::new(UdpSocketDispatcher {
+            socket: Arc::clone(&socket),
+            pending: Mutex::new(HashMap::new()),
+        });
+        let recv_dispatcher = Arc::clone(&dispatcher);
+        tokio::spawn(async move {
+            recv_loop(recv_dispatcher).await;
+        });
+        Ok(dispatcher)
+    }
+}
+
+async fn recv_loop(dispatcher: Arc<UdpSocketDispatcher>) {
+    let mut buf = vec![0u8; MAX_UDP_DNS_PACKET];
+    loop {
+        let (len, peer) = match dispatcher.socket.recv_from(&mut buf).await {
+            Ok(value) => value,
+            Err(err) => {
+                warn!(error = %err, "dns udp recv loop error");
+                continue;
+            }
+        };
+        if len < 2 {
+            trace!(%peer, packet_len = len, "dns udp ignored short packet");
+            continue;
         }
-        Ok(self.v6.as_ref().expect("ipv6 dns udp socket"))
+        let response_id = match dns_query_id(&buf[..len]) {
+            Some(id) => id,
+            None => {
+                trace!(%peer, packet_len = len, "dns udp ignored packet without dns id");
+                continue;
+            }
+        };
+        let key = (peer, response_id);
+        let sender = dispatcher.pending.lock().await.remove(&key);
+        let Some(sender) = sender else {
+            trace!(
+                %peer,
+                dns_id = response_id,
+                response_len = len,
+                "dns udp ignored unmatched response"
+            );
+            continue;
+        };
+        if sender.send(buf[..len].to_vec()).is_err() {
+            trace!(%peer, dns_id = response_id, "dns udp response delivered to closed waiter");
+        }
     }
 }
 
@@ -125,4 +184,221 @@ pub fn socket_addr_for_server(host: &str, port: u16) -> Result<SocketAddr, DnsEr
     Err(DnsError::UnsupportedTransport(format!(
         "dns server host must be numeric IP on this stage: {host}"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    fn query_with_id(id: u16) -> Vec<u8> {
+        let mut packet = vec![
+            (id >> 8) as u8,
+            (id & 0xff) as u8,
+            0x01,
+            0x00,
+            0x00,
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+        ];
+        packet.extend_from_slice(&[
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0, 0, 1, 0, 1,
+        ]);
+        packet
+    }
+
+    fn response_with_id(id: u16) -> Vec<u8> {
+        vec![
+            (id >> 8) as u8,
+            (id & 0xff) as u8,
+            0x81,
+            0x80,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+        ]
+    }
+
+    #[tokio::test]
+    async fn concurrent_queries_with_different_ids() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let query_a = query_with_id(0x1111);
+        let query_b = query_with_id(0x2222);
+        let response_a = response_with_id(0x1111);
+        let response_b = response_with_id(0x2222);
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            for _ in 0..2 {
+                let (read, peer) = server.recv_from(&mut buf).await.unwrap();
+                let id = dns_query_id(&buf[..read]).unwrap();
+                let response = response_with_id(id);
+                server.send_to(&response, peer).await.unwrap();
+            }
+        });
+
+        let transport = UdpDnsTransport::default();
+        let (first, second) = tokio::join!(
+            transport.query_at(server_addr, &query_a, Duration::from_secs(2)),
+            transport.query_at(server_addr, &query_b, Duration::from_secs(2)),
+        );
+        assert_eq!(first.unwrap(), response_a);
+        assert_eq!(second.unwrap(), response_b);
+    }
+
+    #[tokio::test]
+    async fn timeout_does_not_block_concurrent_query() {
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let silent_addr = silent.local_addr().unwrap();
+
+        let responsive = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let responsive_addr = responsive.local_addr().unwrap();
+        let query_ok = query_with_id(0x3333);
+        let response_ok = response_with_id(0x3333);
+        let query_task = query_ok.clone();
+        let response_task = response_ok.clone();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (read, peer) = responsive.recv_from(&mut buf).await.unwrap();
+            assert_eq!(&buf[..read], query_task.as_slice());
+            responsive.send_to(&response_task, peer).await.unwrap();
+        });
+
+        let transport = UdpDnsTransport::default();
+        let query_slow = query_with_id(0x4444);
+        let slow = transport.query_at(silent_addr, &query_slow, Duration::from_millis(100));
+        let fast = transport.query_at(responsive_addr, &query_ok, Duration::from_secs(2));
+        let (slow_result, fast_result) = tokio::join!(slow, fast);
+        assert_eq!(slow_result.unwrap_err(), DnsError::Timeout);
+        assert_eq!(fast_result.unwrap(), response_ok);
+    }
+
+    #[tokio::test]
+    async fn unexpected_peer_response_is_ignored_until_timeout() {
+        let expected = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let expected_addr = expected.local_addr().unwrap();
+        let wrong_peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let query = query_with_id(0x5555);
+
+        tokio::spawn(async move {
+            wrong_peer
+                .send_to(&response_with_id(0x5555), expected_addr)
+                .await
+                .unwrap();
+        });
+
+        let transport = UdpDnsTransport::default();
+        let err = transport
+            .query_at(expected_addr, &query, Duration::from_millis(150))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DnsError::Timeout);
+    }
+
+    #[tokio::test]
+    async fn mismatched_transaction_id_is_ignored_until_timeout() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let query = query_with_id(0x6666);
+
+        tokio::spawn(async move {
+            let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            client
+                .send_to(&response_with_id(0x9999), server_addr)
+                .await
+                .unwrap();
+        });
+
+        let transport = UdpDnsTransport::default();
+        let err = transport
+            .query_at(server_addr, &query, Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DnsError::Timeout);
+    }
+
+    #[tokio::test]
+    async fn pending_entry_removed_on_timeout() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let transport = UdpDnsTransport::default();
+        let query = query_with_id(0x7777);
+        let key = (server_addr, 0x7777);
+
+        let err = transport
+            .query_at(server_addr, &query, Duration::from_millis(80))
+            .await
+            .unwrap_err();
+        assert_eq!(err, DnsError::Timeout);
+
+        let dispatcher = transport.dispatcher_for(server_addr).await.unwrap();
+        assert!(!dispatcher.pending.lock().await.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn duplicate_pending_id_returns_upstream() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let transport = UdpDnsTransport::default();
+        let dispatcher = transport.dispatcher_for(server_addr).await.unwrap();
+        let key = (server_addr, 0x8888);
+        let (tx, _rx) = oneshot::channel();
+        dispatcher.pending.lock().await.insert(key, tx);
+
+        let err = transport
+            .query_at(
+                server_addr,
+                &query_with_id(0x8888),
+                Duration::from_millis(50),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, DnsError::Upstream);
+        dispatcher.pending.lock().await.remove(&key);
+    }
+
+    #[tokio::test]
+    async fn fake_server_handles_concurrent_upstream_queries() {
+        let upstream_count = Arc::new(AtomicUsize::new(0));
+        let upstream_task = Arc::clone(&upstream_count);
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let (read, peer) = match server.recv_from(&mut buf).await {
+                    Ok(value) => value,
+                    Err(_) => break,
+                };
+                upstream_task.fetch_add(1, Ordering::SeqCst);
+                let id = dns_query_id(&buf[..read]).unwrap();
+                server.send_to(&response_with_id(id), peer).await.unwrap();
+            }
+        });
+
+        let transport = UdpDnsTransport::default();
+        let query_a = query_with_id(0xaaaa);
+        let query_b = query_with_id(0xbbbb);
+        let (a, b) = tokio::join!(
+            transport.query_at(server_addr, &query_a, Duration::from_secs(2)),
+            transport.query_at(server_addr, &query_b, Duration::from_secs(2)),
+        );
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(upstream_count.load(Ordering::SeqCst), 2);
+    }
 }

@@ -31,6 +31,20 @@ pub fn dns_query_id(packet: &[u8]) -> Option<u16> {
     Some(u16::from_be_bytes([packet[0], packet[1]]))
 }
 
+/// Clone a cached DNS response and rewrite the 16-bit transaction ID to match `current_query`.
+pub fn rewrite_dns_response_id_for_query(
+    cached_response: &[u8],
+    current_query: &[u8],
+) -> Result<Vec<u8>, DnsError> {
+    if current_query.len() < 2 || cached_response.len() < 2 {
+        return Err(DnsError::MalformedQuery);
+    }
+    let mut response = cached_response.to_vec();
+    response[0] = current_query[0];
+    response[1] = current_query[1];
+    Ok(response)
+}
+
 pub fn parse_dns_question_key(
     packet: &[u8],
     server_id: impl Into<String>,
@@ -297,6 +311,22 @@ mod tests {
             0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 192, 168, 0, 1,
         ]);
         assert_eq!(parse_response_min_ttl(&packet), Some(60));
+    }
+
+    #[test]
+    fn rewrite_dns_response_id_for_query_rewrites_transaction_id() {
+        let current_query = [0xab, 0xcd, 0x01, 0x00];
+        let cached_response = [0x12, 0x34, 0x81, 0x80];
+        let rewritten =
+            rewrite_dns_response_id_for_query(&cached_response, &current_query).unwrap();
+        assert_eq!(&rewritten[..2], &[0xab, 0xcd]);
+        assert_eq!(&rewritten[2..], &cached_response[2..]);
+    }
+
+    #[test]
+    fn rewrite_dns_response_id_rejects_short_packets() {
+        assert!(rewrite_dns_response_id_for_query(&[0x12, 0x34], &[0xab]).is_err());
+        assert!(rewrite_dns_response_id_for_query(&[0x12], &[0xab, 0xcd]).is_err());
     }
 
     #[test]

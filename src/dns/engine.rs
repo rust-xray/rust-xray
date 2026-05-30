@@ -13,9 +13,9 @@ use crate::dns::config::{self};
 use crate::dns::config::{DnsConfig, QueryStrategy};
 use crate::dns::error::{DnsError, DnsQueryResponse};
 use crate::dns::packet::{
-    build_dns_query, extract_ipv4_addresses, extract_ipv6_addresses, inflight_key_from_packet,
-    is_negative_dns_response, parse_dns_question_key, parse_response_min_ttl, DnsInflightKey,
-    DnsQuestionKey,
+    build_dns_query, dns_query_id, extract_ipv4_addresses, extract_ipv6_addresses,
+    inflight_key_from_packet, is_negative_dns_response, parse_dns_question_key,
+    parse_response_min_ttl, rewrite_dns_response_id_for_query, DnsInflightKey, DnsQuestionKey,
 };
 use crate::dns::question::parse_dns_question_for_log;
 use crate::dns::transport::DnsTransportStack;
@@ -23,6 +23,8 @@ use crate::dns::udp_transport::socket_addr_for_server;
 
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30);
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(30);
+
+static SHARED_DNS_ENGINE: OnceLock<Arc<DnsEngine>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsQuerySource {
@@ -131,14 +133,32 @@ impl DnsEngine {
     }
 
     /// Initialize the process-wide engine from top-level `dns` config (first call wins).
-    pub fn init_shared(dns: Option<&DnsConfig>) {
-        static SHARED: OnceLock<Arc<DnsEngine>> = OnceLock::new();
-        let _ = SHARED.get_or_init(|| Arc::new(Self::from_xray_config(dns)));
+    pub fn init_shared(dns: Option<&DnsConfig>) -> Arc<DnsEngine> {
+        let owned = dns.cloned();
+        Arc::clone(SHARED_DNS_ENGINE.get_or_init(|| {
+            Arc::new(Self::from_xray_config(owned.as_ref()))
+        }))
     }
 
-    pub fn shared() -> Arc<Self> {
-        static SHARED: OnceLock<Arc<DnsEngine>> = OnceLock::new();
-        Arc::clone(SHARED.get_or_init(|| Arc::new(Self::with_mux_defaults())))
+    pub fn shared() -> Arc<DnsEngine> {
+        Arc::clone(SHARED_DNS_ENGINE.get_or_init(|| Arc::new(Self::with_mux_defaults())))
+    }
+
+    pub fn dns_servers_count(&self) -> usize {
+        self.config.servers.len()
+    }
+
+    pub fn disable_cache(&self) -> bool {
+        self.config.disable_cache
+    }
+
+    pub fn query_strategy(&self) -> QueryStrategy {
+        self.config.query_strategy
+    }
+
+    #[cfg(test)]
+    pub(crate) fn config_snapshot(&self) -> &DnsConfig {
+        &self.config
     }
 
     pub async fn query_raw(&self, request: DnsQueryRequest) -> Result<DnsQueryResponse, DnsError> {
@@ -160,14 +180,26 @@ impl DnsEngine {
         if self.options.cache_enabled && !self.config.disable_cache {
             if let Some((hit, server_id)) = self.cache_lookup(&request.raw_query, &request) {
                 self.record_cache_hit();
+                let cached_dns_id = dns_query_id(&hit.raw_response);
+                let query_dns_id = dns_query_id(&request.raw_query);
+                let rewritten = self.rewrite_cached_for_query(hit, &request.raw_query)?;
                 debug!(
-                    qname = %hit_key_qname(&inflight_key),
+                    qname = %inflight_key.qname,
                     qtype = inflight_key.qtype,
                     server_id = %server_id,
                     source = request.source.as_str(),
+                    cache_hit = true,
+                    cached_dns_id = ?cached_dns_id,
+                    query_dns_id = ?query_dns_id,
+                    rewritten_dns_id = ?dns_query_id(&rewritten.raw_response),
                     "dns cache hit"
                 );
-                return Ok(self.to_query_response(hit, response_server, true, started.elapsed()));
+                return Ok(self.to_query_response(
+                    rewritten,
+                    response_server,
+                    true,
+                    started.elapsed(),
+                ));
             }
             self.record_cache_miss();
         }
@@ -184,7 +216,7 @@ impl DnsEngine {
                 );
                 drop(guard);
                 return self
-                    .wait_inflight(existing, response_server, started)
+                    .wait_inflight(existing, &request.raw_query, response_server, started)
                     .await
                     .map(|cached| {
                         self.to_query_response(cached, response_server, false, started.elapsed())
@@ -323,18 +355,33 @@ impl DnsEngine {
     async fn wait_inflight(
         &self,
         entry: Arc<InflightQuery>,
+        current_query: &[u8],
         _server: SocketAddr,
         _started: Instant,
     ) -> Result<CachedDnsResponse, DnsError> {
         loop {
             if let Some(result) = entry.result.lock().await.clone() {
-                return result;
+                return result
+                    .and_then(|cached| self.rewrite_cached_for_query(cached, current_query));
             }
             entry.notify.notified().await;
             if let Some(result) = entry.result.lock().await.clone() {
-                return result;
+                return result
+                    .and_then(|cached| self.rewrite_cached_for_query(cached, current_query));
             }
         }
+    }
+
+    fn rewrite_cached_for_query(
+        &self,
+        cached: CachedDnsResponse,
+        current_query: &[u8],
+    ) -> Result<CachedDnsResponse, DnsError> {
+        Ok(CachedDnsResponse {
+            raw_response: rewrite_dns_response_id_for_query(&cached.raw_response, current_query)?,
+            expires_at: cached.expires_at,
+            original_ttl: cached.original_ttl,
+        })
     }
 
     async fn execute_upstream(
@@ -345,11 +392,11 @@ impl DnsEngine {
         if let Some(destination) = request.destination {
             let mut attempt = 0usize;
             loop {
-                let result = {
-                    let mut udp = self.transports.udp.lock().await;
-                    udp.query_at(destination, query, self.options.default_timeout)
-                        .await
-                };
+                let result = self
+                    .transports
+                    .udp
+                    .query_at(destination, query, self.options.default_timeout)
+                    .await;
                 match result {
                     Ok(response) => {
                         return Ok((response, format!("mux:{destination}")));
@@ -568,6 +615,20 @@ mod tests {
         ]
     }
 
+    fn query_with_id(id: u16) -> Vec<u8> {
+        let mut packet = example_query();
+        packet[0] = (id >> 8) as u8;
+        packet[1] = (id & 0xff) as u8;
+        packet
+    }
+
+    fn response_with_id(id: u16) -> Vec<u8> {
+        let mut packet = example_response();
+        packet[0] = (id >> 8) as u8;
+        packet[1] = (id & 0xff) as u8;
+        packet
+    }
+
     fn response_with_a(ip: [u8; 4]) -> Vec<u8> {
         let mut packet = example_query();
         packet[2] = 0x81;
@@ -622,6 +683,106 @@ mod tests {
             .unwrap();
         assert!(response.cached);
         assert_eq!(response.raw_response, example_response());
+    }
+
+    #[tokio::test]
+    async fn cache_hit_rewrites_transaction_id_for_current_query() {
+        let engine = DnsEngine::new(
+            DnsConfig {
+                servers: vec![config::parse_dns_server("127.0.0.1").unwrap()],
+                query_strategy: QueryStrategy::UseIP,
+                disable_cache: false,
+                extra: Default::default(),
+            },
+            DnsEngineOptions::default(),
+        );
+        let first_query = query_with_id(0x1234);
+        let second_query = query_with_id(0xabcd);
+        let key = parse_dns_question_key(&first_query, "127.0.0.1").unwrap();
+        assert_eq!(
+            key,
+            parse_dns_question_key(&second_query, "127.0.0.1").unwrap()
+        );
+
+        engine
+            .cache
+            .insert(key, response_with_id(0x1234), Duration::from_secs(60));
+
+        let response = engine
+            .query_raw(DnsQueryRequest {
+                raw_query: second_query,
+                destination: None,
+                inbound_tag: None,
+                source: DnsQuerySource::MuxUdp,
+            })
+            .await
+            .unwrap();
+
+        assert!(response.cached);
+        assert_eq!(dns_query_id(&response.raw_response), Some(0xabcd));
+        assert_ne!(response.raw_response[0], 0x12);
+        assert_ne!(response.raw_response[1], 0x34);
+    }
+
+    #[tokio::test]
+    async fn first_query_populates_cache_second_query_rewrites_id() {
+        let upstream_count = Arc::new(AtomicUsize::new(0));
+        let upstream_task = Arc::clone(&upstream_count);
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = udp.local_addr().unwrap().port();
+        let first_query = query_with_id(0x1234);
+        let second_query = query_with_id(0xabcd);
+        let first_response = response_with_id(0x1234);
+        let query_task = first_query.clone();
+        let response_task = first_response.clone();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (read, peer) = udp.recv_from(&mut buf).await.unwrap();
+            upstream_task.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(&buf[..read], query_task.as_slice());
+            udp.send_to(&response_task, peer).await.unwrap();
+        });
+
+        let engine = DnsEngine::new(
+            DnsConfig {
+                servers: vec![config::parse_dns_server(&format!("127.0.0.1:{port}")).unwrap()],
+                query_strategy: QueryStrategy::UseIP,
+                disable_cache: false,
+                extra: Default::default(),
+            },
+            DnsEngineOptions {
+                default_timeout: Duration::from_secs(2),
+                max_retries: 0,
+                ..DnsEngineOptions::default()
+            },
+        );
+
+        let first = engine
+            .query_raw(DnsQueryRequest {
+                raw_query: first_query,
+                destination: None,
+                inbound_tag: None,
+                source: DnsQuerySource::MuxUdp,
+            })
+            .await
+            .unwrap();
+        assert!(!first.cached);
+        assert_eq!(dns_query_id(&first.raw_response), Some(0x1234));
+        assert_eq!(upstream_count.load(Ordering::SeqCst), 1);
+
+        let second = engine
+            .query_raw(DnsQueryRequest {
+                raw_query: second_query,
+                destination: None,
+                inbound_tag: None,
+                source: DnsQuerySource::MuxUdp,
+            })
+            .await
+            .unwrap();
+        assert!(second.cached);
+        assert_eq!(dns_query_id(&second.raw_response), Some(0xabcd));
+        assert_eq!(upstream_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -994,5 +1155,69 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, DnsError::MalformedQuery);
+    }
+
+    fn custom_dns_config() -> DnsConfig {
+        DnsConfig {
+            servers: vec![
+                config::parse_dns_server("8.8.8.8").unwrap(),
+                config::parse_dns_server("1.0.0.1").unwrap(),
+            ],
+            query_strategy: QueryStrategy::UseIPv4,
+            disable_cache: true,
+            extra: Default::default(),
+        }
+    }
+
+    fn alternate_dns_config() -> DnsConfig {
+        DnsConfig {
+            servers: vec![config::parse_dns_server("9.9.9.9").unwrap()],
+            query_strategy: QueryStrategy::UseIPv6,
+            disable_cache: false,
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn init_shared_and_shared_use_same_singleton() {
+        let custom = custom_dns_config();
+        let alternate = alternate_dns_config();
+
+        let initialized = DnsEngine::init_shared(Some(&custom));
+        let from_shared = DnsEngine::shared();
+        assert!(Arc::ptr_eq(&initialized, &from_shared));
+
+        let second_init = DnsEngine::init_shared(Some(&alternate));
+        assert!(Arc::ptr_eq(&initialized, &second_init));
+        assert_eq!(
+            initialized.dns_servers_count(),
+            from_shared.dns_servers_count()
+        );
+
+        if initialized.dns_servers_count() == custom.servers.len() {
+            assert!(initialized.disable_cache());
+            assert_eq!(initialized.query_strategy(), QueryStrategy::UseIPv4);
+            assert_eq!(initialized.config_snapshot().servers[0].host, "8.8.8.8");
+        }
+    }
+
+    #[test]
+    fn mux_path_uses_process_shared_dns_engine() {
+        let custom = custom_dns_config();
+        let initialized = DnsEngine::init_shared(Some(&custom));
+        let mux_engine = DnsEngine::shared();
+        assert!(Arc::ptr_eq(&initialized, &mux_engine));
+    }
+
+    #[test]
+    fn from_xray_config_applies_top_level_dns_block() {
+        let json = r#"{"dns":{"servers":["tcp://1.1.1.1:53"],"queryStrategy":"UseIPv4","disableCache":true}}"#;
+        let xray: crate::config::XrayConfig = serde_json::from_str(json).expect("parse config");
+        let dns = xray.dns.expect("dns block");
+        let engine = DnsEngine::from_xray_config(Some(&dns));
+        assert_eq!(engine.dns_servers_count(), 1);
+        assert_eq!(engine.config_snapshot().servers[0].host, "1.1.1.1");
+        assert_eq!(engine.query_strategy(), QueryStrategy::UseIPv4);
+        assert!(engine.disable_cache());
     }
 }
