@@ -424,7 +424,7 @@ async fn handle_tls_client(
                 ch,
                 accepted,
                 &config.reality.dest_addr,
-                &config.user_manager,
+                Arc::clone(&config.user_manager),
                 config.reality.mldsa65_seed.as_ref(),
                 config.stats.as_deref(),
                 &config.reality.transport,

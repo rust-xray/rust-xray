@@ -38,8 +38,9 @@ Run from the repository root:
 | absent/default | PASS |
 | `auto` | PASS |
 | `stream-one` | PASS |
-| `packet-up` | PASS or UNSUPPORTED (must not hang) |
-| `stream-up` | PASS or UNSUPPORTED (must not hang) |
+| `packet-up` | PASS or UNSUPPORTED (must not hang); includes `downloadSettings` |
+| `stream-up` | PASS or UNSUPPORTED (must not hang); includes `downloadSettings` |
+| `auto-download` | PASS or UNSUPPORTED (`auto` + `downloadSettings`; must not hang) |
 | `packet-down` | UNSUPPORTED or FAIL (must not hang) |
 
 At least `default`, `auto`, and `stream-one` must PASS for acceptance.
@@ -74,6 +75,7 @@ mode_auto: PASS/FAIL
 mode_stream_one: PASS/FAIL
 mode_packet_up: PASS/UNSUPPORTED/FAIL
 mode_stream_up: PASS/UNSUPPORTED/FAIL
+mode_auto_download: PASS/UNSUPPORTED/FAIL
 mode_packet_down: UNSUPPORTED/FAIL
 curl_checks_passed:
 curl_checks_failed:
@@ -105,11 +107,12 @@ Failure classifications include:
 
 Unsupported XHTTP modes should fail fast during rust-xray runtime instead of hanging the smoke run.
 
-### `packet-up` diagnostics mode
+### `packet-up` / download-side diagnostics
 
-The smoke always runs `packet-up` and captures server-side request-shape logs for implementation planning (no payload bytes logged). Report fields:
+The smoke runs recon modes (`packet-up`, `stream-up`, `auto-download`, `packet-down`) with `downloadSettings` where applicable. Server logs **`xhttp download reconnaissance`** (metadata only; no payload bytes). Report fields under **`[xhttp download reconnaissance]`**:
 
-- `packet_up_observed_request_shapes` — lines containing `xhttp packet-up request shape`
-- summary section `[packet-up diagnostics]`
+- `download_request_observed`, `download_method`, `download_path`
+- `download_query_keys`, `download_header_names`, `session_id_source`
+- `http_version`, `requires_h2`
 
-Use these logs with `docs/xhttp-compat-notes.md` when preparing the next packet-up implementation PR.
+Use with `docs/xhttp-compat-notes.md` when implementing the download-side PR.

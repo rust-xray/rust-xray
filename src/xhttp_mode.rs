@@ -28,6 +28,10 @@ pub enum TransportSecurity {
 pub enum XHttpError {
     UnknownMode(String),
     UnsupportedMode(XHttpMode),
+    MissingSessionId,
+    InvalidSessionId(String),
+    MalformedPacketRequest(String),
+    UnsupportedSessionSource { source: String, detail: String },
 }
 
 impl fmt::Display for XHttpError {
@@ -40,6 +44,14 @@ impl fmt::Display for XHttpError {
                     "XHTTP mode {} is not supported in this MVP",
                     xhttp_mode_label(*mode)
                 )
+            }
+            Self::MissingSessionId => write!(f, "xhttp session id is missing"),
+            Self::InvalidSessionId(detail) => write!(f, "invalid xhttp session id: {detail}"),
+            Self::MalformedPacketRequest(detail) => {
+                write!(f, "malformed xhttp packet request: {detail}")
+            }
+            Self::UnsupportedSessionSource { source, detail } => {
+                write!(f, "unsupported xhttp session source {source}: {detail}")
             }
         }
     }
@@ -86,6 +98,18 @@ pub fn resolve_xhttp_mode(
     }
 }
 
+/// Official Xray `packet-up` clients use a separate download GET (`/xhttp/{session}`).
+/// Upload-side plumbing exists in-tree, but end-to-end downstream is gated here until
+/// the download-side PR lands.
+pub fn packet_up_download_side_ready() -> bool {
+    false
+}
+
+/// Gated switch for end-to-end download-side interop (GET response streaming).
+pub fn xhttp_download_side_ready() -> bool {
+    packet_up_download_side_ready()
+}
+
 pub fn effective_xhttp_mode_is_supported(mode: EffectiveXHttpMode) -> bool {
     matches!(mode, EffectiveXHttpMode::StreamOne)
 }
@@ -93,8 +117,9 @@ pub fn effective_xhttp_mode_is_supported(mode: EffectiveXHttpMode) -> bool {
 pub fn effective_xhttp_mode_unsupported_reason(mode: EffectiveXHttpMode) -> Option<&'static str> {
     match mode {
         EffectiveXHttpMode::StreamOne => None,
+        EffectiveXHttpMode::PacketUp if packet_up_download_side_ready() => None,
+        EffectiveXHttpMode::PacketUp => Some("packet_up_download_side_not_implemented"),
         EffectiveXHttpMode::StreamUp => Some("stream_up_not_implemented"),
-        EffectiveXHttpMode::PacketUp => Some("packet_up_not_implemented"),
         EffectiveXHttpMode::PacketDown => Some("packet_down_not_implemented"),
     }
 }
@@ -200,18 +225,19 @@ mod tests {
     }
 
     #[test]
-    fn packet_up_resolves_but_is_not_supported_at_runtime() {
+    fn packet_up_parses_but_is_partially_unsupported_until_download_side() {
         assert_eq!(
             resolve_xhttp_mode(Some(XHttpMode::PacketUp), false, TransportSecurity::Reality)
                 .unwrap(),
             EffectiveXHttpMode::PacketUp
         );
+        assert!(!packet_up_download_side_ready());
         assert!(!effective_xhttp_mode_is_supported(
             EffectiveXHttpMode::PacketUp
         ));
         assert_eq!(
             effective_xhttp_mode_unsupported_reason(EffectiveXHttpMode::PacketUp),
-            Some("packet_up_not_implemented")
+            Some("packet_up_download_side_not_implemented")
         );
     }
 

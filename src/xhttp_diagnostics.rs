@@ -3,7 +3,11 @@ use std::collections::BTreeSet;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::warn;
 
-use crate::xhttp_match::{query_keys, request_path_component};
+use crate::xhttp_match::{
+    method_matches_packet_up_download, method_matches_packet_up_upload, method_matches_stream_one,
+    parse_packet_up_path, query_keys, request_path_component,
+};
+use crate::xhttp_mode::{effective_xhttp_mode_label, EffectiveXHttpMode};
 
 pub const MAX_PACKET_UP_BODY_SAMPLE: usize = 64 * 1024;
 
@@ -24,6 +28,214 @@ pub struct XHttpRequestShape {
     pub body_chunk_sizes: Vec<usize>,
     pub session_id_location: Option<String>,
     pub seq_id_location: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XHttpRequestLeg {
+    Upload,
+    Download,
+    Duplex,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XHttpBodyDirection {
+    ClientToServer,
+    ServerToClient,
+    Both,
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XHttpDownloadRecon {
+    pub method: String,
+    pub path: String,
+    pub query_keys: Vec<String>,
+    pub header_names: Vec<String>,
+    pub session_id_source: Option<String>,
+    pub upload_download_relation: String,
+    pub version: String,
+    pub body_direction: String,
+    pub requires_h2: String,
+    pub effective_mode: String,
+    pub content_length: Option<u64>,
+    pub body_chunk_sizes: Vec<usize>,
+}
+
+pub fn classify_request_leg(
+    method: &str,
+    request_target: &str,
+    configured_path: &str,
+    effective_mode: EffectiveXHttpMode,
+    session_id_location: Option<&str>,
+) -> XHttpRequestLeg {
+    if method_matches_stream_one(method) && matches!(effective_mode, EffectiveXHttpMode::StreamOne)
+    {
+        return XHttpRequestLeg::Duplex;
+    }
+
+    if method_matches_packet_up_upload(method) {
+        return XHttpRequestLeg::Upload;
+    }
+
+    if method_matches_packet_up_download(method) {
+        if parse_packet_up_path(configured_path, request_target)
+            .is_some_and(|parsed| parsed.seq.is_none())
+        {
+            return XHttpRequestLeg::Download;
+        }
+        if session_id_location.is_some() {
+            return XHttpRequestLeg::Download;
+        }
+    }
+
+    match effective_mode {
+        EffectiveXHttpMode::PacketDown | EffectiveXHttpMode::StreamUp => {
+            if method_matches_packet_up_download(method) {
+                return XHttpRequestLeg::Download;
+            }
+            if method_matches_packet_up_upload(method) {
+                return XHttpRequestLeg::Upload;
+            }
+        }
+        EffectiveXHttpMode::PacketUp => {
+            if method_matches_packet_up_download(method) {
+                return XHttpRequestLeg::Download;
+            }
+        }
+        _ => {}
+    }
+
+    XHttpRequestLeg::Unknown
+}
+
+pub fn body_direction_for_leg(
+    leg: XHttpRequestLeg,
+    shape: &XHttpRequestShape,
+) -> XHttpBodyDirection {
+    match leg {
+        XHttpRequestLeg::Download => XHttpBodyDirection::ServerToClient,
+        XHttpRequestLeg::Upload => {
+            if shape.body_chunk_sizes.is_empty() && shape.content_length.unwrap_or(0) == 0 {
+                XHttpBodyDirection::None
+            } else {
+                XHttpBodyDirection::ClientToServer
+            }
+        }
+        XHttpRequestLeg::Duplex => XHttpBodyDirection::Both,
+        XHttpRequestLeg::Unknown => XHttpBodyDirection::None,
+    }
+}
+
+pub fn upload_download_relation_label(
+    leg: XHttpRequestLeg,
+    effective_mode: EffectiveXHttpMode,
+) -> &'static str {
+    match (effective_mode, leg) {
+        (EffectiveXHttpMode::PacketUp, XHttpRequestLeg::Download) => "packet-up:download_get",
+        (EffectiveXHttpMode::PacketUp, XHttpRequestLeg::Upload) => "packet-up:upload_post",
+        (EffectiveXHttpMode::StreamUp, XHttpRequestLeg::Download) => "stream-up:download_get",
+        (EffectiveXHttpMode::StreamUp, XHttpRequestLeg::Upload) => "stream-up:upload_post",
+        (EffectiveXHttpMode::PacketDown, XHttpRequestLeg::Download) => "packet-down:download_get",
+        (EffectiveXHttpMode::PacketDown, XHttpRequestLeg::Upload) => "packet-down:upload_post",
+        (EffectiveXHttpMode::StreamOne, XHttpRequestLeg::Duplex) => "stream-one:duplex_post",
+        (_, XHttpRequestLeg::Download) => "download_get",
+        (_, XHttpRequestLeg::Upload) => "upload_post",
+        (_, XHttpRequestLeg::Duplex) => "duplex_post",
+        _ => "unknown",
+    }
+}
+
+pub fn requires_h2_label(version: &str) -> &'static str {
+    if version.eq_ignore_ascii_case("HTTP/2") {
+        "yes"
+    } else if version.eq_ignore_ascii_case("HTTP/1.1") || version.starts_with("HTTP/1") {
+        "no"
+    } else {
+        "unknown"
+    }
+}
+
+fn body_direction_label(direction: XHttpBodyDirection) -> &'static str {
+    match direction {
+        XHttpBodyDirection::ClientToServer => "client_to_server",
+        XHttpBodyDirection::ServerToClient => "server_to_client",
+        XHttpBodyDirection::Both => "both",
+        XHttpBodyDirection::None => "none",
+    }
+}
+
+pub fn build_download_recon(
+    shape: &XHttpRequestShape,
+    leg: XHttpRequestLeg,
+    effective_mode: EffectiveXHttpMode,
+) -> Option<XHttpDownloadRecon> {
+    if leg != XHttpRequestLeg::Download {
+        return None;
+    }
+    let body_direction = body_direction_for_leg(leg, shape);
+    Some(XHttpDownloadRecon {
+        method: shape.method.clone(),
+        path: shape.path.clone(),
+        query_keys: shape.query_keys.clone(),
+        header_names: shape.header_names.clone(),
+        session_id_source: shape.session_id_location.clone(),
+        upload_download_relation: upload_download_relation_label(leg, effective_mode).to_string(),
+        version: shape.version.clone(),
+        body_direction: body_direction_label(body_direction).to_string(),
+        requires_h2: requires_h2_label(&shape.version).to_string(),
+        effective_mode: effective_xhttp_mode_label(effective_mode).to_string(),
+        content_length: shape.content_length,
+        body_chunk_sizes: shape.body_chunk_sizes.clone(),
+    })
+}
+
+pub fn log_xhttp_download_reconnaissance(
+    inbound_tag: &str,
+    conn_id: u64,
+    request_index: u32,
+    recon: &XHttpDownloadRecon,
+) {
+    warn!(
+        inbound_tag,
+        conn_id,
+        request_index,
+        method = %recon.method,
+        path = %recon.path,
+        query_keys = ?recon.query_keys,
+        header_names = ?recon.header_names,
+        session_id_source = recon.session_id_source.as_deref().unwrap_or("none"),
+        upload_download_relation = %recon.upload_download_relation,
+        version = %recon.version,
+        body_direction = %recon.body_direction,
+        requires_h2 = %recon.requires_h2,
+        effective_mode = %recon.effective_mode,
+        content_length = ?recon.content_length,
+        body_chunk_sizes = ?recon.body_chunk_sizes,
+        download_request_observed = "yes",
+        "xhttp download reconnaissance"
+    );
+}
+
+pub fn observe_download_reconnaissance(
+    inbound_tag: &str,
+    conn_id: u64,
+    request_index: u32,
+    shape: &XHttpRequestShape,
+    request_target: &str,
+    configured_path: &str,
+    effective_mode: EffectiveXHttpMode,
+) -> Option<XHttpDownloadRecon> {
+    let leg = classify_request_leg(
+        &shape.method,
+        request_target,
+        configured_path,
+        effective_mode,
+        shape.session_id_location.as_deref(),
+    );
+    let recon = build_download_recon(shape, leg, effective_mode)?;
+    log_xhttp_download_reconnaissance(inbound_tag, conn_id, request_index, &recon);
+    Some(recon)
 }
 
 pub fn header_names_from_map(headers: &[(String, String)]) -> Vec<String> {
@@ -370,17 +582,53 @@ mod tests {
     }
 
     #[test]
-    fn seq_id_header_location_is_detected() {
+    fn download_get_is_classified_with_session_path_suffix() {
         let shape = build_request_shape(
             "/xhttp",
-            "POST",
-            "/xhttp",
-            vec!["host".to_string(), "x-seq".to_string()],
+            "GET",
+            "/xhttp/0897e374-2f32-4d61-aee9-b9c8523aa358",
+            vec!["host".to_string()],
             "HTTP/2",
             None,
             None,
             vec![],
         );
-        assert_eq!(shape.seq_id_location, Some("header:x-seq".to_string()));
+        let leg = classify_request_leg(
+            "GET",
+            "/xhttp/0897e374-2f32-4d61-aee9-b9c8523aa358",
+            "/xhttp",
+            EffectiveXHttpMode::PacketUp,
+            shape.session_id_location.as_deref(),
+        );
+        assert_eq!(leg, XHttpRequestLeg::Download);
+        let recon = build_download_recon(&shape, leg, EffectiveXHttpMode::PacketUp).unwrap();
+        assert_eq!(recon.method, "GET");
+        assert_eq!(recon.path, "/xhttp/{session}");
+        assert_eq!(recon.body_direction, "server_to_client");
+        assert_eq!(recon.requires_h2, "yes");
+        assert_eq!(recon.upload_download_relation, "packet-up:download_get");
+    }
+
+    #[test]
+    fn upload_post_is_not_download_recon_candidate() {
+        let shape = build_request_shape(
+            "/xhttp",
+            "POST",
+            "/xhttp/0897e374-2f32-4d61-aee9-b9c8523aa358/0",
+            vec!["host".to_string()],
+            "HTTP/2",
+            Some(128),
+            None,
+            vec![64, 64],
+        );
+        let leg = classify_request_leg(
+            "POST",
+            "/xhttp/0897e374-2f32-4d61-aee9-b9c8523aa358/0",
+            "/xhttp",
+            EffectiveXHttpMode::PacketUp,
+            shape.session_id_location.as_deref(),
+        );
+        assert_eq!(leg, XHttpRequestLeg::Upload);
+        assert!(build_download_recon(&shape, leg, EffectiveXHttpMode::PacketUp).is_none());
     }
 }

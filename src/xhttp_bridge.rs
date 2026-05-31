@@ -14,7 +14,9 @@ use tokio::time::timeout;
 use tracing::{debug, trace, warn};
 
 use crate::stats::StatsState;
-use crate::vless::{handle_vless_tcp_inbound_with_response_hook, VlessUserManager};
+use crate::vless::{
+    handle_vless_tcp_inbound, handle_vless_tcp_inbound_with_response_hook, VlessUserManager,
+};
 
 pub const XHTTP_BRIDGE_CHANNEL_CAPACITY: usize = 16;
 pub const XHTTP_BRIDGE_READ_CHUNK: usize = 16 * 1024;
@@ -216,6 +218,139 @@ pub async fn run_h2_stream_one_bridge(
         result,
     )
     .await
+}
+
+struct PacketUpDownloadWriter {
+    on_chunk: Box<dyn FnMut(Bytes) + Send>,
+    pending: Option<Bytes>,
+}
+
+impl AsyncWrite for PacketUpDownloadWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.pending.is_none() {
+            if buf.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
+            self.pending = Some(Bytes::copy_from_slice(buf));
+        }
+
+        let pending = self.pending.take().expect("pending chunk must exist");
+        (self.on_chunk)(pending.clone());
+        let len = pending.len();
+        self.pending = None;
+        cx.waker().wake_by_ref();
+        Poll::Ready(Ok(len))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+struct PacketUpBridgeStream<R> {
+    reader: R,
+    writer: PacketUpDownloadWriter,
+}
+
+impl<R> AsyncRead for PacketUpBridgeStream<R>
+where
+    R: AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.reader).poll_read(cx, buf)
+    }
+}
+
+impl<R> AsyncWrite for PacketUpBridgeStream<R>
+where
+    R: Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.writer).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.writer).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.writer).poll_shutdown(cx)
+    }
+}
+
+pub async fn run_packet_up_bridge<R, F>(
+    upload: R,
+    on_download: F,
+    inbound_tag: &str,
+    conn_id: u64,
+    session_id: &str,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    F: FnMut(Bytes) + Send + 'static,
+{
+    debug!(
+        inbound_tag,
+        conn_id, session_id, "xhttp packet-up bridge started"
+    );
+
+    let started = Instant::now();
+    let bridge = PacketUpBridgeStream {
+        reader: upload,
+        writer: PacketUpDownloadWriter {
+            on_chunk: Box::new(on_download),
+            pending: None,
+        },
+    };
+
+    let result = handle_vless_tcp_inbound(bridge, users, stats_state).await;
+
+    match result {
+        Ok(()) => {
+            debug!(
+                inbound_tag,
+                conn_id,
+                session_id,
+                duration_ms = started.elapsed().as_millis(),
+                "xhttp packet-up bridge completed"
+            );
+            Ok(())
+        }
+        Err(err) => {
+            let reason = bridge_failure_reason(&err);
+            debug!(
+                inbound_tag,
+                conn_id,
+                session_id,
+                reason,
+                duration_ms = started.elapsed().as_millis(),
+                "xhttp packet-up bridge failed"
+            );
+            warn!(
+                inbound_tag,
+                conn_id, session_id, reason, "xhttp packet-up bridge failed"
+            );
+            Err(err)
+        }
+    }
 }
 
 async fn finish_bridge_common(
@@ -453,7 +588,10 @@ async fn pump_h2_response_body(
     }
 }
 
-async fn h2_send_chunk(send: &mut h2::SendStream<Bytes>, chunk: Bytes) -> io::Result<()> {
+pub(crate) async fn h2_send_chunk(
+    send: &mut h2::SendStream<Bytes>,
+    chunk: Bytes,
+) -> io::Result<()> {
     let mut offset = 0usize;
     while offset < chunk.len() {
         send.reserve_capacity(chunk.len() - offset);

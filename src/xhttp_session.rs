@@ -118,7 +118,34 @@ impl XHttpSessionManager {
         {
             return Err(XHttpSessionError::InvalidSessionIdCharset);
         }
+        if id.contains("..") || id.contains('%') {
+            return Err(XHttpSessionError::InvalidSessionIdCharset);
+        }
         Ok(())
+    }
+
+    pub fn validate_session_id_as_xhttp_error(
+        id: &str,
+    ) -> Result<(), crate::xhttp_mode::XHttpError> {
+        Self::validate_session_id(id).map_err(|err| match err {
+            XHttpSessionError::EmptySessionId => {
+                crate::xhttp_mode::XHttpError::InvalidSessionId("empty".to_string())
+            }
+            XHttpSessionError::SessionIdTooLong => crate::xhttp_mode::XHttpError::InvalidSessionId(
+                format!("exceeds max length of {MAX_SESSION_ID_LEN}"),
+            ),
+            XHttpSessionError::InvalidSessionIdCharset => {
+                crate::xhttp_mode::XHttpError::InvalidSessionId(
+                    "unsupported characters or path traversal".to_string(),
+                )
+            }
+            XHttpSessionError::MaxSessionsReached => {
+                crate::xhttp_mode::XHttpError::InvalidSessionId("session limit reached".to_string())
+            }
+            XHttpSessionError::SessionNotFound => {
+                crate::xhttp_mode::XHttpError::InvalidSessionId("session not found".to_string())
+            }
+        })
     }
 
     pub fn ensure_session(
@@ -293,6 +320,10 @@ mod tests {
         );
         assert_eq!(
             XHttpSessionManager::validate_session_id("bad/id"),
+            Err(XHttpSessionError::InvalidSessionIdCharset)
+        );
+        assert_eq!(
+            XHttpSessionManager::validate_session_id(".."),
             Err(XHttpSessionError::InvalidSessionIdCharset)
         );
         assert_eq!(

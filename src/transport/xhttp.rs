@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
 use http::{Request, Response, StatusCode};
@@ -15,21 +16,29 @@ use crate::stats::StatsState;
 use crate::tls::PrefixedStream;
 use crate::transport::{
     configured_xhttp_mode, configured_xhttp_mode_label, effective_xhttp_mode_label,
-    effective_xhttp_mode_unsupported_reason, query_keys, request_path_component,
-    resolve_xhttp_mode, transport_security_label, xhttp_match_reject_reason_label,
-    EffectiveXHttpMode, TransportSecurity, XHttpError, XHttpMatchRejectReason, XHttpMatchSettings,
+    effective_xhttp_mode_unsupported_reason, method_matches_packet_up_download,
+    method_matches_packet_up_upload, query_keys, request_path_component, resolve_xhttp_mode,
+    transport_security_label, xhttp_match_reject_reason_label, EffectiveXHttpMode,
+    TransportSecurity, XHttpError, XHttpMatchRejectReason, XHttpMatchSettings,
     XHttpRequestDescriptor,
 };
 use crate::vless::VlessUserManager;
-use crate::xhttp_bridge::{run_h2_stream_one_bridge, run_http1_stream_one_bridge};
+use crate::xhttp_bridge::{h2_send_chunk, run_h2_stream_one_bridge, run_http1_stream_one_bridge};
 use crate::xhttp_diagnostics::{
     build_request_shape, h2_content_length, h2_header_names, h2_request_target,
-    header_names_from_lower_map, log_packet_up_request_shape, sample_h2_body_chunk_sizes,
-    sample_http1_body_chunk_sizes,
+    header_names_from_lower_map, log_packet_up_request_shape, observe_download_reconnaissance,
+    sample_h2_body_chunk_sizes, sample_http1_body_chunk_sizes,
 };
+use crate::xhttp_extract::{
+    extract_xhttp_packet_seq, extract_xhttp_packet_seq_for_settings, extract_xhttp_session_id,
+    packet_up_body_hint,
+};
+use crate::xhttp_mode::xhttp_download_side_ready;
+use crate::xhttp_packet_up::{shared_packet_up_manager, spawn_packet_up_bridge};
 
 const MAX_HTTP_HEADER_SIZE: usize = 16 * 1024;
 const HTTP2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+const PACKET_UP_DOWNLOAD_RECV_TIMEOUT: Duration = Duration::from_secs(30);
 static NEXT_XHTTP_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
 fn xhttp_has_download_settings(settings: &XHttpSettings) -> bool {
@@ -554,6 +563,10 @@ fn log_xhttp_mode_unsupported(
     effective_mode: EffectiveXHttpMode,
     reason: &str,
 ) {
+    if effective_mode == EffectiveXHttpMode::PacketUp {
+        log_packet_up_download_side_unsupported(inbound_tag, conn_id, reason);
+        return;
+    }
     warn!(
         inbound_tag,
         conn_id,
@@ -561,6 +574,174 @@ fn log_xhttp_mode_unsupported(
         reason,
         "xhttp mode unsupported"
     );
+}
+
+fn log_packet_up_download_side_unsupported(inbound_tag: &str, conn_id: u64, reason: &str) {
+    warn!(
+        inbound_tag,
+        conn_id,
+        mode = effective_xhttp_mode_label(EffectiveXHttpMode::PacketUp),
+        reason,
+        "xhttp packet-up requires download side; not implemented"
+    );
+}
+
+fn log_xhttp_download_side_unsupported(inbound_tag: &str, conn_id: u64) {
+    warn!(
+        inbound_tag,
+        conn_id,
+        reason = "download_side_not_implemented",
+        "xhttp download side not implemented"
+    );
+}
+
+fn is_download_side_request(
+    method: &str,
+    request_target: &str,
+    settings: &XHttpSettings,
+    effective_mode: EffectiveXHttpMode,
+) -> bool {
+    if xhttp_download_side_ready() {
+        return false;
+    }
+    let header_names: Vec<String> = Vec::new();
+    let pre_shape = build_request_shape(
+        settings.effective_path(),
+        method,
+        request_target,
+        header_names,
+        "HTTP/2",
+        None,
+        None,
+        Vec::new(),
+    );
+    let leg = crate::xhttp_diagnostics::classify_request_leg(
+        method,
+        request_target,
+        settings.effective_path(),
+        effective_mode,
+        pre_shape.session_id_location.as_deref(),
+    );
+    leg == crate::xhttp_diagnostics::XHttpRequestLeg::Download
+}
+
+async fn reject_download_side_h2(
+    request: Request<h2::RecvStream>,
+    respond: h2::server::SendResponse<Bytes>,
+    settings: &XHttpSettings,
+    inbound_tag: &str,
+    conn_id: u64,
+    request_index: u32,
+    effective_mode: EffectiveXHttpMode,
+) -> io::Result<()> {
+    let method = request.method().as_str().to_string();
+    let request_target = h2_request_target(&request);
+    let header_names = h2_header_names(&request);
+    let content_length = h2_content_length(&request);
+    let mut body = request.into_body();
+    let body_chunk_sizes = sample_h2_body_chunk_sizes(&mut body).await;
+    let shape = build_request_shape(
+        settings.effective_path(),
+        &method,
+        &request_target,
+        header_names,
+        "HTTP/2",
+        content_length,
+        None,
+        body_chunk_sizes,
+    );
+    observe_download_reconnaissance(
+        inbound_tag,
+        conn_id,
+        request_index,
+        &shape,
+        &request_target,
+        settings.effective_path(),
+        effective_mode,
+    );
+    log_xhttp_download_side_unsupported(inbound_tag, conn_id);
+    send_h2_empty_response(respond, StatusCode::NOT_IMPLEMENTED).await
+}
+
+async fn reject_download_side_http1<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    settings: &XHttpSettings,
+    head: &XHttpRequestHead,
+    prebuffer: &[u8],
+    inbound_tag: &str,
+    conn_id: u64,
+    effective_mode: EffectiveXHttpMode,
+) -> io::Result<()> {
+    let content_length = request_content_length(head).ok().flatten();
+    let transfer_encoding = head.header("transfer-encoding").map(str::to_string);
+    let body_chunk_sizes = sample_http1_body_chunk_sizes(
+        stream,
+        prebuffer.to_vec(),
+        content_length,
+        transfer_encoding.as_deref(),
+    )
+    .await;
+    let shape = build_request_shape(
+        settings.effective_path(),
+        &head.method,
+        &head.request_target,
+        header_names_from_lower_map(&head.headers),
+        &head.version,
+        content_length,
+        transfer_encoding,
+        body_chunk_sizes,
+    );
+    observe_download_reconnaissance(
+        inbound_tag,
+        conn_id,
+        0,
+        &shape,
+        &head.request_target,
+        settings.effective_path(),
+        effective_mode,
+    );
+    log_xhttp_download_side_unsupported(inbound_tag, conn_id);
+    write_status(stream, "501 Not Implemented").await
+}
+
+async fn reject_unsupported_xhttp_h2_with_request(
+    request: Request<h2::RecvStream>,
+    respond: h2::server::SendResponse<Bytes>,
+    settings: &XHttpSettings,
+    inbound_tag: &str,
+    conn_id: u64,
+    effective_mode: EffectiveXHttpMode,
+    reason: &str,
+) -> io::Result<()> {
+    let method = request.method().as_str().to_string();
+    let request_target = h2_request_target(&request);
+    let header_names = h2_header_names(&request);
+    let content_length = h2_content_length(&request);
+    let mut body = request.into_body();
+    let body_chunk_sizes = sample_h2_body_chunk_sizes(&mut body).await;
+    let shape = build_request_shape(
+        settings.effective_path(),
+        &method,
+        &request_target,
+        header_names,
+        "HTTP/2",
+        content_length,
+        None,
+        body_chunk_sizes,
+    );
+    let _ = observe_download_reconnaissance(
+        inbound_tag,
+        conn_id,
+        0,
+        &shape,
+        &request_target,
+        settings.effective_path(),
+        effective_mode,
+    );
+    if effective_mode == EffectiveXHttpMode::PacketUp && method_matches_packet_up_upload(&method) {
+        log_packet_up_request_shape(inbound_tag, conn_id, 0, &shape);
+    }
+    reject_unsupported_xhttp_h2(respond, inbound_tag, conn_id, effective_mode, reason).await
 }
 
 async fn reject_unsupported_xhttp_http1<S: AsyncRead + AsyncWrite + Unpin>(
@@ -573,26 +754,37 @@ async fn reject_unsupported_xhttp_http1<S: AsyncRead + AsyncWrite + Unpin>(
     effective_mode: EffectiveXHttpMode,
     reason: &str,
 ) -> io::Result<()> {
-    if effective_mode == EffectiveXHttpMode::PacketUp {
-        let content_length = request_content_length(head).ok().flatten();
-        let transfer_encoding = head.header("transfer-encoding").map(str::to_string);
-        let body_chunk_sizes = sample_http1_body_chunk_sizes(
-            stream,
-            prebuffer,
-            content_length,
-            transfer_encoding.as_deref(),
-        )
-        .await;
-        let shape = build_request_shape(
-            settings.effective_path(),
-            &head.method,
-            &head.request_target,
-            header_names_from_lower_map(&head.headers),
-            &head.version,
-            content_length,
-            transfer_encoding,
-            body_chunk_sizes,
-        );
+    let content_length = request_content_length(head).ok().flatten();
+    let transfer_encoding = head.header("transfer-encoding").map(str::to_string);
+    let body_chunk_sizes = sample_http1_body_chunk_sizes(
+        stream,
+        prebuffer,
+        content_length,
+        transfer_encoding.as_deref(),
+    )
+    .await;
+    let shape = build_request_shape(
+        settings.effective_path(),
+        &head.method,
+        &head.request_target,
+        header_names_from_lower_map(&head.headers),
+        &head.version,
+        content_length,
+        transfer_encoding,
+        body_chunk_sizes,
+    );
+    let _ = observe_download_reconnaissance(
+        inbound_tag,
+        conn_id,
+        0,
+        &shape,
+        &head.request_target,
+        settings.effective_path(),
+        effective_mode,
+    );
+    if effective_mode == EffectiveXHttpMode::PacketUp
+        && method_matches_packet_up_upload(&head.method)
+    {
         log_packet_up_request_shape(inbound_tag, conn_id, 0, &shape);
     }
     log_xhttp_mode_unsupported(inbound_tag, conn_id, effective_mode, reason);
@@ -642,7 +834,18 @@ async fn reject_unsupported_xhttp_h2_packet_up(
         None,
         body_chunk_sizes,
     );
-    log_packet_up_request_shape(inbound_tag, conn_id, 0, &shape);
+    let _ = observe_download_reconnaissance(
+        inbound_tag,
+        conn_id,
+        0,
+        &shape,
+        &request_target,
+        settings.effective_path(),
+        EffectiveXHttpMode::PacketUp,
+    );
+    if method_matches_packet_up_upload(&method) {
+        log_packet_up_request_shape(inbound_tag, conn_id, 0, &shape);
+    }
     reject_unsupported_xhttp_h2(
         respond,
         inbound_tag,
@@ -651,26 +854,6 @@ async fn reject_unsupported_xhttp_h2_packet_up(
         reason,
     )
     .await
-}
-
-fn log_packet_up_h2_followup_request(
-    configured_path: &str,
-    inbound_tag: &str,
-    conn_id: u64,
-    request_index: u32,
-    request: &Request<h2::RecvStream>,
-) {
-    let shape = build_request_shape(
-        configured_path,
-        request.method().as_str(),
-        &h2_request_target(request),
-        h2_header_names(request),
-        "HTTP/2",
-        h2_content_length(request),
-        None,
-        Vec::new(),
-    );
-    log_packet_up_request_shape(inbound_tag, conn_id, request_index, &shape);
 }
 
 fn xhttp_match_settings(settings: &XHttpSettings) -> XHttpMatchSettings<'_> {
@@ -833,6 +1016,316 @@ fn validate_stream_one_request_match(
     Ok(())
 }
 
+async fn send_h2_empty_response(
+    mut respond: h2::server::SendResponse<Bytes>,
+    status: StatusCode,
+) -> io::Result<()> {
+    let response = Response::builder()
+        .status(status)
+        .body(())
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    let mut send = respond
+        .send_response(response, false)
+        .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))?;
+    let _ = send.send_data(Bytes::new(), true);
+    Ok(())
+}
+
+fn packet_up_error_status(err: &crate::xhttp_mode::XHttpError) -> StatusCode {
+    match err {
+        crate::xhttp_mode::XHttpError::MissingSessionId
+        | crate::xhttp_mode::XHttpError::InvalidSessionId(_)
+        | crate::xhttp_mode::XHttpError::MalformedPacketRequest(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::BAD_REQUEST,
+    }
+}
+
+async fn handle_packet_up_h2_download(
+    session_id: String,
+    mut respond: h2::server::SendResponse<Bytes>,
+    inbound_tag: &str,
+    conn_id: u64,
+) -> io::Result<()> {
+    let manager = shared_packet_up_manager();
+    let mut download_rx = match manager.bind_download_session(&session_id) {
+        Ok(rx) => rx,
+        Err(err) => {
+            warn!(
+                inbound_tag,
+                conn_id,
+                session_id = %session_id,
+                error = %err,
+                "xhttp packet-up download session rejected"
+            );
+            return send_h2_empty_response(respond, StatusCode::NOT_FOUND).await;
+        }
+    };
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(http::header::CONTENT_TYPE, "application/octet-stream")
+        .body(())
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    let mut send = respond
+        .send_response(response, false)
+        .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))?;
+
+    debug!(
+        inbound_tag,
+        conn_id,
+        session_id = %session_id,
+        "xhttp packet-up download stream opened"
+    );
+
+    loop {
+        match tokio::time::timeout(PACKET_UP_DOWNLOAD_RECV_TIMEOUT, download_rx.recv()).await {
+            Ok(Some(chunk)) => {
+                if chunk.is_empty() {
+                    continue;
+                }
+                if h2_send_chunk(&mut send, chunk).await.is_err() {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                warn!(
+                    inbound_tag,
+                    conn_id,
+                    session_id = %session_id,
+                    timeout_secs = PACKET_UP_DOWNLOAD_RECV_TIMEOUT.as_secs(),
+                    "xhttp packet-up download recv timed out"
+                );
+                break;
+            }
+        }
+    }
+
+    let _ = send.send_data(Bytes::new(), true);
+    Ok(())
+}
+
+async fn handle_packet_up_h2_upload(
+    session_id: String,
+    seq: Option<u64>,
+    mut body: h2::RecvStream,
+    respond: h2::server::SendResponse<Bytes>,
+    inbound_tag: &str,
+    conn_id: u64,
+    users: Arc<VlessUserManager>,
+    stats_state: Option<StatsState>,
+) -> io::Result<()> {
+    let manager = shared_packet_up_manager();
+    let upload_handle = match manager.begin_upload_packet(&session_id, seq) {
+        Ok(handle) => handle,
+        Err(err) => {
+            warn!(
+                inbound_tag,
+                conn_id,
+                session_id = %session_id,
+                error = %err,
+                "xhttp packet-up upload session rejected"
+            );
+            return send_h2_empty_response(respond, StatusCode::BAD_REQUEST).await;
+        }
+    };
+
+    let mut upload_error: Option<String> = None;
+    let mut total_bytes = 0usize;
+    while let Some(data) = body.data().await {
+        match data {
+            Ok(chunk) => {
+                let len = chunk.len();
+                total_bytes += len;
+                let _ = body.flow_control().release_capacity(len);
+                match manager.append_upload_chunk(&upload_handle, chunk) {
+                    Ok(Some(launch)) => {
+                        spawn_packet_up_bridge(
+                            launch,
+                            Arc::clone(&users),
+                            stats_state.clone(),
+                            inbound_tag.to_string(),
+                            conn_id,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        upload_error = Some(err.to_string());
+                        break;
+                    }
+                }
+            }
+            Err(err)
+                if matches!(
+                    err.reason(),
+                    Some(h2::Reason::NO_ERROR | h2::Reason::CANCEL)
+                ) =>
+            {
+                break;
+            }
+            Err(err) => {
+                upload_error = Some(err.to_string());
+                break;
+            }
+        }
+    }
+
+    let bridge_launch = if upload_error.is_none() {
+        match manager.commit_upload_packet(&upload_handle) {
+            Ok(outcome) => outcome.bridge_launch,
+            Err(err) => {
+                upload_error = Some(err.to_string());
+                None
+            }
+        }
+    } else {
+        None
+    };
+    manager.finish_upload_packet(&session_id);
+
+    if total_bytes > 0 {
+        debug!(
+            session_id = %session_id,
+            seq = upload_handle.seq,
+            bytes = total_bytes,
+            "xhttp packet-up body appended"
+        );
+    }
+
+    if let Some(launch) = bridge_launch {
+        spawn_packet_up_bridge(launch, users, stats_state, inbound_tag.to_string(), conn_id);
+    }
+
+    if let Some(err) = upload_error {
+        warn!(
+            inbound_tag,
+            conn_id,
+            session_id = %session_id,
+            seq = upload_handle.seq,
+            error = %err,
+            "xhttp packet-up upload failed"
+        );
+        let status = if err.contains("backpressure") {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else if err.contains("upload channel closed") || err.contains("session input closed") {
+            StatusCode::BAD_GATEWAY
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        return send_h2_empty_response(respond, status).await;
+    }
+
+    send_h2_empty_response(respond, StatusCode::OK).await
+}
+
+async fn handle_xhttp_h2_packet_up(
+    request: Request<h2::RecvStream>,
+    respond: h2::server::SendResponse<Bytes>,
+    settings: &XHttpSettings,
+    inbound_tag: &str,
+    users: Arc<VlessUserManager>,
+    stats_state: Option<StatsState>,
+    conn_id: u64,
+) -> io::Result<()> {
+    let method = request.method().as_str().to_string();
+    let request_target = h2_request_target(&request);
+    let host = request
+        .headers()
+        .get(http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| request.uri().authority().map(|value| value.as_str()));
+
+    log_xhttp_request_received(
+        inbound_tag,
+        conn_id,
+        &method,
+        &request_target,
+        host,
+        "HTTP/2",
+    );
+
+    let match_settings = xhttp_match_settings(settings);
+    if !crate::transport::host_matches(match_settings.host, host, TransportSecurity::Reality) {
+        log_xhttp_host_result(
+            inbound_tag,
+            conn_id,
+            &match_settings,
+            host,
+            false,
+            Some(XHttpMatchRejectReason::HostMismatch),
+        );
+        return send_h2_empty_response(respond, StatusCode::NOT_FOUND).await;
+    }
+    log_xhttp_host_result(inbound_tag, conn_id, &match_settings, host, true, None);
+
+    let session_id = match extract_xhttp_session_id(&request, settings) {
+        Ok(session_id) => session_id,
+        Err(err) => {
+            warn!(
+                inbound_tag,
+                conn_id,
+                error = %err,
+                "xhttp packet-up session extraction failed"
+            );
+            return send_h2_empty_response(respond, packet_up_error_status(&err)).await;
+        }
+    };
+
+    if method_matches_packet_up_upload(&method) {
+        let seq = match extract_xhttp_packet_seq_for_settings(&request, settings) {
+            Ok(seq) => seq,
+            Err(err) => {
+                warn!(
+                    inbound_tag,
+                    conn_id,
+                    session_id = %session_id,
+                    error = %err,
+                    "xhttp packet-up seq extraction failed"
+                );
+                return send_h2_empty_response(respond, packet_up_error_status(&err)).await;
+            }
+        };
+        let body_hint = packet_up_body_hint(h2_content_length(&request), 0);
+        debug!(
+            inbound_tag,
+            conn_id,
+            session_id = %session_id,
+            seq = ?seq,
+            body_hint = %body_hint,
+            "xhttp packet-up request received"
+        );
+        return handle_packet_up_h2_upload(
+            session_id,
+            seq,
+            request.into_body(),
+            respond,
+            inbound_tag,
+            conn_id,
+            users,
+            stats_state,
+        )
+        .await;
+    }
+
+    if method_matches_packet_up_download(&method) {
+        if extract_xhttp_packet_seq(&request).is_some() {
+            return send_h2_empty_response(respond, StatusCode::BAD_REQUEST).await;
+        }
+        let body_hint = packet_up_body_hint(None, 0);
+        debug!(
+            inbound_tag,
+            conn_id,
+            session_id = %session_id,
+            seq = None::<u64>,
+            body_hint = %body_hint,
+            "xhttp packet-up request received"
+        );
+        return handle_packet_up_h2_download(session_id, respond, inbound_tag, conn_id).await;
+    }
+
+    send_h2_empty_response(respond, StatusCode::METHOD_NOT_ALLOWED).await
+}
+
 async fn write_status<S: AsyncWrite + Unpin>(stream: &mut S, status: &str) -> std::io::Result<()> {
     let response = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     stream.write_all(response.as_bytes()).await?;
@@ -842,8 +1335,7 @@ async fn write_status<S: AsyncWrite + Unpin>(stream: &mut S, status: &str) -> st
 pub async fn serve_xhttp_stream_one<S>(
     mut stream: S,
     settings: &XHttpSettings,
-    inbound_tag: &str,
-    users: &VlessUserManager,
+    users: Arc<VlessUserManager>,
     stats_state: Option<&StatsState>,
 ) -> std::io::Result<()>
 where
@@ -851,9 +1343,10 @@ where
 {
     let effective_mode = resolve_xhttp_mode_for_settings(settings, TransportSecurity::Reality)
         .map_err(|err| {
-            warn!(inbound_tag, error = %err, "xhttp mode resolution failed");
+            warn!(inbound_tag = users.inbound_tag(), error = %err, "xhttp mode resolution failed");
             std::io::Error::from(err)
         })?;
+    let inbound_tag = users.inbound_tag().to_string();
 
     let mut preface = Vec::with_capacity(HTTP2_PREFACE.len());
     while preface.len() < HTTP2_PREFACE.len() {
@@ -872,9 +1365,9 @@ where
         return serve_xhttp_h2_stream_one(
             prefixed,
             settings,
-            inbound_tag,
+            &inbound_tag,
             users,
-            stats_state,
+            stats_state.cloned(),
             effective_mode,
         )
         .await;
@@ -882,9 +1375,9 @@ where
     serve_xhttp_http1_stream_one(
         prefixed,
         settings,
-        inbound_tag,
+        &inbound_tag,
         users,
-        stats_state,
+        stats_state.cloned(),
         effective_mode,
     )
     .await
@@ -894,8 +1387,8 @@ async fn serve_xhttp_http1_stream_one<S>(
     mut stream: S,
     settings: &XHttpSettings,
     inbound_tag: &str,
-    users: &VlessUserManager,
-    stats_state: Option<&StatsState>,
+    users: Arc<VlessUserManager>,
+    stats_state: Option<StatsState>,
     effective_mode: EffectiveXHttpMode,
 ) -> std::io::Result<()>
 where
@@ -918,6 +1411,19 @@ where
         head.header("host"),
         &head.version,
     );
+
+    if is_download_side_request(&head.method, &head.request_target, settings, effective_mode) {
+        return reject_download_side_http1(
+            &mut stream,
+            settings,
+            &head,
+            &prebuffer,
+            inbound_tag,
+            conn_id,
+            effective_mode,
+        )
+        .await;
+    }
 
     if let Some(reason) = xhttp_runtime_unsupported_reason(settings, effective_mode) {
         return reject_unsupported_xhttp_http1(
@@ -986,8 +1492,8 @@ where
         inbound_tag,
         conn_id,
         started,
-        users,
-        stats_state,
+        users.as_ref(),
+        stats_state.as_ref(),
     )
     .await
 }
@@ -996,8 +1502,8 @@ async fn serve_xhttp_h2_stream_one<S>(
     stream: S,
     settings: &XHttpSettings,
     inbound_tag: &str,
-    users: &VlessUserManager,
-    stats_state: Option<&StatsState>,
+    users: Arc<VlessUserManager>,
+    stats_state: Option<StatsState>,
     effective_mode: EffectiveXHttpMode,
 ) -> io::Result<()>
 where
@@ -1023,34 +1529,34 @@ where
             format!("xhttp h2 request failed: {err}"),
         )
     })?;
-    let packet_up_diag = effective_mode == EffectiveXHttpMode::PacketUp;
-    let configured_path = settings.effective_path().to_string();
+    let settings_for_driver = settings.clone();
+    let packet_up = effective_mode == EffectiveXHttpMode::PacketUp
+        && xhttp_runtime_unsupported_reason(&settings_for_driver, effective_mode).is_none();
     let inbound_tag_driver = inbound_tag.to_string();
+    let users_driver = Arc::clone(&users);
+    let stats_driver = stats_state.clone();
     let driver = tokio::spawn(async move {
-        let mut request_index = 1u32;
         while let Some(request) = connection.accept().await {
             let Ok((request, mut respond)) = request else {
                 continue;
             };
-            if packet_up_diag {
-                log_packet_up_h2_followup_request(
-                    &configured_path,
-                    &inbound_tag_driver,
-                    conn_id,
-                    request_index,
-                    &request,
-                );
-                request_index += 1;
-                let response = match Response::builder()
-                    .status(StatusCode::NOT_IMPLEMENTED)
-                    .body(())
-                {
-                    Ok(response) => response,
-                    Err(_) => continue,
-                };
-                if let Ok(mut send) = respond.send_response(response, false) {
-                    let _ = send.send_data(Bytes::new(), true);
-                }
+            if packet_up {
+                let users = Arc::clone(&users_driver);
+                let stats = stats_driver.clone();
+                let inbound_tag = inbound_tag_driver.clone();
+                let settings = settings_for_driver.clone();
+                tokio::spawn(async move {
+                    let _ = handle_xhttp_h2_packet_up(
+                        request,
+                        respond,
+                        &settings,
+                        &inbound_tag,
+                        users,
+                        stats,
+                        conn_id,
+                    )
+                    .await;
+                });
                 continue;
             }
             let response = match Response::builder().status(StatusCode::NOT_FOUND).body(()) {
@@ -1083,12 +1589,30 @@ async fn handle_xhttp_h2_request(
     mut respond: h2::server::SendResponse<Bytes>,
     settings: &XHttpSettings,
     inbound_tag: &str,
-    users: &VlessUserManager,
-    stats_state: Option<&StatsState>,
+    users: Arc<VlessUserManager>,
+    stats_state: Option<StatsState>,
     conn_id: u64,
     started: Instant,
     effective_mode: EffectiveXHttpMode,
 ) -> io::Result<()> {
+    if is_download_side_request(
+        request.method().as_str(),
+        &h2_request_target(&request),
+        settings,
+        effective_mode,
+    ) {
+        return reject_download_side_h2(
+            request,
+            respond,
+            settings,
+            inbound_tag,
+            conn_id,
+            0,
+            effective_mode,
+        )
+        .await;
+    }
+
     let method = request.method().as_str().to_string();
     let request_target = request
         .uri()
@@ -1101,14 +1625,6 @@ async fn handle_xhttp_h2_request(
         .get(http::header::HOST)
         .and_then(|value| value.to_str().ok())
         .or_else(|| request.uri().authority().map(|value| value.as_str()));
-    log_xhttp_request_received(
-        inbound_tag,
-        conn_id,
-        &method,
-        &request_target,
-        host,
-        "HTTP/2",
-    );
 
     if let Some(reason) = xhttp_runtime_unsupported_reason(settings, effective_mode) {
         if effective_mode == EffectiveXHttpMode::PacketUp {
@@ -1122,9 +1638,39 @@ async fn handle_xhttp_h2_request(
             )
             .await;
         }
-        return reject_unsupported_xhttp_h2(respond, inbound_tag, conn_id, effective_mode, reason)
-            .await;
+        return reject_unsupported_xhttp_h2_with_request(
+            request,
+            respond,
+            settings,
+            inbound_tag,
+            conn_id,
+            effective_mode,
+            reason,
+        )
+        .await;
     }
+
+    if effective_mode == EffectiveXHttpMode::PacketUp {
+        return handle_xhttp_h2_packet_up(
+            request,
+            respond,
+            settings,
+            inbound_tag,
+            users,
+            stats_state,
+            conn_id,
+        )
+        .await;
+    }
+
+    log_xhttp_request_received(
+        inbound_tag,
+        conn_id,
+        &method,
+        &request_target,
+        host,
+        "HTTP/2",
+    );
 
     debug!(
         inbound_tag,
@@ -1163,8 +1709,8 @@ async fn handle_xhttp_h2_request(
         inbound_tag,
         conn_id,
         started,
-        users,
-        stats_state,
+        users.as_ref(),
+        stats_state.as_ref(),
     )
     .await
 }
@@ -1276,7 +1822,7 @@ mod tests {
         let mut request_bytes = request.into_bytes();
         request_bytes.extend_from_slice(&vless_body);
 
-        let users = VlessUserManager::new(
+        let users = Arc::new(VlessUserManager::new(
             "xhttp-test",
             vec![VlessClient {
                 id: uuid::Uuid::from_bytes(USER_ID),
@@ -1284,11 +1830,12 @@ mod tests {
                 flow: None,
                 level: None,
             }],
-        );
+        ));
         let (mut client, server) = tokio::io::duplex(64 * 1024);
-        let task = tokio::spawn(async move {
-            serve_xhttp_stream_one(server, &settings, "xhttp-test", &users, None).await
-        });
+        let task =
+            tokio::spawn(
+                async move { serve_xhttp_stream_one(server, &settings, users, None).await },
+            );
         client.write_all(&request_bytes).await.unwrap();
         client.shutdown().await.unwrap();
         let mut response = Vec::new();
@@ -1312,7 +1859,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn packet_up_returns_unsupported_without_bridge() {
+    async fn packet_up_http1_returns_unsupported_without_bridge() {
         let settings = XHttpSettings {
             path: "/xhttp".to_string(),
             mode: Some("packet-up".to_string()),
@@ -1326,7 +1873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn packet_up_unsupported_response_is_explicit_501() {
+    async fn packet_up_http1_unsupported_response_is_explicit_501() {
         let settings = XHttpSettings {
             path: "/xhttp".to_string(),
             mode: Some("packet-up".to_string()),
@@ -1336,6 +1883,45 @@ mod tests {
         let body = String::from_utf8_lossy(&response);
         assert!(body.starts_with("HTTP/1.1 501 Not Implemented"), "{body}");
         assert!(body.contains("Content-Length: 0"));
+    }
+
+    #[test]
+    fn packet_up_h2_is_runtime_unsupported_until_download_side() {
+        use crate::xhttp_mode::{packet_up_download_side_ready, EffectiveXHttpMode};
+        let settings = XHttpSettings {
+            path: "/xhttp".to_string(),
+            mode: Some("packet-up".to_string()),
+            ..XHttpSettings::default()
+        };
+        assert!(!packet_up_download_side_ready());
+        assert_eq!(
+            resolve_xhttp_mode_for_settings(&settings, TransportSecurity::Reality).unwrap(),
+            EffectiveXHttpMode::PacketUp
+        );
+        assert_eq!(
+            xhttp_runtime_unsupported_reason(&settings, EffectiveXHttpMode::PacketUp),
+            Some("packet_up_download_side_not_implemented")
+        );
+    }
+
+    #[tokio::test]
+    async fn packet_up_http1_rejects_quickly_without_bridge() {
+        let settings = XHttpSettings {
+            path: "/xhttp".to_string(),
+            mode: Some("packet-up".to_string()),
+            ..XHttpSettings::default()
+        };
+        let started = std::time::Instant::now();
+        let (response, outbound_connected) =
+            run_post_with_outbound_probe(settings, "/xhttp/session-id", "example.com").await;
+        let body = String::from_utf8_lossy(&response);
+        assert!(body.starts_with("HTTP/1.1 501 Not Implemented"), "{body}");
+        assert!(!outbound_connected);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "packet-up reject took too long: {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -1408,10 +1994,11 @@ mod tests {
 
     async fn run_request(settings: XHttpSettings, request: impl AsRef<[u8]>) -> Vec<u8> {
         let (mut client, server) = tokio::io::duplex(2048);
-        let users = VlessUserManager::new("xhttp-test", Vec::new());
-        let task = tokio::spawn(async move {
-            serve_xhttp_stream_one(server, &settings, "xhttp-test", &users, None).await
-        });
+        let users = Arc::new(VlessUserManager::new("xhttp-test", Vec::new()));
+        let task =
+            tokio::spawn(
+                async move { serve_xhttp_stream_one(server, &settings, users, None).await },
+            );
         client.write_all(request.as_ref()).await.unwrap();
         client.shutdown().await.unwrap();
         let mut response = Vec::new();
@@ -1454,7 +2041,7 @@ mod tests {
         let mut request_bytes = request.into_bytes();
         request_bytes.extend_from_slice(&vless_body);
 
-        let users = VlessUserManager::new(
+        let users = Arc::new(VlessUserManager::new(
             "xhttp-test",
             vec![VlessClient {
                 id: uuid::Uuid::from_bytes(USER_ID),
@@ -1462,11 +2049,12 @@ mod tests {
                 flow: None,
                 level: None,
             }],
-        );
+        ));
         let (mut client, server) = tokio::io::duplex(64 * 1024);
-        let task = tokio::spawn(async move {
-            serve_xhttp_stream_one(server, &settings, "xhttp-test", &users, None).await
-        });
+        let task =
+            tokio::spawn(
+                async move { serve_xhttp_stream_one(server, &settings, users, None).await },
+            );
         client.write_all(&request_bytes).await.unwrap();
         client.shutdown().await.unwrap();
         let mut response = Vec::new();

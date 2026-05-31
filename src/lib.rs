@@ -20,8 +20,11 @@ pub mod transport;
 pub mod vless;
 pub mod xhttp_bridge;
 pub mod xhttp_diagnostics;
+pub mod xhttp_extract;
 pub mod xhttp_match;
 pub mod xhttp_mode;
+pub mod xhttp_packet_up;
+pub mod xhttp_packet_up_input;
 pub mod xhttp_session;
 
 /// Re-exports the contents of the [rustls-pki-types](https://docs.rs/rustls-pki-types) crate for easy access

@@ -95,7 +95,7 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | FakeDNS | Not implemented |
 | DNS inbound / dokodemo-door hijack | Not implemented |
 | Full Xray DNS module compatibility | Not implemented |
-| XHTTP `packet-up` / `packet-down` / XMUX | Not implemented |
+| XHTTP `packet-up` / `packet-down` / XMUX | Not implemented (packet-up config parses; runtime fail-fast `501` until download-side PR) |
 | XHTTP chunked upload / XUDP | Not implemented |
 | REALITY over gRPC / WebSocket runtime | Not implemented (configs rejected at startup) |
 | DoH through outbound | Not implemented |

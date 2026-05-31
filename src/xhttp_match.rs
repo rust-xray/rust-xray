@@ -122,6 +122,98 @@ pub fn method_matches_stream_one(method: &str) -> bool {
     method.eq_ignore_ascii_case("POST")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PacketUpPathMatch {
+    pub session_id: String,
+    pub seq: Option<u64>,
+}
+
+pub fn parse_packet_up_path(
+    configured_base: &str,
+    request_target: &str,
+) -> Option<PacketUpPathMatch> {
+    let path = request_path_component(request_target);
+    let base = normalize_path_for_match(configured_base);
+    let received = normalize_path_for_match(path);
+    if received == base {
+        return None;
+    }
+    let prefix = if base == "/" { "/" } else { base };
+    if received == prefix {
+        return None;
+    }
+    if !received.starts_with(prefix) {
+        return None;
+    }
+    let suffix = received[prefix.len()..].trim_start_matches('/');
+    if suffix.is_empty() {
+        return None;
+    }
+    let mut parts = suffix.split('/');
+    let session_id = parts.next()?.to_string();
+    let seq = parts.next().and_then(|value| value.parse::<u64>().ok());
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(PacketUpPathMatch { session_id, seq })
+}
+
+pub fn parse_packet_up_upload_seq_strict(
+    configured_base: &str,
+    request_target: &str,
+) -> Result<Option<u64>, XHttpMatchRejectReason> {
+    let path = request_path_component(request_target);
+    let base = normalize_path_for_match(configured_base);
+    let received = normalize_path_for_match(path);
+    if received == base || received == base.trim_end_matches('/') {
+        return Err(XHttpMatchRejectReason::PathMismatch);
+    }
+    let prefix = if base == "/" { "/" } else { base };
+    if !received.starts_with(prefix) {
+        return Err(XHttpMatchRejectReason::PathMismatch);
+    }
+    let suffix = received[prefix.len()..].trim_start_matches('/');
+    let mut parts = suffix.split('/');
+    let _session_id = parts.next().ok_or(XHttpMatchRejectReason::PathMismatch)?;
+    match parts.next() {
+        None => Ok(None),
+        Some(raw) => raw
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| XHttpMatchRejectReason::PathMismatch),
+    }
+}
+
+pub fn method_matches_packet_up_upload(method: &str) -> bool {
+    method.eq_ignore_ascii_case("POST")
+}
+
+pub fn method_matches_packet_up_download(method: &str) -> bool {
+    method.eq_ignore_ascii_case("GET")
+}
+
+pub fn validate_packet_up_request(
+    settings: &XHttpMatchSettings<'_>,
+    request: &XHttpRequestDescriptor<'_>,
+    security: TransportSecurity,
+) -> Result<PacketUpPathMatch, XHttpMatchRejectReason> {
+    if !host_matches(settings.host, request.host, security) {
+        return Err(XHttpMatchRejectReason::HostMismatch);
+    }
+    let parsed = parse_packet_up_path(settings.path, request.request_target)
+        .ok_or(XHttpMatchRejectReason::PathMismatch)?;
+    if method_matches_packet_up_upload(request.method) {
+        return Ok(parsed);
+    }
+    if method_matches_packet_up_download(request.method) {
+        if parsed.seq.is_some() {
+            return Err(XHttpMatchRejectReason::PathMismatch);
+        }
+        return Ok(parsed);
+    }
+    Err(XHttpMatchRejectReason::MethodMismatch)
+}
+
 pub fn validate_xhttp_stream_one_request(
     settings: &XHttpMatchSettings<'_>,
     request: &XHttpRequestDescriptor<'_>,
@@ -244,6 +336,44 @@ mod tests {
     #[test]
     fn get_rejected_for_stream_one() {
         assert!(!method_matches_stream_one("GET"));
+    }
+
+    #[test]
+    fn parse_packet_up_path_extracts_session_and_seq() {
+        let parsed = parse_packet_up_path("/xhttp", "/xhttp/0897e374-2f32-4d61-aee9-b9c8523aa358")
+            .expect("session");
+        assert_eq!(parsed.session_id, "0897e374-2f32-4d61-aee9-b9c8523aa358");
+        assert_eq!(parsed.seq, None);
+
+        let parsed =
+            parse_packet_up_path("/xhttp", "/xhttp/0897e374-2f32-4d61-aee9-b9c8523aa358/0")
+                .expect("upload");
+        assert_eq!(parsed.session_id, "0897e374-2f32-4d61-aee9-b9c8523aa358");
+        assert_eq!(parsed.seq, Some(0));
+    }
+
+    #[test]
+    fn validate_packet_up_upload_requires_seq_suffix() {
+        let settings = XHttpMatchSettings {
+            path: "/xhttp",
+            host: None,
+        };
+        let request = XHttpRequestDescriptor {
+            method: "POST",
+            request_target: "/xhttp/session-a/0",
+            host: Some("example.com"),
+        };
+        assert!(
+            validate_packet_up_request(&settings, &request, TransportSecurity::Reality).is_ok()
+        );
+        let without_seq = XHttpRequestDescriptor {
+            method: "POST",
+            request_target: "/xhttp/session-a",
+            host: Some("example.com"),
+        };
+        assert!(
+            validate_packet_up_request(&settings, &without_seq, TransportSecurity::Reality).is_ok()
+        );
     }
 
     #[test]

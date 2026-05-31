@@ -32,7 +32,7 @@ pub async fn handle_accepted_reality_client(
     client_hello_payload: ClientHelloPayload,
     accepted: RealityAccepted,
     dest_addr: &str,
-    users: &VlessUserManager,
+    users: std::sync::Arc<VlessUserManager>,
     mldsa65_seed: Option<&Mldsa65Seed>,
     stats_state: Option<&StatsState>,
     transport: &TransportNetwork,
@@ -60,7 +60,7 @@ pub async fn handle_accepted_reality_client_traced(
     client_hello_payload: ClientHelloPayload,
     accepted: RealityAccepted,
     dest_addr: &str,
-    users: &VlessUserManager,
+    users: std::sync::Arc<VlessUserManager>,
     mldsa65_seed: Option<&Mldsa65Seed>,
     stats_state: Option<&StatsState>,
     transport: &TransportNetwork,
@@ -170,8 +170,13 @@ pub async fn handle_accepted_reality_client_traced(
                 "handing off to VLESS inbound"
             );
 
-            handle_reality_vless_tcp_inbound_traced(tls_app_stream, users, stats_state, mux_trace)
-                .await?;
+            handle_reality_vless_tcp_inbound_traced(
+                tls_app_stream,
+                users.as_ref(),
+                stats_state,
+                mux_trace,
+            )
+            .await?;
         }
         TransportNetwork::XHttp => {
             let settings = xhttp_settings.ok_or_else(|| {
@@ -189,8 +194,7 @@ pub async fn handle_accepted_reality_client_traced(
                 inbound_tag,
                 "handing off to XHTTP inbound"
             );
-            serve_xhttp_stream_one(tls_app_stream, settings, inbound_tag, users, stats_state)
-                .await?;
+            serve_xhttp_stream_one(tls_app_stream, settings, users, stats_state).await?;
         }
     }
 

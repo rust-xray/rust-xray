@@ -35,10 +35,30 @@ XHTTP_UNSUPPORTED_MODE=0
 HTTP_VERSIONS=()
 SUPPORTED_PASS=0
 PACKET_UP_SHAPE_LINES=()
+DOWNLOAD_RECON_LINES=()
+DOWNLOAD_RECON_SERVER_LOGS=()
 
 extract_packet_up_shapes() {
   local server_log="$1"
   grep -F 'xhttp packet-up request shape' "${server_log}" 2>/dev/null || true
+}
+
+extract_download_recon_lines() {
+  local server_log="$1"
+  grep -F 'xhttp download reconnaissance' "${server_log}" 2>/dev/null || true
+}
+
+collect_download_recon_from_log() {
+  local mode_key="$1"
+  local server_log="$2"
+  local lines
+  lines="$(extract_download_recon_lines "${server_log}")"
+  if [[ -n "${lines}" ]]; then
+    DOWNLOAD_RECON_SERVER_LOGS+=("${mode_key}:${server_log}")
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] && DOWNLOAD_RECON_LINES+=("${line}")
+    done <<<"${lines}"
+  fi
 }
 
 require_command() {
@@ -118,6 +138,7 @@ mode_config_value() {
   case "${mode_key}" in
     default) printf '' ;;
     auto) printf 'auto' ;;
+    auto_download) printf 'auto' ;;
     stream_one) printf 'stream-one' ;;
     packet_up) printf 'packet-up' ;;
     stream_up) printf 'stream-up' ;;
@@ -131,6 +152,7 @@ mode_log_label() {
   case "${mode_key}" in
     default) printf 'default' ;;
     auto) printf 'auto' ;;
+    auto_download) printf 'auto-download' ;;
     stream_one) printf 'stream-one' ;;
     packet_up) printf 'packet-up' ;;
     stream_up) printf 'stream-up' ;;
@@ -139,9 +161,28 @@ mode_log_label() {
   esac
 }
 
+mode_download_settings_json() {
+  local mode_key="$1"
+  case "${mode_key}" in
+    auto_download|packet_up|stream_up)
+      printf '{"path":"/xhttp"}'
+      ;;
+    *)
+      printf ''
+      ;;
+  esac
+}
+
+is_download_recon_mode() {
+  case "$1" in
+    packet_up|stream_up|auto_download|packet_down) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 is_expected_unsupported_mode() {
   case "$1" in
-    packet_up|stream_up|packet_down) return 0 ;;
+    packet_up|stream_up|packet_down|auto_download) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -152,10 +193,14 @@ write_configs() {
   mode_value="$(mode_config_value "${mode_key}")"
   local label
   label="$(mode_log_label "${mode_key}")"
+  local download_settings_json
+  download_settings_json="$(mode_download_settings_json "${mode_key}")"
   local server_config="${XHTTP_WORK_DIR}/server-${label}.json"
   local client_config="${XHTTP_WORK_DIR}/client-${label}.json"
 
   MODE="${mode_value}" \
+  MODE_KEY="${mode_key}" \
+  DOWNLOAD_SETTINGS_JSON="${download_settings_json}" \
   SERVER_PORT="${XHTTP_SERVER_PORT}" \
   SOCKS_PORT="${XHTTP_SOCKS_PORT}" \
   HTTP_PORT="${XHTTP_HTTP_PORT}" \
@@ -170,6 +215,7 @@ import os
 from pathlib import Path
 
 mode = os.environ["MODE"]
+mode_key = os.environ.get("MODE_KEY", "")
 server = json.loads(Path(os.environ["SERVER_TEMPLATE"]).read_text())
 client = json.loads(Path(os.environ["CLIENT_TEMPLATE"]).read_text())
 
@@ -187,6 +233,15 @@ if mode:
 else:
     server_xhttp.pop("mode", None)
     client_xhttp.pop("mode", None)
+
+download_settings_json = os.environ.get("DOWNLOAD_SETTINGS_JSON", "").strip()
+if download_settings_json:
+    download_settings = json.loads(download_settings_json)
+    server_xhttp["downloadSettings"] = download_settings
+    client_xhttp["downloadSettings"] = download_settings
+else:
+    server_xhttp.pop("downloadSettings", None)
+    client_xhttp.pop("downloadSettings", None)
 
 Path(os.environ["SERVER_OUT"]).write_text(json.dumps(server, indent=2) + "\n")
 Path(os.environ["CLIENT_OUT"]).write_text(json.dumps(client, indent=2) + "\n")
@@ -221,6 +276,16 @@ classify_failure() {
 
   if [[ "${timed_out}" == "1" ]]; then
     printf 'timeout'
+    return
+  fi
+  if grep -Fq "xhttp download side not implemented" "${server_log}" \
+    && grep -Fq "REALITY listener started" "${server_log}"; then
+    printf 'unsupported_mode'
+    return
+  fi
+  if grep -Fq "xhttp packet-up requires download side; not implemented" "${server_log}" \
+    && grep -Fq "REALITY listener started" "${server_log}"; then
+    printf 'unsupported_mode'
     return
   fi
   if grep -Fq "xhttp mode unsupported" "${server_log}" \
@@ -357,7 +422,8 @@ run_mode_impl() {
   bridge_started="$(count_log 'xhttp bridge started' "${server_log}")"
   bridge_completed="$(count_log 'xhttp bridge completed' "${server_log}")"
   unsupported_mode="$(count_log 'xhttp mode unsupported' "${server_log}")"
-  if [[ "${unsupported_mode}" == "0" ]] && grep -Fq "not supported in this MVP" "${server_log}"; then
+  if [[ "${unsupported_mode}" == "0" ]] \
+    && grep -Fq "xhttp packet-up requires download side; not implemented" "${server_log}"; then
     unsupported_mode=1
   fi
 
@@ -410,6 +476,10 @@ run_mode_impl() {
         [[ -n "${shape_line}" ]] && PACKET_UP_SHAPE_LINES+=("${shape_line}")
       done <<<"${packet_up_shapes}"
     fi
+  fi
+
+  if is_download_recon_mode "${mode_key}"; then
+    collect_download_recon_from_log "${mode_key}" "${server_log}"
   fi
 
   {
@@ -473,6 +543,62 @@ run_mode() {
   fi
 }
 
+write_download_recon_summary() {
+  XHTTP_WORK_DIR="${XHTTP_WORK_DIR}" python3 - <<'PY'
+import glob
+import os
+import re
+from pathlib import Path
+
+work = Path(os.environ["XHTTP_WORK_DIR"])
+lines = []
+for path in sorted(glob.glob(str(work / "server-*.log"))):
+    for line in Path(path).read_text(errors="replace").splitlines():
+        if "xhttp download reconnaissance" in line:
+            lines.append(line.strip())
+
+def field(name: str, default: str = "(unknown)") -> str:
+    if not lines:
+        return default
+    pattern = re.compile(rf"(?:^|\s){re.escape(name)}=(\S+)")
+    for line in reversed(lines):
+        match = pattern.search(line)
+        if match:
+            value = match.group(1)
+            if value.startswith('"') and value.endswith('"'):
+                value = value[1:-1]
+            return value
+    return default
+
+def field_list(name: str) -> str:
+    if not lines:
+        return "(none)"
+    pattern = re.compile(rf"{re.escape(name)}=\[(.*?)\]")
+    for line in reversed(lines):
+        match = pattern.search(line)
+        if match:
+            return match.group(1)
+    return "(none)"
+
+observed = "yes" if lines else "no"
+print("[xhttp download reconnaissance]")
+print(f"download_request_observed: {observed}")
+print(f"download_method: {field('method', '(none)')}")
+print(f"download_path: {field('path', '(none)')}")
+print(f"download_query_keys: {field_list('query_keys')}")
+print(f"download_header_names: {field_list('header_names')}")
+print(f"session_id_source: {field('session_id_source', '(none)')}")
+print(f"http_version: {field('version', '(none)')}")
+print(f"requires_h2: {field('requires_h2', '(unknown)')}")
+if lines:
+    print("download_recon_log_lines:")
+    for line in lines:
+        print(line)
+else:
+    print("download_recon_log_lines: (none captured)")
+PY
+}
+
 write_summary() {
   local versions=""
   if ((${#HTTP_VERSIONS[@]} > 0)); then
@@ -489,6 +615,7 @@ write_summary() {
     echo "mode_stream_one: ${MODE_RESULT[stream_one]:-FAIL}"
     echo "mode_packet_up: ${MODE_RESULT[packet_up]:-FAIL}"
     echo "mode_stream_up: ${MODE_RESULT[stream_up]:-FAIL}"
+    echo "mode_auto_download: ${MODE_RESULT[auto_download]:-FAIL}"
     echo "mode_packet_down: ${MODE_RESULT[packet_down]:-FAIL}"
     echo "curl_checks_passed: ${CURL_CHECKS_PASSED}"
     echo "curl_checks_failed: ${CURL_CHECKS_FAILED}"
@@ -505,12 +632,15 @@ write_summary() {
       echo "packet_up_observed_request_shapes: (none captured)"
     fi
     echo
+    write_download_recon_summary
+    echo
     echo "[failure classifications]"
     echo "mode_default: ${MODE_CLASSIFICATION[default]:-unknown}"
     echo "mode_auto: ${MODE_CLASSIFICATION[auto]:-unknown}"
     echo "mode_stream_one: ${MODE_CLASSIFICATION[stream_one]:-unknown}"
     echo "mode_packet_up: ${MODE_CLASSIFICATION[packet_up]:-unknown}"
     echo "mode_stream_up: ${MODE_CLASSIFICATION[stream_up]:-unknown}"
+    echo "mode_auto_download: ${MODE_CLASSIFICATION[auto_download]:-unknown}"
     echo "mode_packet_down: ${MODE_CLASSIFICATION[packet_down]:-unknown}"
     echo
     echo "known classifications:"
@@ -540,7 +670,7 @@ assert_acceptance() {
     fi
   done
 
-  for unsupported_mode in packet_up stream_up packet_down; do
+  for unsupported_mode in packet_up stream_up auto_download packet_down; do
     case "${MODE_RESULT[${unsupported_mode}]:-FAIL}" in
       PASS|UNSUPPORTED) ;;
       *)
@@ -588,6 +718,7 @@ main() {
   run_mode stream_one
   run_mode packet_up
   run_mode stream_up
+  run_mode auto_download
   run_mode packet_down
 
   write_summary
