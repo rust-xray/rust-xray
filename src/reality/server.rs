@@ -4,10 +4,12 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::{debug, info};
 
+use crate::config::{TransportNetwork, XHttpSettings};
 use crate::protocol::structs::ClientHelloPayload;
 use crate::reality::Mldsa65Seed;
 use crate::stats::StatsState;
 use crate::tls::{PrefixedStream, TlsClientHelloRecord};
+use crate::transport::xhttp::serve_xhttp_stream_one;
 use crate::vless::handle_reality_vless_tcp_inbound_traced;
 use crate::vless::mux::MuxSessionTrace;
 use crate::vless::VlessUserManager;
@@ -33,6 +35,8 @@ pub async fn handle_accepted_reality_client(
     users: &VlessUserManager,
     mldsa65_seed: Option<&Mldsa65Seed>,
     stats_state: Option<&StatsState>,
+    transport: &TransportNetwork,
+    xhttp_settings: Option<&XHttpSettings>,
 ) -> std::io::Result<()> {
     handle_accepted_reality_client_traced(
         client,
@@ -43,6 +47,8 @@ pub async fn handle_accepted_reality_client(
         users,
         mldsa65_seed,
         stats_state,
+        transport,
+        xhttp_settings,
         None,
     )
     .await
@@ -57,6 +63,8 @@ pub async fn handle_accepted_reality_client_traced(
     users: &VlessUserManager,
     mldsa65_seed: Option<&Mldsa65Seed>,
     stats_state: Option<&StatsState>,
+    transport: &TransportNetwork,
+    xhttp_settings: Option<&XHttpSettings>,
     mux_trace: Option<MuxSessionTrace>,
 ) -> std::io::Result<()> {
     let path_started = Instant::now();
@@ -152,15 +160,39 @@ pub async fn handle_accepted_reality_client_traced(
         "REALITY TLS 1.3 handshake completed"
     );
 
-    debug!(
-        stage = stages::VLESS_START,
-        %dest_addr,
-        cipher_suite,
-        vless_client_count = users.user_count(),
-        "handing off to VLESS inbound"
-    );
+    match transport {
+        TransportNetwork::RawTcp => {
+            debug!(
+                stage = stages::VLESS_START,
+                %dest_addr,
+                cipher_suite,
+                vless_client_count = users.user_count(),
+                "handing off to VLESS inbound"
+            );
 
-    handle_reality_vless_tcp_inbound_traced(tls_app_stream, users, stats_state, mux_trace).await?;
+            handle_reality_vless_tcp_inbound_traced(tls_app_stream, users, stats_state, mux_trace)
+                .await?;
+        }
+        TransportNetwork::XHttp => {
+            let settings = xhttp_settings.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "network=xhttp is missing xhttp settings runtime",
+                )
+            })?;
+            let inbound_tag = users.inbound_tag();
+            debug!(
+                stage = stages::VLESS_START,
+                %dest_addr,
+                cipher_suite,
+                vless_client_count = users.user_count(),
+                inbound_tag,
+                "handing off to XHTTP inbound"
+            );
+            serve_xhttp_stream_one(tls_app_stream, settings, inbound_tag, users, stats_state)
+                .await?;
+        }
+    }
 
     debug!(
         stage = stages::VLESS_RELAY_DONE,

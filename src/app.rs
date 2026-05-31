@@ -427,6 +427,8 @@ async fn handle_tls_client(
                 &config.user_manager,
                 config.reality.mldsa65_seed.as_ref(),
                 config.stats.as_deref(),
+                &config.reality.transport,
+                config.reality.xhttp_settings.as_ref(),
                 Some(MuxSessionTrace {
                     conn_id,
                     conn_started,
@@ -545,6 +547,7 @@ fn load_runtime_config(
             dest = %listener_config.reality.dest_addr,
             server_names = ?listener_config.reality.server_names,
             short_id_count = listener_config.reality.short_ids.len(),
+            transport = listener_config.reality.transport.as_log_label(),
             max_time_diff = listener_config.reality.max_time_diff,
             vless_client_count = listener_config.user_manager.user_count(),
             vless_flow_distribution = %listener_config.user_manager.flow_distribution_log_label(),
@@ -804,6 +807,7 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
         info!(
             listen = %inbound.reality.listen_addr,
             tag = ?inbound.reality.tag,
+            transport = inbound.reality.transport.as_log_label(),
             "REALITY runtime loaded OK"
         );
     }
@@ -828,14 +832,24 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
             stats: inbound.stats.clone(),
         });
 
-        info!(addr = %listen_addr, inbound_tag = %inbound_tag, "REALITY inbound starting");
+        info!(
+            addr = %listen_addr,
+            inbound_tag = %inbound_tag,
+            transport = config.reality.transport.as_log_label(),
+            "REALITY inbound starting"
+        );
         let listener = TcpListener::bind(&listen_addr)
             .await
             .map_err(|err| stage_error("failed to bind inbound", err))?;
         crate::startup_log::eprintln_bootstrap(format!(
             "REALITY listener started addr={listen_addr} tag={inbound_tag}"
         ));
-        info!(addr = %listen_addr, inbound_tag = %inbound_tag, "REALITY listener started");
+        info!(
+            addr = %listen_addr,
+            inbound_tag = %inbound_tag,
+            transport = config.reality.transport.as_log_label(),
+            "REALITY listener started"
+        );
 
         tokio::spawn(async move {
             loop {

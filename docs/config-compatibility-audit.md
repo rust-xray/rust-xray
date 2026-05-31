@@ -45,10 +45,10 @@ Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, 
 | Area | Upstream | rust-xray | Main gap / risk |
 |------|----------|-----------|-----------------|
 | VLESS inbound `settings` | `clients`/`users`, `decryption`, `fallbacks` | `clients`, `decryption`, `fallbacks` only | `users` alias → `settings.extra`; no runtime read. |
-| `streamSettings.network` + `security` | Many transports + REALITY | TCP/raw supported; others rejected at validator | Aligned with explicit unsupported policy. |
+| `streamSettings.network` + `security` | Many transports + REALITY | TCP/raw and experimental XHTTP supported; gRPC/WebSocket rejected at validator | Aligned with explicit unsupported policy. |
 | `realitySettings` server fields | dest/target, keys, policy, seed, limits | Core server fields supported | `type`, `xver`, `limitFallback*` parsed but **ignored** at runtime. |
 | `realitySettings` client fields | outbound-only in upstream | Land in `realitySettings.extra` | **Silent misconfiguration** if copied onto server inbound. |
-| Transport sub-settings | tls/raw/ws/grpc/xhttp/sockopt/finalmask | Stored in `streamSettings.extra` only | **Silent ignore** — no socket/TLS/finalmask behavior. |
+| Transport sub-settings | tls/raw/ws/grpc/xhttp/sockopt/finalmask | XHTTP typed; others stored in `streamSettings.extra` | **XHTTP stream-one MVP**; other transport subobjects rejected or parsed-only. |
 | Top-level `api` / `stats` / `policy` | Remna blocks | Typed + `validate_xray_panel_config` | No gRPC stats server yet | **parsed + validated** | `tests/config_remna.rs` |
 | Top-level `log` / `outbounds` | Panel metadata | `LogConfig` / `OutboundObject` | Not read at runtime | **parsed ignored** | Remna fixture, smoke fixtures |
 | Top-level `routing` | Traffic rules | `RoutingConfig` | Non-empty `rules`/`balancers` rejected at load | **explicit unsupported** (non-empty) | `config_remna::routing_rules_are_rejected_when_non_empty` |
@@ -104,7 +104,7 @@ Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, 
 
 | Field | Upstream meaning | Parse status | Runtime status | Policy | Test coverage |
 |-------|------------------|--------------|----------------|--------|---------------|
-| `network` | Transport (`tcp`, `raw`, `ws`, …) | `Option<String>` | `validate_reality_transport_network` when `security=reality` | **supported** (`tcp`/`raw`/missing) / **explicit unsupported** (others) | `validate_reality_transport_network_*`, `first_reality_inbound_runtime_rejects_*` |
+| `network` | Transport (`tcp`, `raw`, `xhttp`, `ws`, …) | `Option<String>` | `TransportNetwork` dispatch when `security=reality` | **supported** (`tcp`/`raw`/missing, experimental `xhttp`/`splithttp`) / **explicit unsupported** (others) | `validate_reality_transport_network_*`, XHTTP runtime tests |
 | `security` | `reality`, `tls`, `none`, … | `Option<String>` | REALITY path requires `reality` + `realitySettings` | **supported** | `find_reality_inbounds_skips_non_reality_security` |
 | `realitySettings` | See §4 | `RealitySettingsObject` | `RealityInboundRuntime` + handshake | **supported** (subset) | §4 |
 | `sockopt` | Socket options (TFO, mark, …) | `streamSettings.extra` | Parsed only; not applied | **parsed ignored** (allowed) | `sockopt_in_stream_settings_extra_remains_valid`, realistic fixture |
@@ -112,7 +112,7 @@ Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, 
 | `rawSettings` / `tcpSettings` | TCP transport options | `extra` | Startup reject | **explicit unsupported** | policy validator |
 | `wsSettings` | WebSocket transport | `extra` | Startup reject (+ `network=ws`) | **explicit unsupported** | `rejects_stream_settings_ws_settings_on_reality_inbound` |
 | `grpcSettings` | gRPC transport | `extra` | Startup reject | **explicit unsupported** | policy validator |
-| `xhttpSettings` / `splithttpSettings` | SplitHTTP / XHTTP | `extra` | Startup reject | **explicit unsupported** | policy validator |
+| `xhttpSettings` / `splithttpSettings` | SplitHTTP / XHTTP | `XHttpSettings` | HTTP/1.1 `stream-one` after accepted REALITY app stream | **experimental MVP** (`auto`/`stream-one`; packet modes parsed but 501) | `transport::xhttp` tests, config alias tests |
 | `kcpSettings` / `httpupgradeSettings` / `hysteriaSettings` | Other transports | `extra` | Startup reject | **explicit unsupported** | policy validator |
 | `finalmask` | Post-transport masking (Xray ≥ recent) | `extra` | Startup reject | **explicit unsupported** | policy validator |
 | `address`, `port` | Stream-level dest override | `extra` | Startup reject | **explicit unsupported** | policy validator |

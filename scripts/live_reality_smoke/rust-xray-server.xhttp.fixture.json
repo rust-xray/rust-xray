@@ -17,6 +17,10 @@
       "streamSettings": {
         "network": "xhttp",
         "security": "reality",
+        "xhttpSettings": {
+          "path": "/xhttp",
+          "mode": "stream-one"
+        },
         "realitySettings": {
           "dest": "www.microsoft.com:443",
           "serverNames": ["www.microsoft.com"],

@@ -182,9 +182,130 @@ pub struct StreamSettingsObject {
     pub security: Option<String>,
     #[serde(rename = "realitySettings")]
     pub reality_settings: Option<RealitySettingsObject>,
+    #[serde(rename = "xhttpSettings")]
+    pub xhttp_settings: Option<XHttpSettings>,
+    #[serde(rename = "splithttpSettings")]
+    pub splithttp_settings: Option<XHttpSettings>,
 
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TransportNetwork {
+    RawTcp,
+    XHttp,
+}
+
+impl TransportNetwork {
+    pub fn parse(network: Option<&str>) -> std::io::Result<Self> {
+        let normalized = network
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase);
+
+        match normalized.as_deref() {
+            None | Some("tcp") | Some("raw") => Ok(Self::RawTcp),
+            Some("xhttp") | Some("splithttp") => Ok(Self::XHttp),
+            Some("grpc") => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "REALITY over gRPC runtime is not implemented yet",
+            )),
+            Some("ws") | Some("websocket") => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "REALITY over WebSocket transport (network=ws) is not supported",
+            )),
+            Some("mkcp") | Some("kcp") => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "REALITY over mKCP transport (network=mkcp/kcp) is not supported",
+            )),
+            Some("httpupgrade") => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "REALITY over HTTPUpgrade transport (network=httpupgrade) is not supported",
+            )),
+            Some("hysteria") => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "REALITY over Hysteria transport (network=hysteria) is not supported",
+            )),
+            Some(value) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsupported REALITY transport network: {value}"),
+            )),
+        }
+    }
+
+    pub fn as_log_label(&self) -> &'static str {
+        match self {
+            Self::RawTcp => "raw",
+            Self::XHttp => "xhttp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct XmuxRangeSettings {
+    pub from: Option<i32>,
+    pub to: Option<i32>,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct XmuxSettings {
+    #[serde(rename = "maxConcurrency")]
+    pub max_concurrency: Option<XmuxRangeSettings>,
+    #[serde(rename = "maxConnections")]
+    pub max_connections: Option<XmuxRangeSettings>,
+    #[serde(rename = "cMaxReuseTimes")]
+    pub c_max_reuse_times: Option<XmuxRangeSettings>,
+    #[serde(rename = "hMaxRequestTimes")]
+    pub h_max_request_times: Option<XmuxRangeSettings>,
+    #[serde(rename = "hMaxReusableSecs")]
+    pub h_max_reusable_secs: Option<XmuxRangeSettings>,
+    #[serde(rename = "hKeepAlivePeriod")]
+    pub h_keep_alive_period: Option<i64>,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct XHttpSettings {
+    #[serde(default)]
+    pub path: String,
+    pub host: Option<String>,
+    pub mode: Option<String>,
+    #[serde(rename = "noGRPCHeader")]
+    pub no_grpc_header: Option<bool>,
+    #[serde(rename = "xPaddingBytes")]
+    pub x_padding_bytes: Option<XmuxRangeSettings>,
+    pub xmux: Option<XmuxSettings>,
+    #[serde(rename = "downloadSettings")]
+    pub download_settings: Option<Value>,
+    #[serde(rename = "uploadSettings")]
+    pub upload_settings: Option<Value>,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl XHttpSettings {
+    pub fn effective_mode(&self) -> &str {
+        self.mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("auto")
+    }
+
+    pub fn effective_path(&self) -> &str {
+        if self.path.trim().is_empty() {
+            "/"
+        } else {
+            self.path.trim()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -251,6 +372,8 @@ pub struct RealityInboundRuntime {
     pub vless_clients: Vec<VlessClientObject>,
     pub vless_decryption: String,
     pub vless_fallbacks: Vec<FallbackConfig>,
+    pub transport: TransportNetwork,
+    pub xhttp_settings: Option<XHttpSettings>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,6 +418,8 @@ impl std::fmt::Debug for RealityInboundRuntime {
             .field("vless_clients", &self.vless_clients)
             .field("vless_decryption", &self.vless_decryption)
             .field("vless_fallbacks", &self.vless_fallbacks)
+            .field("transport", &self.transport)
+            .field("xhttp_settings", &self.xhttp_settings)
             .finish()
     }
 }
@@ -323,42 +448,7 @@ fn is_vless_reality_inbound(inbound: &InboundObject) -> bool {
 ///
 /// `tcp` is the legacy alias for raw TCP transport; `raw` is the explicit form.
 pub fn validate_reality_transport_network(network: Option<&str>) -> std::io::Result<()> {
-    let normalized = network
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase);
-
-    match normalized.as_deref() {
-        None | Some("tcp") | Some("raw") => Ok(()),
-        Some("xhttp") => Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "REALITY over XHTTP runtime is not implemented yet",
-        )),
-        Some("grpc") => Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "REALITY over gRPC runtime is not implemented yet",
-        )),
-        Some("ws") | Some("websocket") => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "REALITY over WebSocket transport (network=ws) is not supported",
-        )),
-        Some("mkcp") | Some("kcp") => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "REALITY over mKCP transport (network=mkcp/kcp) is not supported",
-        )),
-        Some("httpupgrade") => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "REALITY over HTTPUpgrade transport (network=httpupgrade) is not supported",
-        )),
-        Some("hysteria") => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "REALITY over Hysteria transport (network=hysteria) is not supported",
-        )),
-        Some(value) => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("unsupported REALITY transport network: {value}"),
-        )),
-    }
+    TransportNetwork::parse(network).map(|_| ())
 }
 
 /// Validate `streamSettings.network` when `streamSettings.security` is REALITY.
@@ -392,8 +482,6 @@ const REALITY_UNSUPPORTED_STREAM_SUBOBJECTS: &[&str] = &[
     "tcpSettings",
     "wsSettings",
     "grpcSettings",
-    "xhttpSettings",
-    "splithttpSettings",
     "kcpSettings",
     "httpupgradeSettings",
     "hysteriaSettings",
@@ -436,6 +524,35 @@ pub fn validate_reality_inbound_config_policy(
                 std::io::ErrorKind::Unsupported,
                 format!("streamSettings.{field} is not supported on REALITY inbound"),
             ));
+        }
+    }
+
+    match TransportNetwork::parse(stream.network.as_deref())? {
+        TransportNetwork::RawTcp => {
+            if stream.xhttp_settings.is_some() || stream.splithttp_settings.is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "streamSettings.xhttpSettings is only supported when network=xhttp/splithttp",
+                ));
+            }
+        }
+        TransportNetwork::XHttp => {
+            let settings = stream
+                .xhttp_settings
+                .as_ref()
+                .or(stream.splithttp_settings.as_ref());
+            if let Some(settings) = settings {
+                let mode = settings.effective_mode();
+                if !matches!(
+                    mode,
+                    "auto" | "stream-one" | "packet-up" | "packet-down" | "stream-up"
+                ) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        format!("unsupported XHTTP mode: {mode}"),
+                    ));
+                }
+            }
         }
     }
 
@@ -1342,6 +1459,10 @@ struct RealityMergeKey {
     max_client_ver: Option<String>,
     show: bool,
     mldsa65_present: bool,
+    transport: TransportNetwork,
+    xhttp_path: Option<String>,
+    xhttp_host: Option<String>,
+    xhttp_mode: Option<String>,
 }
 
 struct ParsedRealityInbound {
@@ -1353,6 +1474,7 @@ struct ParsedRealityInbound {
     mldsa65_seed: Option<crate::reality::Mldsa65Seed>,
     clients: Vec<VlessClientObject>,
     fallbacks: Vec<FallbackConfig>,
+    xhttp_settings: Option<XHttpSettings>,
 }
 
 fn parse_reality_inbound_for_merge(
@@ -1371,6 +1493,17 @@ fn parse_reality_inbound_for_merge(
         )
     })?;
     validate_reality_inbound_config_policy(stream, settings)?;
+    let transport = TransportNetwork::parse(stream.network.as_deref())?;
+    let xhttp_settings = match transport {
+        TransportNetwork::RawTcp => None,
+        TransportNetwork::XHttp => Some(
+            stream
+                .xhttp_settings
+                .clone()
+                .or_else(|| stream.splithttp_settings.clone())
+                .unwrap_or_default(),
+        ),
+    };
 
     let private_key = reality_private_key(settings)?.to_owned();
     crate::reality::validate_reality_private_key_b64(&private_key)?;
@@ -1413,12 +1546,28 @@ fn parse_reality_inbound_for_merge(
             max_client_ver: settings.max_client_ver.clone(),
             show: settings.show,
             mldsa65_present: mldsa65_seed.is_some(),
+            transport,
+            xhttp_path: xhttp_settings
+                .as_ref()
+                .map(|settings| settings.effective_path().to_string()),
+            xhttp_host: xhttp_settings.as_ref().and_then(|settings| {
+                settings
+                    .host
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_ascii_lowercase)
+            }),
+            xhttp_mode: xhttp_settings
+                .as_ref()
+                .map(|settings| settings.effective_mode().to_ascii_lowercase()),
         },
         server_names: reality_server_names(settings)?,
         short_ids: reality_short_ids(settings)?,
         mldsa65_seed,
         clients,
         fallbacks,
+        xhttp_settings,
     })
 }
 
@@ -1479,6 +1628,19 @@ fn build_reality_inbound_runtime_from_group(
         group.iter().flat_map(|inbound| inbound.clients.clone()),
     )?;
     crate::vless::validate_vless_client_flows(&merged_clients)?;
+    if primary.merge_key.transport == TransportNetwork::XHttp
+        && merged_clients.iter().any(|client| {
+            client
+                .flow
+                .as_deref()
+                .is_some_and(|flow| flow.trim() == "xtls-rprx-vision")
+        })
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "flow=xtls-rprx-vision over XHTTP is not supported in the stream-one MVP",
+        ));
+    }
     crate::vless::build_vless_clients(&merged_clients).map(|_| ())?;
 
     let merged_server_names = merge_server_names(
@@ -1517,6 +1679,8 @@ fn build_reality_inbound_runtime_from_group(
         vless_clients: merged_clients,
         vless_decryption: primary.merge_key.vless_decryption.clone(),
         vless_fallbacks: primary.fallbacks.clone(),
+        transport: primary.merge_key.transport.clone(),
+        xhttp_settings: primary.xhttp_settings.clone(),
     })
 }
 
@@ -2111,13 +2275,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_reality_transport_network_rejects_xhttp_as_unimplemented() {
-        let err = validate_reality_transport_network(Some("xhttp")).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert_eq!(
-            err.to_string(),
-            "REALITY over XHTTP runtime is not implemented yet"
-        );
+    fn validate_reality_transport_network_accepts_xhttp_aliases() {
+        assert!(validate_reality_transport_network(Some("xhttp")).is_ok());
+        assert!(validate_reality_transport_network(Some("splithttp")).is_ok());
+        assert!(validate_reality_transport_network(Some("splitHTTP")).is_ok());
     }
 
     #[test]
@@ -2172,6 +2333,8 @@ mod tests {
             network: Some("ws".to_string()),
             security: Some("tls".to_string()),
             reality_settings: None,
+            xhttp_settings: None,
+            splithttp_settings: None,
             extra: BTreeMap::new(),
         };
 
@@ -2179,20 +2342,21 @@ mod tests {
     }
 
     #[test]
-    fn validate_reality_stream_settings_rejects_xhttp_with_reality_security() {
+    fn validate_reality_stream_settings_accepts_xhttp_with_reality_security() {
         let stream = StreamSettingsObject {
             network: Some("xhttp".to_string()),
             security: Some("reality".to_string()),
             reality_settings: None,
+            xhttp_settings: Some(XHttpSettings {
+                path: "/xhttp".to_string(),
+                mode: Some("stream-one".to_string()),
+                ..XHttpSettings::default()
+            }),
+            splithttp_settings: None,
             extra: BTreeMap::new(),
         };
 
-        let err = validate_reality_stream_settings(&stream).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert_eq!(
-            err.to_string(),
-            "REALITY over XHTTP runtime is not implemented yet"
-        );
+        validate_reality_stream_settings(&stream).unwrap();
     }
 
     #[test]
@@ -2201,6 +2365,8 @@ mod tests {
             network: Some("raw".to_string()),
             security: Some("reality".to_string()),
             reality_settings: None,
+            xhttp_settings: None,
+            splithttp_settings: None,
             extra: BTreeMap::new(),
         };
 
@@ -2208,15 +2374,58 @@ mod tests {
     }
 
     #[test]
-    fn first_reality_inbound_runtime_rejects_xhttp_transport() {
-        let config: XrayConfig =
-            serde_json::from_str(&vless_reality_inbound_json("xhttp")).unwrap();
+    fn first_reality_inbound_runtime_accepts_xhttp_transport() {
+        let json = vless_reality_inbound_json("xhttp").replace(
+            r#""realitySettings": {"#,
+            r#""xhttpSettings": {"path": "/xhttp", "mode": "stream-one"}, "realitySettings": {"#,
+        );
+        let config: XrayConfig = serde_json::from_str(&json).unwrap();
+        let runtime = first_reality_inbound_runtime(&config).unwrap();
+        assert_eq!(runtime.transport, TransportNetwork::XHttp);
+        assert_eq!(
+            runtime.xhttp_settings.as_ref().unwrap().effective_path(),
+            "/xhttp"
+        );
+        assert_eq!(
+            runtime.xhttp_settings.as_ref().unwrap().effective_mode(),
+            "stream-one"
+        );
+    }
+
+    #[test]
+    fn first_reality_inbound_runtime_accepts_splithttp_alias() {
+        let json = vless_reality_inbound_json("splithttp").replace(
+            r#""realitySettings": {"#,
+            r#""splithttpSettings": {"path": "/legacy", "mode": "auto"}, "realitySettings": {"#,
+        );
+        let config: XrayConfig = serde_json::from_str(&json).unwrap();
+        let runtime = first_reality_inbound_runtime(&config).unwrap();
+        assert_eq!(runtime.transport, TransportNetwork::XHttp);
+        assert_eq!(
+            runtime.xhttp_settings.as_ref().unwrap().effective_path(),
+            "/legacy"
+        );
+        assert_eq!(
+            runtime.xhttp_settings.as_ref().unwrap().effective_mode(),
+            "auto"
+        );
+    }
+
+    #[test]
+    fn first_reality_inbound_runtime_rejects_vision_flow_over_xhttp() {
+        let json = vless_reality_inbound_json("xhttp")
+            .replace(
+                r#""settings": {"clients": [], "decryption": "none"}"#,
+                r#""settings": {"clients": [{"id": "00000000-0000-0000-0000-000000000001", "flow": "xtls-rprx-vision"}], "decryption": "none"}"#,
+            )
+            .replace(
+                r#""realitySettings": {"#,
+                r#""xhttpSettings": {"path": "/xhttp", "mode": "stream-one"}, "realitySettings": {"#,
+            );
+        let config: XrayConfig = serde_json::from_str(&json).unwrap();
         let err = first_reality_inbound_runtime(&config).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert_eq!(
-            err.to_string(),
-            "REALITY over XHTTP runtime is not implemented yet"
-        );
+        assert!(err.to_string().contains("flow=xtls-rprx-vision over XHTTP"));
     }
 
     #[test]
@@ -2988,6 +3197,8 @@ mod tests {
             network: Some("tcp".to_string()),
             security: Some("reality".to_string()),
             reality_settings: Some(settings),
+            xhttp_settings: None,
+            splithttp_settings: None,
             extra: BTreeMap::new(),
         });
         let config = XrayConfig {
@@ -3190,6 +3401,8 @@ mod tests {
             }],
             vless_decryption: "none".to_string(),
             vless_fallbacks: Vec::new(),
+            transport: TransportNetwork::RawTcp,
+            xhttp_settings: None,
         };
         let debug = format!("{runtime:?}");
 

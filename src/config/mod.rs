@@ -14,6 +14,7 @@ pub use xray::{
     validate_xray_panel_config, ApiConfig, ApiListenSource, ApiTlsMaterial, InboundObject,
     InboundPortValue, LogConfig, OutboundObject, PolicyConfig, PolicyLevel, RealityInboundRuntime,
     RealityMldsa65RuntimeMode, RealitySettingsObject, RoutingConfig, RoutingRuleObject,
-    StatsConfig, StreamSettingsObject, SystemPolicy, VlessClientObject, VlessInboundSettings,
-    XrayConfig, KNOWN_API_SERVICES,
+    StatsConfig, StreamSettingsObject, SystemPolicy, TransportNetwork, VlessClientObject,
+    VlessInboundSettings, XHttpSettings, XmuxRangeSettings, XmuxSettings, XrayConfig,
+    KNOWN_API_SERVICES,
 };

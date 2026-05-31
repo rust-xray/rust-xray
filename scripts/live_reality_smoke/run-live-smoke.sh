@@ -537,11 +537,15 @@ phase_network_tcp_regression() {
   smoke_record_curl "network-alias-tcp-regression" -m 30 "${SMOKE_QUICK_URL}"
 }
 
-phase_transport_xhttp_unsupported() {
-  smoke_expect_server_reject \
-    "transport-xhttp" \
-    "${SERVER_XHTTP}" \
-    "REALITY over XHTTP runtime is not implemented yet"
+phase_transport_xhttp_starts() {
+  smoke_stop_stack
+  smoke_start_server "${SERVER_XHTTP}" || return 1
+  if ! smoke_log_contains 'transport="xhttp"'; then
+    echo "error: XHTTP startup log missing transport=xhttp" >&2
+    tail -50 "${SMOKE_SERVER_LOG}" >&2 || true
+    return 1
+  fi
+  smoke_stop_stack
 }
 
 phase_transport_grpc_unsupported() {
@@ -976,7 +980,7 @@ main() {
   run_phase "mldsa65 reality raw vision" phase_mldsa65_seed_raw_vision
   run_phase "negative mldsa65 invalid seed" phase_mldsa65_invalid_seed_rejected
   run_phase "network alias tcp regression" phase_network_tcp_regression
-  run_phase "transport xhttp unsupported" phase_transport_xhttp_unsupported
+  run_phase "transport xhttp starts" phase_transport_xhttp_starts
   run_phase "transport grpc unsupported" phase_transport_grpc_unsupported
   run_phase "transport websocket+reality rejected" phase_transport_websocket_rejected
   run_phase "HTTP mode http1.1/http2" phase_http_modes

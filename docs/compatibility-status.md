@@ -15,6 +15,7 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 - [Config compatibility audit](./config-compatibility-audit.md) — field-level parse policy
 - [REALITY ML-DSA-65 runtime baseline](./reality-mldsa65-runtime-baseline.md) — PQ cert signing smoke
 - [REALITY accepted path (developer notes)](./reality-accepted-path.md) — handshake internals
+- [XHTTP compatibility notes](./xhttp-compat-notes.md) — server-side stream-one MVP
 - [DNS future work](./dns-future.md) — dokodemo-door, hijack, FakeDNS (TODO)
 
 ---
@@ -38,6 +39,7 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | Fallback `xver=1` PROXY v1 | Working | Live smoke |
 | Fallback `xver=2` PROXY v2 | Working | Live smoke + golden vector |
 | Network alias `raw` / legacy `tcp` | Working | Same REALITY TCP runtime |
+| XHTTP `stream-one` inbound | Experimental MVP | Server-side HTTP/1.1 POST over accepted REALITY stream; VLESS `flow=""` only |
 | StatsService API (basic) | Working | `QueryStats`, `GetStats`, `GetSysStats` when `api` block present |
 | DNS engine core (cache, dedup, UDP/TCP) | Working | `DnsEngine` in-process; numeric IP servers; no system resolver on engine path |
 | Mux UDP DNS (Happ baseline) | Working | `DnsEngine` via `resolve_mux_udp_dns`; numeric `:53` (e.g. `1.1.1.1:53`) |
@@ -56,6 +58,7 @@ connection closes (by design).
 | Outbound domain resolve (`UseIP` / `UseIPv4` / `UseIPv6`) | **Experimental** | Freedom connect uses `DnsEngine.lookup_ip` when `routing.domainStrategy` or `dns.queryStrategy` requires it |
 | Happ Proxy Utility baseline | **Experimental working** | REALITY/VLESS/Vision/Mux path reaches mux session; UDP DNS inside Mux works for numeric `:53` (live smoke validated) |
 | ML-DSA-65 baseline | **Experimental** | Valid `mldsa65Seed` accepted; invalid seed rejected at startup; raw Vision smoke passes; no cargo feature gate (see [baseline doc](./reality-mldsa65-runtime-baseline.md)) |
+| XHTTP + REALITY | **Experimental MVP** | `mode=auto` and `mode=stream-one`; path/Host validation; no Vision over XHTTP |
 
 **VLESS Mux wording (accurate):** not full Xray-core Mux.Cool parity. The Happ
 baseline path (Vision + Mux + numeric UDP DNS on port 53) is smoke-validated.
@@ -92,7 +95,9 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | FakeDNS | Not implemented |
 | DNS inbound / dokodemo-door hijack | Not implemented |
 | Full Xray DNS module compatibility | Not implemented |
-| REALITY over XHTTP / gRPC / WebSocket runtime | Not implemented (configs rejected at startup) |
+| XHTTP `packet-up` / `packet-down` / XMUX | Not implemented |
+| XHTTP HTTP/2 / chunked upload / XUDP | Not implemented |
+| REALITY over gRPC / WebSocket runtime | Not implemented (configs rejected at startup) |
 | DoH through outbound | Not implemented |
 | DNS-over-TCP through VLESS outbound / routing | Not implemented (see [dns-future.md](./dns-future.md)) |
 | Vision splice / zero-copy beyond DIRECT MVP | Not implemented |
