@@ -39,7 +39,7 @@ pub fn format_vless_flow_distribution(distribution: &BTreeMap<String, usize>) ->
         .join(", ")
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VlessClient {
     pub id: uuid::Uuid,
     pub email: Option<String>,

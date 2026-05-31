@@ -1,5 +1,12 @@
+pub mod normalized;
 pub mod xray;
 
+pub use normalized::{
+    normalize_config, normalize_vless_reality_inbound, vless_reality_matches_runtime, ApiInbound,
+    InboundTransportConfig, NormalizedApi, NormalizedConfig, NormalizedDns, NormalizedInbound,
+    NormalizedOutbound, NormalizedRouting, NormalizedRoutingRule, RealityServerConfig,
+    UnsupportedInbound, VlessRealityInbound, VlessUser, XHttpRuntimeConfig,
+};
 pub use xray::{
     api_dokodemo_inbound_tag, api_listen_addr, config_source_kind,
     extract_api_inbound_tls_material, extract_tls_material_from_inbound, find_reality_inbounds,
