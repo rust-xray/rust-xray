@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io::ErrorKind;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -303,12 +304,26 @@ enum VlessRelayPrepared<S> {
 }
 
 async fn prepare_vless_relay<S>(
-    mut stream: S,
+    stream: S,
     users: &VlessUserManager,
     stats_state: Option<&StatsState>,
 ) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsSession>)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
+{
+    prepare_vless_relay_with_hook(stream, users, stats_state, || async { Ok(()) }).await
+}
+
+async fn prepare_vless_relay_with_hook<S, F, Fut>(
+    mut stream: S,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+    on_ready_to_respond: F,
+) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsSession>)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<()>>,
 {
     let vless_started = Instant::now();
     let inbound = read_vless_request(&mut stream)
@@ -391,6 +406,10 @@ where
     );
 
     if inbound.request.command == VlessCommand::Mux {
+        on_ready_to_respond()
+            .await
+            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
         prepare_vless_tcp_response(&mut stream, inbound.request.version)
             .await
             .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
@@ -426,6 +445,10 @@ where
         %destination,
         "VLESS outbound TCP connected"
     );
+
+    on_ready_to_respond()
+        .await
+        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
 
     prepare_vless_tcp_response(&mut stream, inbound.request.version)
         .await
@@ -513,6 +536,57 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (prepared, stats) = prepare_vless_relay(stream, users, stats_state).await?;
+
+    let prepared = match prepared {
+        VlessRelayPrepared::Tcp(prepared) => prepared,
+        VlessRelayPrepared::Mux(prepared) => {
+            return run_prepared_mux_relay(prepared, None, stats.as_ref(), None).await;
+        }
+    };
+
+    info!(
+        stage = stages::VLESS_RELAY_STARTED,
+        "VLESS TCP relay started"
+    );
+
+    let VlessTcpRelayPrepared {
+        stream,
+        mut outbound,
+        vision,
+        auth,
+        destination,
+        command,
+    } = prepared;
+
+    let relay_started = Instant::now();
+    let relay_result =
+        relay_vless_tcp_bidirectional(stream, &mut outbound, vision, None, stats.as_ref()).await;
+
+    finish_vless_tcp_relay(
+        VlessTcpRelayFinished {
+            auth,
+            destination,
+            command,
+        },
+        relay_result,
+        stats.as_ref(),
+        relay_started,
+    )
+}
+
+pub async fn handle_vless_tcp_inbound_with_response_hook<S, F, Fut>(
+    stream: S,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+    on_ready_to_respond: F,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<()>>,
+{
+    let (prepared, stats) =
+        prepare_vless_relay_with_hook(stream, users, stats_state, on_ready_to_respond).await?;
 
     let prepared = match prepared {
         VlessRelayPrepared::Tcp(prepared) => prepared,

@@ -24,7 +24,7 @@ matrix. Short version:
 
 - REALITY TCP/raw inbound, pre-auth (SNI, AEAD, policy), and **accepted** TLS 1.3 path
 - VLESS TCP inbound: UUID auth, custom string ID → UUIDv5, `flow=""` and `xtls-rprx-vision` (Vision DIRECT MVP)
-- Experimental server-side XHTTP transport MVP: REALITY accepted path → HTTP/1.1 `stream-one` POST → VLESS, `flow=""` only
+- Experimental server-side XHTTP transport MVP: REALITY accepted path → HTTP/1.1 / HTTP/2 `stream-one` POST → VLESS, `flow=""` only
 - REALITY accepted-path cipher suites: AES128-GCM, AES256-GCM, ChaCha20-Poly1305
 - VLESS fallback: default, SNI/name, HTTP path, ALPN (`http/1.1`, `h2`), PROXY v1/v2 (`xver=1|2`)
 - Network aliases: `raw`, legacy `tcp`, and experimental `xhttp` / `splithttp`
@@ -39,7 +39,7 @@ connection.
 - **UDP DNS over VLESS Mux (port 53):** numeric `:53` targets (e.g. `1.1.1.1:53`) — query forwarded, response received, mux UDP response frame sent
 - **Happ Proxy Utility baseline:** REALITY/VLESS/Vision/Mux path with numeric UDP DNS on port 53 works (experimental)
 - **ML-DSA-65 baseline (experimental):** valid `mldsa65Seed` accepted, invalid seed rejected at startup, live smoke passes ([details](docs/reality-mldsa65-runtime-baseline.md))
-- **XHTTP inbound (experimental MVP):** server-side `stream-one` only; `packet-up`, `packet-down`, XMUX, HTTP/2, chunked upload, XUDP, and Vision over XHTTP are not implemented
+- **XHTTP inbound (experimental MVP):** server-side `stream-one` only; official Xray 26.3.27 interop smoke passes over HTTP/2 for default/`auto`/`stream-one`; `packet-up`, `packet-down`, XMUX, chunked HTTP/1.1 upload, XUDP, and Vision over XHTTP are not implemented
 
 ### Partial
 

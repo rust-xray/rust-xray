@@ -542,16 +542,7 @@ pub fn validate_reality_inbound_config_policy(
                 .as_ref()
                 .or(stream.splithttp_settings.as_ref());
             if let Some(settings) = settings {
-                let mode = settings.effective_mode();
-                if !matches!(
-                    mode,
-                    "auto" | "stream-one" | "packet-up" | "packet-down" | "stream-up"
-                ) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        format!("unsupported XHTTP mode: {mode}"),
-                    ));
-                }
+                crate::xhttp_mode::configured_xhttp_mode(settings.mode.as_deref())?;
             }
         }
     }
@@ -2357,6 +2348,27 @@ mod tests {
         };
 
         validate_reality_stream_settings(&stream).unwrap();
+    }
+
+    #[test]
+    fn validate_reality_stream_settings_accepts_unimplemented_xhttp_modes() {
+        for mode in ["packet-up", "packet-down", "stream-up"] {
+            let stream = StreamSettingsObject {
+                network: Some("xhttp".to_string()),
+                security: Some("reality".to_string()),
+                reality_settings: None,
+                xhttp_settings: Some(XHttpSettings {
+                    path: "/xhttp".to_string(),
+                    mode: Some(mode.to_string()),
+                    ..XHttpSettings::default()
+                }),
+                splithttp_settings: None,
+                extra: BTreeMap::new(),
+            };
+
+            validate_reality_stream_settings(&stream)
+                .unwrap_or_else(|err| panic!("mode {mode} should parse tolerant: {err}"));
+        }
     }
 
     #[test]

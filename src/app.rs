@@ -838,6 +838,15 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
             transport = config.reality.transport.as_log_label(),
             "REALITY inbound starting"
         );
+        if let Some(xhttp) = config.reality.xhttp_settings.as_ref() {
+            info!(
+                inbound_tag = %inbound_tag,
+                listen = %listen_addr,
+                path = xhttp.effective_path(),
+                mode = xhttp.effective_mode(),
+                "xhttp inbound starting"
+            );
+        }
         let listener = TcpListener::bind(&listen_addr)
             .await
             .map_err(|err| stage_error("failed to bind inbound", err))?;

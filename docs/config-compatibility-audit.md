@@ -112,7 +112,7 @@ Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, 
 | `rawSettings` / `tcpSettings` | TCP transport options | `extra` | Startup reject | **explicit unsupported** | policy validator |
 | `wsSettings` | WebSocket transport | `extra` | Startup reject (+ `network=ws`) | **explicit unsupported** | `rejects_stream_settings_ws_settings_on_reality_inbound` |
 | `grpcSettings` | gRPC transport | `extra` | Startup reject | **explicit unsupported** | policy validator |
-| `xhttpSettings` / `splithttpSettings` | SplitHTTP / XHTTP | `XHttpSettings` | HTTP/1.1 `stream-one` after accepted REALITY app stream | **experimental MVP** (`auto`/`stream-one`; packet modes parsed but 501) | `transport::xhttp` tests, config alias tests |
+| `xhttpSettings` / `splithttpSettings` | SplitHTTP / XHTTP | `XHttpSettings` | HTTP/1.1 / HTTP/2 `stream-one` after accepted REALITY app stream | **experimental MVP** (`auto`/`stream-one`; packet modes parsed but 501) | `transport::xhttp` tests, config alias tests, live XHTTP smoke |
 | `kcpSettings` / `httpupgradeSettings` / `hysteriaSettings` | Other transports | `extra` | Startup reject | **explicit unsupported** | policy validator |
 | `finalmask` | Post-transport masking (Xray ≥ recent) | `extra` | Startup reject | **explicit unsupported** | policy validator |
 | `address`, `port` | Stream-level dest override | `extra` | Startup reject | **explicit unsupported** | policy validator |
