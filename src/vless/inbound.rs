@@ -3,6 +3,7 @@ use std::io::ErrorKind;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use crate::mux::{handle_mux_cool_inbound, handle_mux_cool_inbound_traced, MuxSessionTrace};
 use crate::outbound::freedom::{
     connect_tcp_destination, format_vless_destination, forward_tcp_initial_payload,
     relay_tcp_bidirectional,
@@ -14,7 +15,6 @@ use crate::reality::tls13::{
 };
 use crate::stats::{StatsSession, StatsState};
 use crate::tls::PrefixedStream;
-use crate::vless::mux::{handle_mux_cool_inbound, handle_mux_cool_inbound_traced, MuxSessionTrace};
 use crate::vless::protocol::{
     encode_vless_response_header, parse_vless_request, VlessCommand, VlessRequest,
 };
@@ -1194,7 +1194,7 @@ mod handle_vless_tcp_inbound_tests {
 
     #[test]
     fn handle_vless_tcp_inbound_mux_single_tcp_substream_roundtrip() {
-        use crate::vless::mux::{
+        use crate::mux::{
             encode_mux_new_tcp, read_mux_frame, MuxCommand, MuxFrame, MuxOption, MuxStatus,
         };
         use crate::vless::protocol::VlessDestination;

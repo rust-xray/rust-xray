@@ -552,17 +552,18 @@ pub async fn serve_grpc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
         vars: Vec<(&'static str, Option<String>)>,
     }
 
     impl EnvGuard {
         fn new(pairs: &[(&'static str, Option<&str>)]) -> Self {
-            let _lock = ENV_LOCK.lock().expect("env lock");
+            let lock = ENV_LOCK.lock().expect("env lock");
             let mut saved = Vec::new();
             for (key, value) in pairs {
                 saved.push((*key, std::env::var(key).ok()));
@@ -571,13 +572,15 @@ mod tests {
                     None => std::env::remove_var(key),
                 }
             }
-            Self { vars: saved }
+            Self {
+                _lock: lock,
+                vars: saved,
+            }
         }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            let _lock = ENV_LOCK.lock().expect("env lock");
             for (key, value) in &self.vars {
                 match value {
                     Some(v) => std::env::set_var(key, v),

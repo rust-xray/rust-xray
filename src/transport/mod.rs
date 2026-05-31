@@ -24,9 +24,9 @@ pub use crate::xhttp::mode::{
 };
 
 use crate::config::{TransportNetwork, XHttpSettings};
+use crate::mux::MuxSessionTrace;
 use crate::reality::tls13::RealityTls13ApplicationStream;
 use crate::stats::StatsState;
-use crate::vless::mux::MuxSessionTrace;
 use crate::vless::VlessUserManager;
 
 pub use raw::run_raw_transport;

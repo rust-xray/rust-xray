@@ -1,3 +1,7 @@
+//! Packet-up upload/session skeleton.
+//!
+//! Not enabled for end-to-end runtime until download side is implemented.
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};

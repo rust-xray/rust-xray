@@ -18,6 +18,7 @@ use crate::config::{
     XrayConfig,
 };
 use crate::dns::DnsEngine;
+use crate::mux::MuxSessionTrace;
 use crate::outbound::{log_dns_outbounds, OutboundConnectRuntime};
 use crate::protocol::structs::ClientHelloPayload;
 use crate::proxy::relay_fallback_with_xver;
@@ -28,7 +29,6 @@ use crate::reality::{
 use crate::runtime::InboundUserManagers;
 use crate::stats::{StatsRegistry, StatsState};
 use crate::tls::{read_client_hello_record, PrefixedStream, TlsClientHelloRecord};
-use crate::vless::mux::MuxSessionTrace;
 use crate::vless::{
     build_fallback_context, build_vless_clients, fallback_match_kind_label,
     looks_like_http_request, resolve_fallback_selection, VlessUserManager,

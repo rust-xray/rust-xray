@@ -6,12 +6,12 @@ use tracing::{debug, info};
 
 use crate::config::TransportNetwork;
 use crate::config::XHttpSettings;
+use crate::mux::MuxSessionTrace;
 use crate::protocol::structs::ClientHelloPayload;
 use crate::reality::Mldsa65Seed;
 use crate::stats::StatsState;
 use crate::tls::{PrefixedStream, TlsClientHelloRecord};
 use crate::transport::{run_inbound_transport, AcceptedTransport, VlessHandler};
-use crate::vless::mux::MuxSessionTrace;
 use crate::vless::VlessUserManager;
 
 use super::decision::RealityAccepted;
