@@ -1,4 +1,4 @@
-use crate::xhttp_mode::TransportSecurity;
+use super::mode::TransportSecurity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XHttpMatchRejectReason {

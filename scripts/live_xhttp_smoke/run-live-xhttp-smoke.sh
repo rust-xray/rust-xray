@@ -13,7 +13,7 @@ XHTTP_WORK_DIR="${XHTTP_WORK_DIR:-/tmp/rust-xray-live-xhttp-smoke-$$}"
 XHTTP_REPORT_PATH="${XHTTP_REPORT_PATH:-${XHTTP_WORK_DIR}/report.txt}"
 XHTTP_SKIP_BUILD="${XHTTP_SKIP_BUILD:-0}"
 XHTTP_MODE_TIMEOUT="${XHTTP_MODE_TIMEOUT:-90}"
-XHTTP_RUST_LOG="${XHTTP_RUST_LOG:-rust_xray::transport::xhttp=debug,rust_xray::xhttp_diagnostics=warn,rust_xray::xhttp_bridge=debug,rust_xray::app=debug,rust_xray::vless=debug,warn}"
+XHTTP_RUST_LOG="${XHTTP_RUST_LOG:-rust_xray::transport::xhttp=debug,rust_xray::xhttp::diagnostics=warn,rust_xray::xhttp::bridge=debug,rust_xray::app=debug,rust_xray::vless=debug,warn}"
 XHTTP_RUST_XRAY_BIN="${REPO_ROOT}/target/debug/rust-xray"
 
 SERVER_TEMPLATE="${SCRIPT_DIR}/rust-xray-server-xhttp.json"

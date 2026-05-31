@@ -542,7 +542,7 @@ pub fn validate_reality_inbound_config_policy(
                 .as_ref()
                 .or(stream.splithttp_settings.as_ref());
             if let Some(settings) = settings {
-                crate::xhttp_mode::configured_xhttp_mode(settings.mode.as_deref())?;
+                crate::xhttp::configured_xhttp_mode(settings.mode.as_deref())?;
             }
         }
     }

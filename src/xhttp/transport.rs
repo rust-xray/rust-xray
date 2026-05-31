@@ -14,27 +14,31 @@ use tracing::{debug, warn};
 use crate::config::XHttpSettings;
 use crate::stats::StatsState;
 use crate::tls::PrefixedStream;
-use crate::transport::{
-    configured_xhttp_mode, configured_xhttp_mode_label, effective_xhttp_mode_label,
-    effective_xhttp_mode_unsupported_reason, method_matches_packet_up_download,
-    method_matches_packet_up_upload, query_keys, request_path_component, resolve_xhttp_mode,
-    transport_security_label, xhttp_match_reject_reason_label, EffectiveXHttpMode,
-    TransportSecurity, XHttpError, XHttpMatchRejectReason, XHttpMatchSettings,
-    XHttpRequestDescriptor,
-};
 use crate::vless::VlessUserManager;
-use crate::xhttp_bridge::{h2_send_chunk, run_h2_stream_one_bridge, run_http1_stream_one_bridge};
-use crate::xhttp_diagnostics::{
-    build_request_shape, h2_content_length, h2_header_names, h2_request_target,
-    header_names_from_lower_map, log_packet_up_request_shape, observe_download_reconnaissance,
-    sample_h2_body_chunk_sizes, sample_http1_body_chunk_sizes,
+
+use super::bridge::{h2_send_chunk, run_h2_stream_one_bridge, run_http1_stream_one_bridge};
+use super::diagnostics::{
+    build_request_shape, classify_request_leg, h2_content_length, h2_header_names,
+    h2_request_target, header_names_from_lower_map, log_packet_up_request_shape,
+    observe_download_reconnaissance, sample_h2_body_chunk_sizes, sample_http1_body_chunk_sizes,
+    XHttpRequestLeg,
 };
-use crate::xhttp_extract::{
+use super::extract::{
     extract_xhttp_packet_seq, extract_xhttp_packet_seq_for_settings, extract_xhttp_session_id,
     packet_up_body_hint,
 };
-use crate::xhttp_mode::xhttp_download_side_ready;
-use crate::xhttp_packet_up::{shared_packet_up_manager, spawn_packet_up_bridge};
+use super::matching::{
+    host_matches, method_matches_packet_up_download, method_matches_packet_up_upload,
+    method_matches_stream_one, path_matches, query_keys, request_path_component,
+    xhttp_match_reject_reason_label, XHttpMatchRejectReason, XHttpMatchSettings,
+    XHttpRequestDescriptor,
+};
+use super::mode::{
+    configured_xhttp_mode, configured_xhttp_mode_label, effective_xhttp_mode_label,
+    effective_xhttp_mode_unsupported_reason, resolve_xhttp_mode, transport_security_label,
+    xhttp_download_side_ready, EffectiveXHttpMode, TransportSecurity, XHttpError,
+};
+use super::packet_up::{shared_packet_up_manager, spawn_packet_up_bridge};
 
 const MAX_HTTP_HEADER_SIZE: usize = 16 * 1024;
 const HTTP2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -615,14 +619,14 @@ fn is_download_side_request(
         None,
         Vec::new(),
     );
-    let leg = crate::xhttp_diagnostics::classify_request_leg(
+    let leg = classify_request_leg(
         method,
         request_target,
         settings.effective_path(),
         effective_mode,
         pre_shape.session_id_location.as_deref(),
     );
-    leg == crate::xhttp_diagnostics::XHttpRequestLeg::Download
+    leg == XHttpRequestLeg::Download
 }
 
 async fn reject_download_side_h2(
@@ -962,7 +966,7 @@ fn validate_stream_one_request_match(
     let security = TransportSecurity::Reality;
 
     let received_path = request_path_component(request.request_target);
-    if !crate::transport::path_matches(match_settings.path, received_path) {
+    if !path_matches(match_settings.path, received_path) {
         log_xhttp_path_result(
             inbound_tag,
             conn_id,
@@ -982,7 +986,7 @@ fn validate_stream_one_request_match(
         None,
     );
 
-    if !crate::transport::host_matches(match_settings.host, request.host, security) {
+    if !host_matches(match_settings.host, request.host, security) {
         log_xhttp_host_result(
             inbound_tag,
             conn_id,
@@ -1002,7 +1006,7 @@ fn validate_stream_one_request_match(
         None,
     );
 
-    if !crate::transport::method_matches_stream_one(request.method) {
+    if !method_matches_stream_one(request.method) {
         log_xhttp_method_result(
             inbound_tag,
             conn_id,
@@ -1031,11 +1035,11 @@ async fn send_h2_empty_response(
     Ok(())
 }
 
-fn packet_up_error_status(err: &crate::xhttp_mode::XHttpError) -> StatusCode {
+fn packet_up_error_status(err: &XHttpError) -> StatusCode {
     match err {
-        crate::xhttp_mode::XHttpError::MissingSessionId
-        | crate::xhttp_mode::XHttpError::InvalidSessionId(_)
-        | crate::xhttp_mode::XHttpError::MalformedPacketRequest(_) => StatusCode::BAD_REQUEST,
+        XHttpError::MissingSessionId
+        | XHttpError::InvalidSessionId(_)
+        | XHttpError::MalformedPacketRequest(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::BAD_REQUEST,
     }
 }
@@ -1245,7 +1249,7 @@ async fn handle_xhttp_h2_packet_up(
     );
 
     let match_settings = xhttp_match_settings(settings);
-    if !crate::transport::host_matches(match_settings.host, host, TransportSecurity::Reality) {
+    if !host_matches(match_settings.host, host, TransportSecurity::Reality) {
         log_xhttp_host_result(
             inbound_tag,
             conn_id,
@@ -1887,7 +1891,7 @@ mod tests {
 
     #[test]
     fn packet_up_h2_is_runtime_unsupported_until_download_side() {
-        use crate::xhttp_mode::{packet_up_download_side_ready, EffectiveXHttpMode};
+        use crate::xhttp::{packet_up_download_side_ready, EffectiveXHttpMode};
         let settings = XHttpSettings {
             path: "/xhttp".to_string(),
             mode: Some("packet-up".to_string()),

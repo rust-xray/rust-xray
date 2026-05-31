@@ -3,11 +3,11 @@ use std::collections::BTreeSet;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::warn;
 
-use crate::xhttp_match::{
+use super::matching::{
     method_matches_packet_up_download, method_matches_packet_up_upload, method_matches_stream_one,
     parse_packet_up_path, query_keys, request_path_component,
 };
-use crate::xhttp_mode::{effective_xhttp_mode_label, EffectiveXHttpMode};
+use super::mode::{effective_xhttp_mode_label, EffectiveXHttpMode};
 
 pub const MAX_PACKET_UP_BODY_SAMPLE: usize = 64 * 1024;
 

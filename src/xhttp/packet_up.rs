@@ -7,14 +7,14 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::stats::StatsState;
-use crate::vless::VlessUserManager;
-use crate::xhttp_bridge::run_packet_up_bridge;
-use crate::xhttp_mode::EffectiveXHttpMode;
-use crate::xhttp_packet_up_input::{
+use super::bridge::run_packet_up_bridge;
+use super::mode::EffectiveXHttpMode;
+use super::packet_up_input::{
     PacketUpBoundedInput, PacketUpInputError, PacketUpSessionInputReader,
 };
-use crate::xhttp_session::{XHttpSessionEnsureOutcome, XHttpSessionError, XHttpSessionManager};
+use super::session::{XHttpSessionEnsureOutcome, XHttpSessionError, XHttpSessionManager};
+use crate::stats::StatsState;
+use crate::vless::VlessUserManager;
 
 const PACKET_UP_DOWNLOAD_CHANNEL: usize = 32;
 

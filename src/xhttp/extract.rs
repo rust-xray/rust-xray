@@ -1,13 +1,13 @@
 use http::Request;
 use tracing::debug;
 
-use crate::config::XHttpSettings;
-use crate::xhttp_match::{
+use super::matching::{
     method_matches_packet_up_upload, parse_packet_up_path, parse_packet_up_upload_seq_strict,
     query_keys, request_path_component, XHttpMatchRejectReason,
 };
-use crate::xhttp_mode::XHttpError;
-use crate::xhttp_session::XHttpSessionManager;
+use super::mode::XHttpError;
+use super::session::XHttpSessionManager;
+use crate::config::XHttpSettings;
 
 const UNSUPPORTED_QUERY_KEYS: &[&str] = &["sessionId", "session", "sid", "seq", "seqStr"];
 const UNSUPPORTED_HEADER_NAMES: &[&str] = &["x-session-id", "session-id", "x-seq", "seq"];

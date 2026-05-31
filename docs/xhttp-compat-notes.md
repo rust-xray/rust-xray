@@ -36,7 +36,7 @@ Live smoke runs official Xray client modes intended to open a **separate downloa
 | `auto-download` | `auto` | `{"path":"/xhttp"}` |
 | `packet-down` | `packet-down` | (none) |
 
-Server diagnostics event: **`xhttp download reconnaissance`** (`xhttp_diagnostics.rs`), fields:
+Server diagnostics event: **`xhttp download reconnaissance`** (`src/xhttp/diagnostics.rs`), fields:
 
 - `method`, `path` (session UUID redacted as `{session}`), `query_keys`, `header_names`
 - `session_id_source` (e.g. `path_segment:1`)
@@ -98,7 +98,7 @@ Official client behavior (diagnostics only; session UUID redacted as `{session}`
   - HTTP/2 `GET` / `POST` packet-up requests return **`501 Not Implemented` immediately** (no long-poll hang).
   - Log: `xhttp packet-up requires download side; not implemented` (`reason=packet_up_download_side_not_implemented`).
   - **No VLESS bridge** is started for packet-up while gated.
-- Upload-side modules (`xhttp_packet_up*`, bounded input, seq reorder) remain in-tree for the follow-up PR; gated by `packet_up_download_side_ready()` in `xhttp_mode.rs`.
+- Upload-side modules (`src/xhttp/packet_up*.rs`, bounded input, seq reorder) remain in-tree for the follow-up PR; gated by `packet_up_download_side_ready()` in `src/xhttp/mode.rs`.
 
 ### Future PR: packet-up download side (TODO)
 
@@ -185,8 +185,8 @@ Captured via `./scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh` with official 
 
 ## Diagnostics tooling
 
-- Module: `src/xhttp_diagnostics.rs`
+- Module: `src/xhttp/diagnostics.rs`
 - Live smoke report sections:
   - `[packet-up diagnostics]` / `packet_up_observed_request_shapes`
   - `[xhttp download reconnaissance]` / download GET metadata
-- Re-run capture: `XHTTP_RUST_LOG=rust_xray::xhttp_diagnostics=warn ./scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh`
+- Re-run capture: `XHTTP_RUST_LOG=rust_xray::xhttp::diagnostics=warn ./scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh`

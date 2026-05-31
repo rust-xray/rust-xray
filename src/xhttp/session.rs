@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
-use crate::xhttp_mode::{effective_xhttp_mode_label, EffectiveXHttpMode};
+use super::mode::{effective_xhttp_mode_label, EffectiveXHttpMode, XHttpError};
 
 pub const ENV_XHTTP_SESSION_IDLE_TIMEOUT_MS: &str = "RUST_XRAY_XHTTP_SESSION_IDLE_TIMEOUT_MS";
 pub const ENV_XHTTP_MAX_SESSIONS: &str = "RUST_XRAY_XHTTP_MAX_SESSIONS";
@@ -124,26 +124,20 @@ impl XHttpSessionManager {
         Ok(())
     }
 
-    pub fn validate_session_id_as_xhttp_error(
-        id: &str,
-    ) -> Result<(), crate::xhttp_mode::XHttpError> {
+    pub fn validate_session_id_as_xhttp_error(id: &str) -> Result<(), XHttpError> {
         Self::validate_session_id(id).map_err(|err| match err {
-            XHttpSessionError::EmptySessionId => {
-                crate::xhttp_mode::XHttpError::InvalidSessionId("empty".to_string())
+            XHttpSessionError::EmptySessionId => XHttpError::InvalidSessionId("empty".to_string()),
+            XHttpSessionError::SessionIdTooLong => {
+                XHttpError::InvalidSessionId(format!("exceeds max length of {MAX_SESSION_ID_LEN}"))
             }
-            XHttpSessionError::SessionIdTooLong => crate::xhttp_mode::XHttpError::InvalidSessionId(
-                format!("exceeds max length of {MAX_SESSION_ID_LEN}"),
-            ),
             XHttpSessionError::InvalidSessionIdCharset => {
-                crate::xhttp_mode::XHttpError::InvalidSessionId(
-                    "unsupported characters or path traversal".to_string(),
-                )
+                XHttpError::InvalidSessionId("unsupported characters or path traversal".to_string())
             }
             XHttpSessionError::MaxSessionsReached => {
-                crate::xhttp_mode::XHttpError::InvalidSessionId("session limit reached".to_string())
+                XHttpError::InvalidSessionId("session limit reached".to_string())
             }
             XHttpSessionError::SessionNotFound => {
-                crate::xhttp_mode::XHttpError::InvalidSessionId("session not found".to_string())
+                XHttpError::InvalidSessionId("session not found".to_string())
             }
         })
     }
