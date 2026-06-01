@@ -4,8 +4,7 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tracing::{debug, info};
 
-use crate::config::TransportNetwork;
-use crate::config::XHttpSettings;
+use crate::config::InboundTransportConfig;
 use crate::mux::MuxSessionTrace;
 use crate::protocol::structs::ClientHelloPayload;
 use crate::reality::Mldsa65Seed;
@@ -25,7 +24,7 @@ const ACCEPTED_DEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Handles a REALITY client that passed AEAD decrypt and policy validation.
 ///
 /// Accepted clients must **not** be relayed to fallback. This handler completes the
-/// REALITY TLS 1.3 handshake and hands the decrypted application stream to VLESS.
+/// REALITY TLS 1.3 handshake and hands the decrypted application stream to transport dispatch.
 pub async fn handle_accepted_reality_client(
     client: TcpStream,
     record: TlsClientHelloRecord,
@@ -35,8 +34,7 @@ pub async fn handle_accepted_reality_client(
     users: std::sync::Arc<VlessUserManager>,
     mldsa65_seed: Option<&Mldsa65Seed>,
     stats_state: Option<&StatsState>,
-    transport: &TransportNetwork,
-    xhttp_settings: Option<&XHttpSettings>,
+    transport: &InboundTransportConfig,
 ) -> std::io::Result<()> {
     handle_accepted_reality_client_traced(
         client,
@@ -48,7 +46,6 @@ pub async fn handle_accepted_reality_client(
         mldsa65_seed,
         stats_state,
         transport,
-        xhttp_settings,
         None,
     )
     .await
@@ -63,8 +60,7 @@ pub async fn handle_accepted_reality_client_traced(
     users: std::sync::Arc<VlessUserManager>,
     mldsa65_seed: Option<&Mldsa65Seed>,
     stats_state: Option<&StatsState>,
-    transport: &TransportNetwork,
-    xhttp_settings: Option<&XHttpSettings>,
+    transport: &InboundTransportConfig,
     mux_trace: Option<MuxSessionTrace>,
 ) -> std::io::Result<()> {
     let path_started = Instant::now();
@@ -160,7 +156,7 @@ pub async fn handle_accepted_reality_client_traced(
         "REALITY TLS 1.3 handshake completed"
     );
 
-    let accepted_transport = AcceptedTransport::from_reality_runtime(transport, xhttp_settings)?;
+    let accepted_transport = AcceptedTransport::from_inbound_transport_config(transport)?;
     let vless_handler = VlessHandler::new(users, stats_state.cloned(), mux_trace);
 
     run_inbound_transport(accepted_transport, tls_app_stream, &vless_handler).await?;

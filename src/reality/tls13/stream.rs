@@ -9,7 +9,7 @@
 //!   write buffering beyond the encrypted record write buffer.
 //! - Reads at least one full TLS record before returning decrypted plaintext.
 //! - Handles encrypted TLS alerts on the application stream (close_notify, fatal).
-//! - Wired into VLESS via `handle_vless_tcp_inbound` on the REALITY accepted path.
+//! - Wired into VLESS through the accepted transport boundary on the REALITY accepted path.
 
 use std::fmt::Write as _;
 use std::io::{self, Error, ErrorKind};

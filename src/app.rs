@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -13,9 +14,8 @@ use tracing::{debug, error, info, trace, warn};
 use crate::codec::{Codec, Reader};
 use crate::config::{
     api_dokodemo_inbound_tag, config_source_kind, format_redacted_run_command,
-    load_xray_config_from_source, reality_inbound_runtimes, reality_mldsa65_runtime_mode,
-    redact_config_source, resolve_api_listen, RealityInboundRuntime, RealityMldsa65RuntimeMode,
-    XrayConfig,
+    load_xray_config_from_source, normalize_config, redact_config_source, resolve_api_listen,
+    InboundTransportConfig, NormalizedConfig, NormalizedInbound, VlessRealityInbound, XrayConfig,
 };
 use crate::dns::DnsEngine;
 use crate::mux::MuxSessionTrace;
@@ -30,8 +30,8 @@ use crate::runtime::InboundUserManagers;
 use crate::stats::{StatsRegistry, StatsState};
 use crate::tls::{read_client_hello_record, PrefixedStream, TlsClientHelloRecord};
 use crate::vless::{
-    build_fallback_context, build_vless_clients, fallback_match_kind_label,
-    looks_like_http_request, resolve_fallback_selection, VlessUserManager,
+    build_fallback_context, fallback_match_kind_label, looks_like_http_request,
+    resolve_fallback_selection, VlessClient, VlessUserManager,
 };
 
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
@@ -40,9 +40,20 @@ const PREAMBLE_HEX_PREVIEW_MAX: usize = 32;
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
 struct InboundListenerConfig {
-    reality: RealityInboundRuntime,
+    inbound: VlessRealityInbound,
+    merged_inbound_tags: Vec<String>,
     user_manager: Arc<VlessUserManager>,
     stats: Option<Arc<StatsState>>,
+}
+
+impl InboundListenerConfig {
+    fn tag(&self) -> Option<&str> {
+        self.inbound.tag.as_deref()
+    }
+
+    fn inbound_tag_label(&self) -> &str {
+        self.tag().unwrap_or("reality-in")
+    }
 }
 
 struct ServerRuntimeConfig {
@@ -172,8 +183,8 @@ async fn relay_vless_fallback_with_log(
         .and_then(|state| state.session(None, None));
     let ctx = build_fallback_context(hello, initial_client_bytes);
     let selection = resolve_fallback_selection(
-        &config.reality.vless_fallbacks,
-        &config.reality.dest_addr,
+        &config.inbound.fallbacks,
+        &config.inbound.reality.dest_addr,
         &ctx,
     )?;
     let dest_addr = selection.dest;
@@ -195,7 +206,7 @@ async fn relay_vless_fallback_with_log(
 
     info!(
         reason,
-        fallback_count = config.reality.vless_fallbacks.len(),
+        fallback_count = config.inbound.fallbacks.len(),
         selected_reason = fallback_match_kind_label(selection.kind),
         used_configured_fallback = selection.used_configured_fallback,
         %dest_addr,
@@ -295,8 +306,8 @@ async fn handle_client(
     conn_started: Instant,
 ) -> std::io::Result<()> {
     let peer = stream.peer_addr().ok();
-    let inbound_tag = config.reality.tag.as_deref().unwrap_or("reality-in");
-    let inbound_protocol = config.reality.protocol.as_deref();
+    let inbound_tag = config.inbound_tag_label();
+    let inbound_protocol = "vless";
 
     debug!(
         conn_id,
@@ -406,29 +417,33 @@ async fn handle_tls_client(
     };
 
     let inspect_cfg = RealityInspectConfig {
-        private_key: &config.reality.private_key,
-        server_names: &config.reality.server_names,
-        short_ids: &config.reality.short_ids,
-        max_time_diff_ms: config.reality.max_time_diff,
-        min_client_ver: config.reality.min_client_ver.as_deref(),
-        max_client_ver: config.reality.max_client_ver.as_deref(),
+        private_key: &config.inbound.reality.private_key,
+        server_names: &config.inbound.reality.server_names,
+        short_ids: &config.inbound.reality.short_ids,
+        max_time_diff_ms: config.inbound.reality.max_time_diff,
+        min_client_ver: config.inbound.reality.min_client_ver.as_deref(),
+        max_client_ver: config.inbound.reality.max_client_ver.as_deref(),
         now_unix_ms: None,
     };
 
     match inspect_reality_client_hello(&ch, &record.handshake_message, inspect_cfg) {
         Ok(RealityDecision::Accepted(accepted)) => {
             // Accepted REALITY clients must not be sent to fallback relay.
+            let mldsa65_seed = config
+                .inbound
+                .reality
+                .mldsa65_seed
+                .map(crate::reality::Mldsa65Seed::from_bytes);
             if let Err(err) = handle_accepted_reality_client_traced(
                 stream,
                 record,
                 ch,
                 accepted,
-                &config.reality.dest_addr,
+                &config.inbound.reality.dest_addr,
                 Arc::clone(&config.user_manager),
-                config.reality.mldsa65_seed.as_ref(),
+                mldsa65_seed.as_ref(),
                 config.stats.as_deref(),
-                &config.reality.transport,
-                config.reality.xhttp_settings.as_ref(),
+                &config.inbound.transport,
                 Some(MuxSessionTrace {
                     conn_id,
                     conn_started,
@@ -476,10 +491,8 @@ async fn handle_tls_client(
 }
 
 fn validate_reality_runtime_feature_gates(config: &InboundListenerConfig) -> std::io::Result<()> {
-    match reality_mldsa65_runtime_mode(&config.reality) {
-        RealityMldsa65RuntimeMode::Disabled => Ok(()),
-        RealityMldsa65RuntimeMode::Enabled => Ok(()),
-    }
+    let _mldsa65_enabled = config.inbound.reality.mldsa65_seed.is_some();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -496,22 +509,178 @@ fn runtime_config_from_xray(xray: &XrayConfig) -> std::io::Result<InboundListene
         })
 }
 
+fn transport_log_label(transport: &InboundTransportConfig) -> &'static str {
+    match transport {
+        InboundTransportConfig::RawTcp => "raw",
+        InboundTransportConfig::XHttp(_) => "xhttp",
+    }
+}
+
+fn normalized_reality_merge_key(inbound: &VlessRealityInbound) -> String {
+    let transport_key = match &inbound.transport {
+        InboundTransportConfig::RawTcp => "raw".to_string(),
+        InboundTransportConfig::XHttp(xhttp) => {
+            format!(
+                "xhttp:path={}:host={}:mode={}",
+                xhttp.path,
+                xhttp.host.as_deref().unwrap_or(""),
+                xhttp.mode
+            )
+        }
+    };
+    format!(
+        "listen={}|private_key={}|dest={}|decryption={}|max_time_diff={}|min={}|max={}|show={}|mldsa={:?}|transport={}",
+        inbound.listen_addr,
+        inbound.reality.private_key,
+        inbound.reality.dest_addr,
+        inbound.reality.decryption,
+        inbound.reality.max_time_diff,
+        inbound.reality.min_client_ver.as_deref().unwrap_or(""),
+        inbound.reality.max_client_ver.as_deref().unwrap_or(""),
+        inbound.reality.show,
+        inbound.reality.mldsa65_seed,
+        transport_key
+    )
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn push_unique_bytes(values: &mut Vec<Vec<u8>>, value: Vec<u8>) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn merge_vless_users(
+    users: impl IntoIterator<Item = VlessClient>,
+) -> std::io::Result<Vec<VlessClient>> {
+    let mut merged: HashMap<uuid::Uuid, VlessClient> = HashMap::new();
+    for user in users {
+        match merged.remove(&user.id) {
+            None => {
+                merged.insert(user.id, user);
+            }
+            Some(mut existing) => {
+                match (existing.flow.as_deref(), user.flow.as_deref()) {
+                    (None, Some(flow)) | (Some(""), Some(flow)) => {
+                        existing.flow = Some(flow.to_string());
+                    }
+                    (Some(left), Some(right))
+                        if !left.is_empty() && !right.is_empty() && left != right =>
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!(
+                                "conflicting VLESS client flow for id {}: {left:?} vs {right:?}",
+                                user.id
+                            ),
+                        ));
+                    }
+                    _ => {}
+                }
+                if existing.email.is_none() {
+                    existing.email = user.email;
+                }
+                if existing.level.is_none() {
+                    existing.level = user.level;
+                }
+                merged.insert(existing.id, existing);
+            }
+        }
+    }
+    let mut users: Vec<_> = merged.into_values().collect();
+    users.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(users)
+}
+
+fn merged_normalized_reality_inbounds(
+    normalized: &NormalizedConfig,
+) -> std::io::Result<Vec<(VlessRealityInbound, Vec<String>)>> {
+    let mut groups: Vec<(String, VlessRealityInbound, Vec<String>)> = Vec::new();
+    for inbound in normalized
+        .inbounds
+        .iter()
+        .filter_map(|inbound| match inbound {
+            NormalizedInbound::VlessReality(inbound) => Some(inbound),
+            _ => None,
+        })
+    {
+        let key = normalized_reality_merge_key(inbound);
+        if let Some((_, existing, tags)) = groups
+            .iter_mut()
+            .find(|(group_key, _, _)| group_key == &key)
+        {
+            if let Some(tag) = inbound.tag.clone() {
+                push_unique_string(tags, tag);
+            }
+            for server_name in &inbound.reality.server_names {
+                push_unique_string(&mut existing.reality.server_names, server_name.clone());
+            }
+            for short_id in &inbound.reality.short_ids {
+                push_unique_bytes(&mut existing.reality.short_ids, short_id.clone());
+            }
+            existing.users = merge_vless_users(
+                existing
+                    .users
+                    .clone()
+                    .into_iter()
+                    .chain(inbound.users.clone().into_iter()),
+            )?;
+        } else {
+            let mut tags = Vec::new();
+            if let Some(tag) = inbound.tag.clone() {
+                tags.push(tag);
+            }
+            if tags.is_empty() {
+                tags.push("reality-in".to_string());
+            }
+            groups.push((key, inbound.clone(), tags));
+        }
+    }
+
+    Ok(groups
+        .into_iter()
+        .map(|(_, inbound, tags)| (inbound, tags))
+        .collect())
+}
+
 fn load_runtime_config(
     xray: &XrayConfig,
     stats_registry: Arc<StatsRegistry>,
 ) -> std::io::Result<ServerRuntimeConfig> {
-    let runtimes = reality_inbound_runtimes(xray)?;
+    let normalized = normalize_config(xray)?;
+    runtime_config_from_normalized(&normalized, xray, stats_registry)
+}
+
+fn runtime_config_from_normalized(
+    normalized: &NormalizedConfig,
+    xray: &XrayConfig,
+    stats_registry: Arc<StatsRegistry>,
+) -> std::io::Result<ServerRuntimeConfig> {
+    let runtimes = merged_normalized_reality_inbounds(normalized)?;
+    if runtimes.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no supported VLESS TCP REALITY inbound found",
+        ));
+    }
     let stats_enabled = StatsState::from_xray_config(xray, None).enabled();
     let mut inbounds = Vec::with_capacity(runtimes.len());
 
-    for reality in runtimes {
-        let inbound_tag = reality
+    for (inbound, merged_inbound_tags) in runtimes {
+        let inbound_tag = inbound
             .tag
             .clone()
             .filter(|tag| !tag.is_empty())
             .unwrap_or_else(|| "reality-in".to_string());
-        let vless_clients = build_vless_clients(&reality.vless_clients)?;
-        let user_manager = Arc::new(VlessUserManager::new(inbound_tag.clone(), vless_clients));
+        let user_manager = Arc::new(VlessUserManager::new(
+            inbound_tag.clone(),
+            inbound.users.clone(),
+        ));
         let stats = if stats_enabled {
             Some(Arc::new(StatsState::from_xray_config_with_registry(
                 xray,
@@ -522,41 +691,34 @@ fn load_runtime_config(
             None
         };
         let listener_config = InboundListenerConfig {
-            reality,
+            inbound,
+            merged_inbound_tags,
             user_manager,
             stats,
         };
         validate_reality_runtime_feature_gates(&listener_config)?;
 
-        if listener_config.reality.protocol.as_deref() == Some("vless") {
-            info!(tag = ?listener_config.reality.tag, "using VLESS REALITY inbound");
-        } else {
-            warn!(
-                tag = ?listener_config.reality.tag,
-                protocol = ?listener_config.reality.protocol,
-                "using REALITY inbound with non-vless protocol"
-            );
-        }
+        info!(tag = ?listener_config.inbound.tag, "using VLESS REALITY inbound");
 
-        if listener_config.reality.show {
+        if listener_config.inbound.reality.show {
             info!("REALITY show mode enabled in config");
         }
 
         info!(
-            listen = %listener_config.reality.listen_addr,
-            dest = %listener_config.reality.dest_addr,
-            server_names = ?listener_config.reality.server_names,
-            short_id_count = listener_config.reality.short_ids.len(),
-            transport = listener_config.reality.transport.as_log_label(),
-            max_time_diff = listener_config.reality.max_time_diff,
+            listen = %listener_config.inbound.listen_addr,
+            dest = %listener_config.inbound.reality.dest_addr,
+            server_names = ?listener_config.inbound.reality.server_names,
+            short_id_count = listener_config.inbound.reality.short_ids.len(),
+            transport = transport_log_label(&listener_config.inbound.transport),
+            max_time_diff = listener_config.inbound.reality.max_time_diff,
             vless_client_count = listener_config.user_manager.user_count(),
             vless_flow_distribution = %listener_config.user_manager.flow_distribution_log_label(),
-            merged_inbound_tags = ?listener_config.reality.merged_inbound_tags,
-            vless_fallback_count = listener_config.reality.vless_fallbacks.len(),
+            merged_inbound_tags = ?listener_config.merged_inbound_tags,
+            vless_fallback_count = listener_config.inbound.fallbacks.len(),
             "loaded REALITY inbound settings"
         );
 
-        for (index, fallback) in listener_config.reality.vless_fallbacks.iter().enumerate() {
+        for (index, fallback) in listener_config.inbound.fallbacks.iter().enumerate() {
             info!(
                 index,
                 name = fallback.name.as_deref().unwrap_or(""),
@@ -805,29 +967,30 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
     ));
     for inbound in &server_config.inbounds {
         info!(
-            listen = %inbound.reality.listen_addr,
-            tag = ?inbound.reality.tag,
-            transport = inbound.reality.transport.as_log_label(),
+            listen = %inbound.inbound.listen_addr,
+            tag = ?inbound.inbound.tag,
+            transport = transport_log_label(&inbound.inbound.transport),
             "REALITY runtime loaded OK"
         );
     }
 
     for inbound in &server_config.inbounds {
         inbound_users.register(Arc::clone(&inbound.user_manager));
-        for tag in &inbound.reality.merged_inbound_tags {
+        for tag in &inbound.merged_inbound_tags {
             inbound_users.register_tag(tag, Arc::clone(&inbound.user_manager));
         }
     }
 
     for inbound in &server_config.inbounds {
-        let listen_addr = inbound.reality.listen_addr.clone();
+        let listen_addr = inbound.inbound.listen_addr.clone();
         let inbound_tag = inbound
-            .reality
+            .inbound
             .tag
             .clone()
             .unwrap_or_else(|| "reality-in".to_string());
         let config = Arc::new(InboundListenerConfig {
-            reality: inbound.reality.clone(),
+            inbound: inbound.inbound.clone(),
+            merged_inbound_tags: inbound.merged_inbound_tags.clone(),
             user_manager: Arc::clone(&inbound.user_manager),
             stats: inbound.stats.clone(),
         });
@@ -835,15 +998,15 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
         info!(
             addr = %listen_addr,
             inbound_tag = %inbound_tag,
-            transport = config.reality.transport.as_log_label(),
+            transport = transport_log_label(&config.inbound.transport),
             "REALITY inbound starting"
         );
-        if let Some(xhttp) = config.reality.xhttp_settings.as_ref() {
+        if let InboundTransportConfig::XHttp(xhttp) = &config.inbound.transport {
             info!(
                 inbound_tag = %inbound_tag,
                 listen = %listen_addr,
-                path = xhttp.effective_path(),
-                mode = xhttp.effective_mode(),
+                path = %xhttp.path,
+                mode = %xhttp.mode,
                 "xhttp inbound starting"
             );
         }
@@ -856,7 +1019,7 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
         info!(
             addr = %listen_addr,
             inbound_tag = %inbound_tag,
-            transport = config.reality.transport.as_log_label(),
+            transport = transport_log_label(&config.inbound.transport),
             "REALITY listener started"
         );
 
@@ -995,6 +1158,42 @@ mod tests {
         )
     }
 
+    fn vless_reality_config_with_network_and_flow(network: &str, flow: Option<&str>) -> String {
+        let flow_field = flow
+            .map(|flow| format!(r#","flow":"{flow}""#))
+            .unwrap_or_default();
+        let xhttp_settings = if network == "xhttp" || network == "splithttp" {
+            r#","xhttpSettings":{"path":"/xhttp","mode":"stream-one"}"#
+        } else {
+            ""
+        };
+        format!(
+            r#"{{
+                "inbounds": [{{
+                    "tag": "reality-in",
+                    "listen": "127.0.0.1",
+                    "port": 443,
+                    "protocol": "vless",
+                    "settings": {{
+                        "clients": [{{"id": "00000000-0000-0000-0000-000000000001"{flow_field}}}],
+                        "decryption": "none"
+                    }},
+                    "streamSettings": {{
+                        "network": "{network}",
+                        "security": "reality"{xhttp_settings},
+                        "realitySettings": {{
+                            "show": false,
+                            "dest": "www.example.com:443",
+                            "serverNames": ["www.example.com"],
+                            "privateKey": "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4",
+                            "shortIds": [""]
+                        }}
+                    }}
+                }}]
+            }}"#
+        )
+    }
+
     #[test]
     fn runtime_config_from_xray_builds_vless_clients() {
         let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
@@ -1004,8 +1203,54 @@ mod tests {
         assert!(config
             .user_manager
             .contains_id(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()));
-        assert_eq!(config.reality.protocol.as_deref(), Some("vless"));
-        assert!(config.reality.vless_fallbacks.is_empty());
+        assert_eq!(config.inbound.tag.as_deref(), Some("reality-in"));
+        assert!(config.inbound.fallbacks.is_empty());
+    }
+
+    #[test]
+    fn runtime_config_uses_normalized_raw_tcp_transport() {
+        let xray: XrayConfig = serde_json::from_str(&vless_reality_config_with_network_and_flow(
+            "tcp",
+            Some("xtls-rprx-vision"),
+        ))
+        .expect("parse config");
+        let config = runtime_config_from_xray(&xray).expect("build runtime config");
+
+        assert_eq!(config.inbound.transport, InboundTransportConfig::RawTcp);
+        assert_eq!(
+            config.user_manager.list_managed_users()[0].flow.as_deref(),
+            Some("xtls-rprx-vision")
+        );
+    }
+
+    #[test]
+    fn runtime_config_uses_normalized_xhttp_transport_for_empty_flow() {
+        let xray: XrayConfig =
+            serde_json::from_str(&vless_reality_config_with_network_and_flow("xhttp", None))
+                .expect("parse config");
+        let config = runtime_config_from_xray(&xray).expect("build runtime config");
+
+        assert!(matches!(
+            config.inbound.transport,
+            InboundTransportConfig::XHttp(_)
+        ));
+        assert_eq!(config.user_manager.list_managed_users()[0].flow, None);
+    }
+
+    #[test]
+    fn runtime_config_rejects_xhttp_vision_flow() {
+        let xray: XrayConfig = serde_json::from_str(&vless_reality_config_with_network_and_flow(
+            "xhttp",
+            Some("xtls-rprx-vision"),
+        ))
+        .expect("parse config");
+        let err = match runtime_config_from_xray(&xray) {
+            Ok(_) => panic!("xhttp vision flow should be rejected"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("flow=xtls-rprx-vision over XHTTP"));
     }
 
     #[test]
@@ -1013,7 +1258,7 @@ mod tests {
         let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
         let config = runtime_config_from_xray(&xray).expect("build runtime config");
 
-        assert!(config.reality.mldsa65_seed.is_none());
+        assert!(config.inbound.reality.mldsa65_seed.is_none());
         validate_reality_runtime_feature_gates(&config).expect("gate allows absent seed");
     }
 
@@ -1022,11 +1267,7 @@ mod tests {
         let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
         let config = runtime_config_from_xray(&xray).expect("build runtime config");
 
-        assert!(config.reality.mldsa65_seed.is_none());
-        assert_eq!(
-            reality_mldsa65_runtime_mode(&config.reality),
-            RealityMldsa65RuntimeMode::Disabled
-        );
+        assert!(config.inbound.reality.mldsa65_seed.is_none());
         validate_reality_runtime_feature_gates(&config).expect("absent mldsa65Seed is unchanged");
     }
 
@@ -1036,11 +1277,7 @@ mod tests {
         let xray: XrayConfig = serde_json::from_str(&json).expect("parse config");
         let config = runtime_config_from_xray(&xray).expect("build runtime config");
 
-        assert!(config.reality.mldsa65_seed.is_some());
-        assert_eq!(
-            reality_mldsa65_runtime_mode(&config.reality),
-            RealityMldsa65RuntimeMode::Enabled
-        );
+        assert!(config.inbound.reality.mldsa65_seed.is_some());
 
         validate_reality_runtime_feature_gates(&config).expect("valid seed runtime gate");
     }
@@ -1106,8 +1343,8 @@ mod tests {
 
     fn runtime_selection(config: &InboundListenerConfig, ctx: &FallbackContext) -> (String, u8) {
         let selection = resolve_fallback_selection(
-            &config.reality.vless_fallbacks,
-            &config.reality.dest_addr,
+            &config.inbound.fallbacks,
+            &config.inbound.reality.dest_addr,
             ctx,
         )
         .expect("resolve fallback");
@@ -1207,7 +1444,7 @@ mod tests {
     #[test]
     fn runtime_fallback_selection_with_mldsa65_seed_stays_on_fallback_targets() {
         let config = runtime_with_fallbacks_and_mldsa65_seed();
-        assert!(config.reality.mldsa65_seed.is_some());
+        assert!(config.inbound.reality.mldsa65_seed.is_some());
 
         let path_ctx = build_fallback_context(
             None,

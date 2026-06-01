@@ -20,7 +20,7 @@ This layer should stay data-only: no runtime construction, logging, socket/API b
 
 `src/config/normalized.rs` builds `NormalizedConfig` from raw `XrayConfig`.
 
-NormalizedConfig is built and tested for parity; runtime migration is staged.
+NormalizedConfig is the runtime source for supported VLESS REALITY inbounds.
 
 The normalized model currently covers:
 
@@ -29,18 +29,17 @@ The normalized model currently covers:
 - API inbound metadata as `NormalizedApi` / `ApiInbound`;
 - DNS and routing parse results, with routing marked as parsed but not fully enforced.
 
-Parity tests compare normalized VLESS REALITY data against the legacy `RealityInboundRuntime` path via `vless_reality_matches_runtime`.
+Parity tests compare normalized VLESS REALITY data against the legacy `RealityInboundRuntime` compatibility helper via `vless_reality_matches_runtime`.
 
 ## Runtime Layer
 
-The accepted REALITY runtime still uses legacy `RealityInboundRuntime` from `src/config/xray/reality.rs` through `src/app.rs` and `src/reality/server.rs`. Accepted application streams are dispatched through `src/transport`:
+The accepted REALITY runtime is built from `NormalizedConfig.inbounds` through `src/app.rs`. Accepted application streams are dispatched through `src/transport`:
 
 - `RawTcp` hands the stream to the existing VLESS handler;
 - `XHttp` enters the HTTP/XHTTP bridge and then invokes VLESS behind the transport boundary.
 
 ## Migration TODO
 
-- Move `app` runtime construction from `RealityInboundRuntime` to `NormalizedConfig`.
-- Keep `RealityInboundRuntime` parity tests until the migration is complete.
+- Keep `RealityInboundRuntime` as a compatibility test/helper path only while old parser tests exist.
 - Expand normalized routing only when routing/balancer runtime support is implemented.
 - Keep XHTTP packet-up in shadow/skeleton status until the download side is implemented.

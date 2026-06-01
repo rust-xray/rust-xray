@@ -23,7 +23,7 @@ pub use crate::xhttp::mode::{
     XHttpError, XHttpMode,
 };
 
-use crate::config::{TransportNetwork, XHttpSettings};
+use crate::config::{InboundTransportConfig, TransportNetwork, XHttpSettings};
 use crate::mux::MuxSessionTrace;
 use crate::reality::tls13::RealityTls13ApplicationStream;
 use crate::stats::StatsState;
@@ -39,6 +39,13 @@ pub enum AcceptedTransport {
 }
 
 impl AcceptedTransport {
+    pub fn from_inbound_transport_config(transport: &InboundTransportConfig) -> io::Result<Self> {
+        match transport {
+            InboundTransportConfig::RawTcp => Ok(Self::RawTcp),
+            InboundTransportConfig::XHttp(config) => Ok(Self::XHttp(config.clone())),
+        }
+    }
+
     pub fn from_reality_runtime(
         network: &TransportNetwork,
         xhttp_settings: Option<&XHttpSettings>,
@@ -137,6 +144,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepted_transport_from_normalized_raw_tcp() {
+        let transport =
+            AcceptedTransport::from_inbound_transport_config(&InboundTransportConfig::RawTcp)
+                .unwrap();
+        assert_eq!(transport, AcceptedTransport::RawTcp);
+    }
+
+    #[test]
+    fn accepted_transport_from_normalized_xhttp() {
+        let config = XHttpRuntimeConfig {
+            path: "/xhttp".to_string(),
+            host: Some("example.com".to_string()),
+            mode: "stream-one".to_string(),
+        };
+        let transport = AcceptedTransport::from_inbound_transport_config(
+            &InboundTransportConfig::XHttp(config.clone()),
+        )
+        .unwrap();
+        assert_eq!(transport, AcceptedTransport::XHttp(config));
+    }
 
     #[test]
     fn accepted_transport_from_reality_runtime_raw_tcp() {

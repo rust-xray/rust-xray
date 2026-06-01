@@ -561,6 +561,29 @@ mod tests {
     }
 
     #[test]
+    fn splithttp_alias_normalizes_to_xhttp() {
+        let config: XrayConfig =
+            serde_json::from_str(&vless_reality_json("splithttp", true)).unwrap();
+        validate_xray_panel_config(&config).unwrap();
+        let normalized = normalize_config(&config).unwrap();
+        let NormalizedInbound::VlessReality(inbound) = &normalized.inbounds[0] else {
+            panic!("expected VlessReality inbound");
+        };
+        assert!(matches!(
+            inbound.transport,
+            InboundTransportConfig::XHttp(_)
+        ));
+    }
+
+    #[test]
+    fn websocket_reality_rejected() {
+        let config: XrayConfig = serde_json::from_str(&vless_reality_json("ws", false)).unwrap();
+        let err = normalize_config(&config).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("WebSocket"));
+    }
+
+    #[test]
     fn missing_private_key_fails() {
         let json = r#"{
             "inbounds": [{
