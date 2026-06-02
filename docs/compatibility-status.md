@@ -15,7 +15,7 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 - [Config compatibility audit](./config-compatibility-audit.md) — field-level parse policy
 - [REALITY ML-DSA-65 runtime baseline](./reality-mldsa65-runtime-baseline.md) — PQ cert signing smoke
 - [REALITY accepted path (developer notes)](./reality-accepted-path.md) — handshake internals
-- [XHTTP compatibility notes](./xhttp-compat-notes.md) — server-side stream-one MVP
+- [XHTTP compatibility notes](./xhttp-compat-notes.md) — XHTTP server-side behavior
 - [DNS future work](./dns-future.md) — dokodemo-door, hijack, FakeDNS (TODO)
 
 ---
@@ -57,9 +57,9 @@ connection closes (by design).
 | Outbound domain resolve (`UseIP` / `UseIPv4` / `UseIPv6`) | **Experimental** | Freedom connect uses `DnsEngine.lookup_ip` when `routing.domainStrategy` or `dns.queryStrategy` requires it |
 | Happ Proxy Utility baseline | **Experimental working** | REALITY/VLESS/Vision/Mux path reaches mux session; UDP DNS inside Mux works for numeric `:53` (live smoke validated) |
 | ML-DSA-65 baseline | **Experimental** | Valid `mldsa65Seed` accepted; invalid seed rejected at startup; raw Vision smoke passes; no cargo feature gate (see [baseline doc](./reality-mldsa65-runtime-baseline.md)) |
-| REALITY + XHTTP accepted path | **Experimental MVP** | Server-side HTTP/1.1 / HTTP/2 `stream-one` POST over accepted REALITY TLS stream; official Xray 26.3.27 interop smoke passes for default, `mode=auto`, and `mode=stream-one` over HTTP/2; path/Host validation; VLESS `flow=""` only |
-| XHTTP `packet-up` over HTTP/2 | **Experimental supported** | Separate GET download + POST upload ack; official Xray 26.3.27 live smoke PASS (`mode_packet_up`) |
-| XHTTP `packet-up` HTTP/1.1 chunked upload | **Experimental supported (low-level live TCP)** | `Transfer-Encoding: chunked` streaming upload on HTTP/1 adapter; `h1_chunked_upload_unit_smoke` + `h1_chunked_upload_live_or_origin_smoke` PASS; **official Xray H1 origin interop NOT verified** (client uses HTTP/2 on REALITY) |
+| REALITY + XHTTP `stream-one` | **Experimental supported** | HTTP/1.1 / HTTP/2 POST over accepted REALITY TLS stream; official Xray 26.3.27 interop smoke PASS for default / `auto` / `stream-one` over HTTP/2; VLESS `flow=""` only |
+| XHTTP `packet-up` over HTTP/2 | **Experimental supported** | Separate GET download + POST upload ack; official Xray 26.3.27 live smoke **PASS** (`mode_packet_up`, `mode_auto_download`) |
+| XHTTP `packet-up` HTTP/1.1 chunked upload | **Experimental supported (unit smoke)** | `Transfer-Encoding: chunked` streaming upload on HTTP/1 adapter; `h1_chunked_upload_unit_smoke` **PASS**; **official Xray H1 origin interop not verified** (client uses HTTP/2 on REALITY) |
 | XHTTP `stream-up` / `packet-down` / XMUX | **Unsupported / gated** | Config may parse; runtime gated (`501` / fail-fast) |
 | Vision over XHTTP | **Unsupported** | Explicitly rejected at startup (`flow="xtls-rprx-vision"` over XHTTP) |
 
@@ -99,8 +99,7 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | DNS inbound / dokodemo-door hijack | Not implemented |
 | Full Xray DNS module compatibility | Not implemented |
 | XHTTP `stream-up` / `packet-down` / XMUX | Unsupported / gated (config parses; runtime fail-fast `501`) |
-| XHTTP XUDP | Not implemented |
-| XHTTP XMUX concurrency controls | Not implemented (config tolerated; runtime reject when `xmux` present) |
+| XHTTP XUDP over XHTTP | Not implemented |
 | REALITY over gRPC / WebSocket runtime | Not implemented (configs rejected at startup) |
 | DoH through outbound | Not implemented |
 | DNS-over-TCP through VLESS outbound / routing | Not implemented (see [dns-future.md](./dns-future.md)) |
@@ -159,9 +158,24 @@ mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`).
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Live REALITY smoke | `make live-smoke` | Vision, fallback matrix, ciphers, ML-DSA-65, Happ mux UDP DNS baseline, transport negatives (`grpc` / `ws` + REALITY rejected; `xhttp` accepted for experimental `stream-one`) |
+| Live REALITY smoke | `make live-smoke` | Vision, fallback matrix, ciphers, ML-DSA-65, Happ mux UDP DNS baseline, transport negatives (`grpc` / `ws` + REALITY rejected; `xhttp` accepted for experimental XHTTP) |
+| Live XHTTP smoke | `bash scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh` | Official Xray 26.3.27 interop matrix + `h1_chunked_upload_unit_smoke` (see [XHTTP smoke README](../scripts/live_xhttp_smoke/README.md)) |
 | Remna compat | `bash scripts/remna_compat/run-local-api-smoke.sh` | gRPC StatsService, panel fixture load |
 | Config audit tests | `cargo test` | Parse policy, fallback selection unit tests |
+
+### Confirmed XHTTP smoke matrix (`experiment`)
+
+| Check | Result |
+|-------|--------|
+| `mode_default` | PASS |
+| `mode_auto` | PASS |
+| `mode_stream_one` | PASS |
+| `mode_packet_up` (HTTP/2, official Xray 26.3.27) | PASS |
+| `mode_auto_download` | PASS |
+| `mode_stream_up` | UNSUPPORTED |
+| `mode_packet_down` | UNSUPPORTED (expected client config parse fail) |
+| `h1_chunked_upload_unit_smoke` | PASS |
+| Official Xray H1 chunked interop | **Not verified** |
 
 Last full live smoke report on `experiment` (local): Vision sequential/parallel/download PASS,
 fallback default/SNI/path/ALPN/xver PASS, ML-DSA-65 checks 4/4,

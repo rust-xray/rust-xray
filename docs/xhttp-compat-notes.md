@@ -5,185 +5,77 @@ Scope: server-side VLESS inbound transport MVP, cross-checked against Xray-core 
 ## Upstream Shape
 
 - XHTTP is a separate HTTP-layer transport. Xray also keeps the legacy `splithttp` name; configs may use `network: "xhttp"` or `network: "splithttp"` / `splitHTTP`.
-- The transport has multiple modes: `auto`, `stream-one`, `packet-up`, `packet-down`, and older split upload/download behavior. `auto` lets upstream choose based on settings and HTTP version; this MVP treats it as `stream-one`.
+- The transport has multiple modes: `auto`, `stream-one`, `packet-up`, `packet-down`, and older split upload/download behavior. `auto` lets upstream choose based on settings and HTTP version; this MVP treats absent/`auto` without download settings as `stream-one`.
 - `stream-one` uses one POST request. Client upload bytes are carried in the request body; server download bytes are carried in the response body.
-- Packet modes use a session id plus sequence values to correlate independent upload/download HTTP requests. Upstream material names include `sessionId`, `seqStr`, `sessionPlacement`, `mode`, `path`, `host`, `xmux`, `xPaddingBytes`, `packet-up`, and `packet-down`.
-- Session ids may be placed in request metadata such as path/query/header depending on upstream settings. This MVP does not implement those multi-request session modes.
+- Packet modes use a session id plus sequence values to correlate independent upload/download HTTP requests.
+- Session ids are read from path suffix in this MVP (`/xhttp/{session}` / `/xhttp/{session}/{seq}`).
 - `path` is the HTTP request target that identifies the transport endpoint. `host` maps to Host header validation when configured.
-- Advanced options include XHTTP/XMUX concurrency and reuse controls, padding ranges (`xPaddingBytes`), browser dialer behavior, and separate upload/download settings.
 
 ## MVP Mapping
 
 - Accepted config networks: `xhttp`, `splithttp`, and case-insensitive `splitHTTP`.
-- Implemented effective modes: `stream-one`, `packet-up` (download GET + upload POST when `packet_up_download_side_ready()`).
-- Accepted alias mode: `auto`, mapped conservatively to `stream-one`.
-- `stream-up`, `packet-down`, and XMUX remain unsupported (`501` / fail-fast).
-- HTTP method: POST only for `stream-one`.
-- Request body maps to the byte stream read by the existing VLESS inbound parser.
-- Response body maps to bytes written by the existing VLESS inbound handler.
-- HTTP/1.1 and HTTP/2 `stream-one` are implemented. Official Xray 26.3.27 was observed using HTTP/2 for REALITY + XHTTP in the live smoke.
-- REALITY/TLS handshake is unchanged. XHTTP parsing starts only after the accepted REALITY TLS 1.3 application stream is ready.
-- VLESS `flow=""` is supported. `flow="xtls-rprx-vision"` over XHTTP is explicitly rejected for this MVP.
+- **Supported effective modes:** `stream-one`, `packet-up` (when `packet_up_download_side_ready()`).
+- **Accepted alias:** `auto` → `stream-one` (conservative default without download settings).
+- **Unsupported / gated:** `stream-up`, `packet-down`, XMUX → `501` / fail-fast.
+- REALITY/TLS handshake is unchanged. XHTTP parsing starts after the accepted REALITY TLS 1.3 application stream is ready.
+- VLESS `flow=""` is supported. `flow="xtls-rprx-vision"` over XHTTP is explicitly rejected at startup.
 
-## Download-side reconnaissance (this branch)
+## Confirmed live smoke matrix (`experiment`)
 
-Live smoke runs official Xray client modes intended to open a **separate download leg** and captures server-side metadata only (no payload bytes):
+From `./scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh` with official Xray **26.3.27**:
 
-| Smoke mode key | Client `xhttpSettings.mode` | `downloadSettings` |
-|----------------|----------------------------|--------------------|
-| `packet-up` | `packet-up` | `{"path":"/xhttp"}` |
-| `stream-up` | `stream-up` | `{"path":"/xhttp"}` |
-| `auto-download` | `auto` | `{"path":"/xhttp"}` |
-| `packet-down` | `packet-down` | (none) |
+| Check | Result |
+|-------|--------|
+| `mode_default` | PASS |
+| `mode_auto` | PASS |
+| `mode_stream_one` | PASS |
+| `mode_packet_up` (HTTP/2) | PASS |
+| `mode_auto_download` | PASS |
+| `mode_stream_up` | UNSUPPORTED |
+| `mode_packet_down` | UNSUPPORTED (expected client config parse fail) |
+| `h1_chunked_upload_unit_smoke` | PASS |
 
-Server diagnostics event: **`xhttp download reconnaissance`** (`src/transport/xhttp/diagnostics.rs`), fields:
+**Official Xray HTTP/1.1 origin interop for packet-up chunked upload: not verified**
+(Xray client observed on REALITY uses HTTP/2).
 
-- `method`, `path` (session UUID redacted as `{session}`), `query_keys`, `header_names`
-- `session_id_source` (e.g. `path_segment:1`)
-- `upload_download_relation` (e.g. `packet-up:download_get`, `stream-up:download_get`)
-- `version`, `body_direction` (`server_to_client` on download GET), `requires_h2`
-- `body_chunk_sizes` / `content_length` only (never payload)
+## Packet-up runtime (current branch)
 
-Smoke report section **`[xhttp download reconnaissance]`** aggregates the last observed download GET across recon modes.
+When `packet_up_download_side_ready()` is true:
 
-### Download GET runtime policy
+| Leg | Method | Path | Body | Response |
+|-----|--------|------|------|----------|
+| Download | `GET` | `/xhttp/{session}` | empty | long-lived response (`text/event-stream`; chunked on HTTP/1.1) |
+| Upload | `POST` | `/xhttp/{session}/{seq}` | VLESS chunks | ack-only `200` (not duplex on upload) |
 
-When `xhttp_download_side_ready()` is true (packet-up end-to-end path):
+- Limits: `scMaxEachPostBytes`, `scMaxBufferedPosts`, bounded input backpressure.
+- Duplicate download GET on the same session → `409 Conflict`.
+- HTTP/1.1 upload accepts `Content-Length` and `Transfer-Encoding: chunked` (streaming, no full-body buffer).
+- Official client uses **HTTP/2** on REALITY for end-to-end interop (`mode_packet_up: PASS`).
 
-- `GET /xhttp/{session}` binds a bounded download receiver and streams VLESS downstream bytes on the response body.
-- Response headers include `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no`, and CORS allow headers.
-- HTTP/1.1 uses chunked transfer encoding on the download response.
-- Duplicate download GET on the same session returns `409 Conflict`.
-- Session idle timeout + explicit close still apply; disconnect ends the download stream cleanly.
+## Download-side diagnostics
 
-When download side is not ready (recon-only modes such as `stream-up` / `packet-down` before implementation):
-
-- Return **`501 Not Implemented` immediately** (no long-poll, no session bind).
-- Log: `xhttp download side not implemented` (`reason=download_side_not_implemented`).
-- Emit `xhttp download reconnaissance` **before** reject.
-- Session manager is **not** touched on this path (no corrupt / half-open session).
-
-### Observed download-side semantics (baseline)
-
-| Field | Expected / observed baseline |
-|-------|------------------------------|
-| Download method | `GET` |
-| Download path | `/xhttp/{session}` (no seq suffix on download GET) |
-| Upload relation | Separate HTTP request(s); upload POST ack-only |
-| Body direction | Download bytes on **GET response body** (`server_to_client`) |
-| HTTP version | Official client uses **HTTP/2** on REALITY (`requires_h2: yes`) |
-| Session id | `path_segment:1` after configured base path |
-
-Re-run `./scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh` after changes; use `[xhttp download reconnaissance]` to confirm exact shape before implementing download streaming.
-
-### Proposed implementation plan (next PR, no XMUX)
-
-1. **Gate:** flip `xhttp_download_side_ready()` after recon report shows stable shape.
-2. **Download GET handler:** `GET /xhttp/{session}` → register bounded download receiver per session (reuse `bind_download_session` / `broadcast_download`).
-3. **Response streaming:** stream VLESS downstream bytes on GET response body; bounded mpsc + backpressure; no full-buffer.
-4. **Upload path unchanged:** `POST /xhttp/{session}/{seq}` ack-only; bridge reads upload side via existing bounded input.
-5. **Session lifecycle:** idle timeout + explicit close; download GET ends cleanly when session closes (no hang).
-6. **Modes:** enable for `packet-up` first; extend to `stream-up` / `auto`+`downloadSettings` once shapes match.
-7. **Explicit non-goals:** XMUX, `packet-down` mode semantics, query/header `sessionPlacement` until observed.
-8. **Verification:** live smoke `mode_packet_up: PASS`; `[xhttp download reconnaissance]` unchanged shape; curl 200 via SOCKS+HTTP.
-
-## Observed `packet-up` downstream policy (Xray 26.3.27 live smoke)
-
-Official client behavior (diagnostics only; session UUID redacted as `{session}`):
-
-| Leg | Method | Path | Body | Where client reads downstream |
-|-----|--------|------|------|-------------------------------|
-| Download | `GET` | `/xhttp/{session}` | empty | **response body** on the download GET (long-lived HTTP/2 stream) |
-| Upload | `POST` | `/xhttp/{session}/{seq}` | VLESS upload chunks | ack only (`200` empty body observed upstream); **not** duplex on upload |
-
-- Separate download side **observed**: standalone GET per session on independent REALITY/H2 connections (often before upload POST).
-- Downstream bytes are **not** returned on the upload POST response in observed behavior.
-
-### Runtime policy (this branch)
-
-- Config `mode: packet-up` parses and resolves to effective `packet-up`.
-- When `packet_up_download_side_ready()` is true (current branch):
-  - `GET /xhttp/{session}` binds download stream (`text/event-stream`, chunked HTTP/1.1 or HTTP/2 DATA).
-  - `POST /xhttp/{session}/{seq}` accepts upload body (HTTP/2 DATA or HTTP/1.1 `Content-Length` / `Transfer-Encoding: chunked`) and returns ack-only `200`.
-  - Limits: `scMaxEachPostBytes`, `scMaxBufferedPosts`, bounded input backpressure.
-  - Duplicate download GET on the same session returns `409 Conflict`.
-- `stream-up`, `packet-down`, and XMUX remain **`501 Not Implemented`** fail-fast.
-
-## Observed `packet-up` Request Model (Xray 26.3.27 live smoke)
-
-Captured via `./scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh` with official Xray client outbound `mode: "packet-up"`. Diagnostics log request metadata only; session UUID values in paths are redacted to `{session}` and payload bytes are never logged.
-
-### Packet-up observed
-
-| Field | Value |
-|-------|-------|
-| method | `GET` (download channel observed first); upload uses `POST` per upstream path suffix |
-| path | `/xhttp/{session}` for download; `/xhttp/{session}/{seq}` for upload (upstream + path parser) |
-| query keys | none on observed GET |
-| header names | browser-like set on GET: `accept`, `accept-encoding`, `accept-language`, `cache-control`, `dnt`, `pragma`, `priority`, `referer`, `sec-ch-ua*`, `sec-fetch-*`, `user-agent` |
-| session id source | `path_segment:1` — UUID after configured base path |
-| seq id source | `path_segment:2` on upload POST (not present on observed GET) |
-| body model | GET: empty; upload POST: streamed body (`content-length` or HTTP/1.1 chunked) |
-| separate download side observed | yes — standalone GET per session on independent REALITY connections |
-| implemented in this branch | **yes** — download GET + upload POST ack; HTTP/1.1 chunked upload supported |
-
-### First observed request shape (download GET)
-
-| Field | Observed value |
-|-------|----------------|
-| HTTP version | HTTP/2 |
-| Method | `GET` |
-| Path pattern | `/xhttp/{session}` (UUID suffix after configured base path) |
-| Query keys | none |
-| Header names | browser-like set: `accept`, `accept-encoding`, `accept-language`, `cache-control`, `dnt`, `pragma`, `priority`, `referer`, `sec-ch-ua*`, `sec-fetch-*`, `user-agent` |
-| `content-length` | absent |
-| `transfer-encoding` | absent |
-| Body chunk sizes | empty (no request body on observed GET) |
-
-### Session / sequence candidates
-
-| Candidate | Location in observed smoke | Notes |
-|-----------|---------------------------|-------|
-| Session id | `path_segment:1` | UUID appended after `/xhttp/` base path |
-| Seq id | not observed | No `seq`, `seqStr`, or related query/header keys seen on captured GET requests |
-
-### Separate download request?
-
-- Official client opened **two independent REALITY/TCP connections** in one curl attempt (`conn_id=1` and `conn_id=2`), each carrying one HTTP/2 GET to a different `/xhttp/{session}` path.
-- No follow-up HTTP/2 stream was observed on the same connection after the first GET (`request_index` stayed `0` per connection).
-- Interpretation: download side uses standalone GET request(s) per session, not `stream-one` duplex POST. Upload POST carries VLESS payload chunks with ack-only `200` response.
-
-### Server behavior (this branch)
-
-- Config parses tolerant for `packet-up`.
-- Runtime effective mode `packet-up` is **supported** when `packet_up_download_side_ready()`:
-  - HTTP/2 and HTTP/1.1 `GET /xhttp/{session}` and `POST /xhttp/{session}/{seq}` are handled on the accepted REALITY stream.
-  - Live smoke target: `mode_packet_up: PASS` with official Xray client over HTTP/2 (`scMaxEachPostBytes` in client/server `extra`).
-- `packet-down`, `stream-up`, and XMUX remain explicit runtime `501`.
+Live smoke still runs recon modes with `downloadSettings` where applicable and logs
+**`xhttp download reconnaissance`** (metadata only). For unsupported modes such as
+`stream-up` / `packet-down`, server returns **`501 Not Implemented`** immediately and
+emits reconnaissance before reject.
 
 ## Unsupported (not yet implemented)
 
-- `packet-down` and multi-request split upload/download beyond packet-up MVP.
-- XMUX behavior beyond tolerant config parsing and explicit runtime reject.
-- `seqStr` / alternate `sessionPlacement` (query/header) — only path suffix observed so far.
-- Chunked request body on **stream-one** HTTP/1.1 path (still `501`).
-- XUDP over XHTTP.
-- CDN bypass tuning beyond the basic HTTP/2 interop path.
-- Vision over XHTTP.
+- `stream-up`, `packet-down`, XMUX (runtime `501` / fail-fast)
+- XUDP over XHTTP
+- Vision over XHTTP (rejected at startup)
+- `seqStr` / alternate `sessionPlacement` (query/header) — only path suffix implemented
+- Chunked request body on **stream-one** HTTP/1.1 path (still `501`)
 
-## What a future PR still needs
+## Future work (non-goals for current baseline)
 
-1. **Packet-up download side** — enable `packet_up_download_side_ready()`, bounded GET response streaming, end-to-end live smoke PASS.
-2. **Live interop verification** — re-run live smoke with official Xray 26.3.27 client; capture upload POST shape once end-to-end relay works.
-3. **sessionPlacement variants** — query/header session id if observed in the wild.
-4. **HTTP/1 packet-up** — only if clients use it (observed client uses HTTP/2).
-5. **Download refinement** — long-poll semantics, padding, XMUX download reuse.
-6. **Packet-down** — separate mode; do not conflate with packet-up upload path.
+1. Official Xray **HTTP/1.1 origin** interop verification for packet-up chunked upload.
+2. `stream-up` / `packet-down` mode semantics beyond fail-fast recon.
+3. XMUX concurrency controls beyond tolerant parse + runtime reject.
+4. Query/header `sessionPlacement` variants if observed in the wild.
 
 ## Diagnostics tooling
 
 - Module: `src/transport/xhttp/diagnostics.rs`
-- Live smoke report sections:
-  - `[packet-up diagnostics]` / `packet_up_observed_request_shapes`
-  - `[xhttp download reconnaissance]` / download GET metadata
-- Re-run capture: `XHTTP_RUST_LOG=rust_xray::xhttp::diagnostics=warn ./scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh`
+- Live smoke report: `[xhttp download reconnaissance]`, `[packet-up diagnostics]`
+- Re-run: `XHTTP_RUST_LOG=rust_xray::transport::xhttp::diagnostics=warn ./scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh`

@@ -72,14 +72,25 @@ Pass/fail expectations vs upstream: [docs/compatibility-status.md](../../docs/co
 bash scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh
 ```
 
-- Hard gates: `stream-one`, `auto`, `packet-up` over HTTP/2 (must PASS).
-- HTTP/1.1 packet-up chunked upload:
-  - `h1_chunked_upload_unit_smoke` — lib tests (duplex)
-  - `h1_chunked_upload_live_or_origin_smoke` — low-level live TCP probe against `serve_xhttp_stream_one` (not REALITY-wrapped official Xray H1 origin)
-  - **official Xray H1 origin interop: NOT verified** (Xray 26.3.27 uses HTTP/2 for REALITY + XHTTP packet-up)
-- Soft/negative gates: `stream-up`, `packet-down`, XMUX remain unsupported (`501` / explicit unsupported logs).
+See **[scripts/live_xhttp_smoke/README.md](../live_xhttp_smoke/README.md)** and
+**[docs/xhttp-compat-notes.md](../../docs/xhttp-compat-notes.md)**.
 
-See [docs/xhttp-compat-notes.md](../../docs/xhttp-compat-notes.md).
+### Confirmed XHTTP smoke matrix
+
+| Check | Expected |
+|-------|----------|
+| `mode_default` | PASS |
+| `mode_auto` | PASS |
+| `mode_stream_one` | PASS |
+| `mode_packet_up` (HTTP/2, official Xray 26.3.27) | PASS |
+| `mode_auto_download` | PASS |
+| `mode_stream_up` | UNSUPPORTED |
+| `mode_packet_down` | UNSUPPORTED (expected client config parse fail) |
+| `h1_chunked_upload_unit_smoke` | PASS |
+
+Hard gates: all PASS rows above. HTTP/1.1 chunked upload is covered by
+`h1_chunked_upload_unit_smoke` (lib tests). **Official Xray H1 origin interop is
+not verified** (client uses HTTP/2 on REALITY + XHTTP packet-up).
 
 Optional environment variables for `run-live-smoke.sh`:
 

@@ -1,6 +1,6 @@
 # Live XHTTP Smoke
 
-Interop smoke for official Xray client -> `rust-xray` server:
+Interop smoke for official Xray client → `rust-xray` server:
 
 - VLESS
 - `network: "xhttp"`
@@ -21,10 +21,9 @@ Run from the repository root:
 3. Starts the official `xray` client with local SOCKS and HTTP inbounds.
 4. Runs `curl` through both local inbounds to an HTTPS target.
 5. Runs HTTP/1.1 packet-up chunked upload **unit smoke** (`cargo test --lib` subset).
-6. Runs HTTP/1.1 packet-up chunked upload **live TCP smoke** (`cargo test --test xhttp_h1_chunked_live_probe`).
-7. Writes `report.txt` with per-mode results and aggregate counters.
-8. Keeps `server-<mode>.log` and `client-<mode>.log`.
-9. Stops server/client processes after each mode and on exit.
+6. Writes `report.txt` with per-mode results and aggregate counters.
+7. Keeps `server-<mode>.log` and `client-<mode>.log`.
+8. Stops server/client processes after each mode and on exit.
 
 ## Requirements
 
@@ -33,35 +32,33 @@ Run from the repository root:
 - `curl`
 - `python3`
 
-## Mode matrix
+## Confirmed smoke matrix
 
-| Mode | Expected |
-|------|----------|
-| absent/default | PASS |
-| `auto` | PASS |
-| `stream-one` | PASS |
-| `packet-up` | PASS over HTTP/2 (official Xray client; must not hang) |
-| `stream-up` | UNSUPPORTED (must not hang) |
-| `auto-download` | PASS |
-| `packet-down` | UNSUPPORTED (client config parse fail expected) |
-| `h1_chunked_upload_unit_smoke` | PASS (lib duplex tests) |
-| `h1_chunked_upload_live_or_origin_smoke` | PASS (live TCP probe; **not** official Xray REALITY/H1 origin) |
+| Check | Expected |
+|-------|----------|
+| `mode_default` | PASS |
+| `mode_auto` | PASS |
+| `mode_stream_one` | PASS |
+| `mode_packet_up` | PASS (HTTP/2, official Xray 26.3.27) |
+| `mode_auto_download` | PASS |
+| `mode_stream_up` | UNSUPPORTED |
+| `mode_packet_down` | UNSUPPORTED (expected client config parse fail) |
+| `h1_chunked_upload_unit_smoke` | PASS |
 
-At least `default`, `auto`, `stream-one`, and `packet-up` must PASS for acceptance.
+Acceptance requires all rows above to match. Negative modes must not hang.
 
 ## HTTP/1.1 packet-up chunked upload
 
-Official Xray 26.3.27 uses **HTTP/2** for REALITY + XHTTP packet-up in live interop
-(`mode_packet_up: PASS`). Direct official-client HTTP/1.1 origin is **not verified**.
-
-This runner validates chunked upload via:
-
-| Gate | What it covers |
-|------|----------------|
-| `h1_chunked_upload_unit_smoke` | Lib unit tests over duplex (`serve_xhttp_stream_one`) |
-| `h1_chunked_upload_live_or_origin_smoke` | Integration tests over real `TcpStream` to `serve_xhttp_stream_one` (same HTTP/1 adapter as post-REALITY app data without H2 preface) |
+| Layer | Status |
+|-------|--------|
+| Unit smoke (`h1_chunked_upload_unit_smoke`) | **PASS** — lib tests over duplex |
+| Official Xray H1 origin interop | **Not verified** — Xray 26.3.27 uses HTTP/2 for REALITY + XHTTP packet-up |
 
 Report field: `official_xray_h1_origin_interop: NOT_VERIFIED`.
+
+Additional integration coverage exists in `tests/xhttp_h1_chunked_live_probe.rs`
+(TCP probe against `serve_xhttp_stream_one`); it is **not** part of this smoke
+acceptance matrix.
 
 ## Environment variables
 
@@ -97,7 +94,6 @@ mode_stream_up: PASS/UNSUPPORTED/FAIL
 mode_auto_download: PASS/UNSUPPORTED/FAIL
 mode_packet_down: UNSUPPORTED/FAIL
 h1_chunked_upload_unit_smoke: PASS/FAIL
-h1_chunked_upload_live_or_origin_smoke: PASS/FAIL
 official_xray_h1_origin_interop: NOT_VERIFIED
 curl_checks_passed:
 curl_checks_failed:
@@ -127,18 +123,11 @@ Failure classifications include:
 - `${XHTTP_WORK_DIR}/server-<mode>.log`
 - `${XHTTP_WORK_DIR}/client-<mode>.log`
 - `${XHTTP_WORK_DIR}/h1-chunked-unit-smoke.log`
-- `${XHTTP_WORK_DIR}/h1-chunked-live-smoke.log`
 
 Unsupported XHTTP modes should fail fast during rust-xray runtime instead of hanging the smoke run.
 
-### `packet-up` / download-side diagnostics
+### Download-side diagnostics
 
-The smoke runs recon modes (`packet-up`, `stream-up`, `auto-download`, `packet-down`) with
-`downloadSettings` where applicable. Server logs **`xhttp download reconnaissance`** (metadata
-only; no payload bytes). Report fields under **`[xhttp download reconnaissance]`**:
-
-- `download_request_observed`, `download_method`, `download_path`
-- `download_query_keys`, `download_header_names`, `session_id_source`
-- `http_version`, `requires_h2`
-
-Use with `docs/xhttp-compat-notes.md` when extending download-side behavior.
+Recon modes (`packet-up`, `stream-up`, `auto-download`, `packet-down`) with
+`downloadSettings` where applicable log **`xhttp download reconnaissance`** (metadata
+only). See `docs/xhttp-compat-notes.md`.

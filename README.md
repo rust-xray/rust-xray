@@ -34,8 +34,8 @@ connection.
 
 ### Experimental
 
-- **REALITY + XHTTP accepted path (experimental MVP):** server-side HTTP/1.1 / HTTP/2 `stream-one` POST → VLESS over the accepted REALITY TLS stream; official Xray 26.3.27 interop smoke passes for default / `auto` / `stream-one`
-- **XHTTP `packet-up` (experimental):** server-side supported when live smoke passes — separate GET download (`text/event-stream`) + POST upload ack; `scMaxEachPostBytes` / `scMaxBufferedPosts` enforced
+- **REALITY + XHTTP accepted path (experimental MVP):** server-side HTTP/1.1 / HTTP/2 `stream-one` and `packet-up` over accepted REALITY TLS stream; official Xray 26.3.27 interop smoke PASS for default / `auto` / `stream-one` / `packet-up` / `auto-download` (HTTP/2)
+- **XHTTP `packet-up` (experimental supported):** GET download + POST upload ack; live smoke PASS (`mode_packet_up`); HTTP/1.1 chunked upload unit smoke PASS; official Xray H1 interop **not verified**
 - **XHTTP unsupported / gated:** `stream-up`, `packet-down`, XMUX — config may parse; runtime returns `501` / fail-fast
 - **Vision over XHTTP:** unsupported (explicitly rejected at startup)
 - **VLESS Mux (Happ baseline):** REALITY → TLS 1.3 → VLESS auth → `command=Mux` → mux session start (live smoke validated)
@@ -87,9 +87,10 @@ Validated scenarios include:
 - Cipher suite smoke (AES128 / AES256 / ChaCha20)
 - ML-DSA-65 baseline (4/4 checks when enabled in fixture)
 - Happ baseline: REALITY/Vision/Mux + UDP DNS `1.1.1.1:53` (`PASS happ reality vision mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`)
-- Negative transport configs (`grpc`, `ws` + REALITY rejected at startup; `xhttp` / `splithttp` accepted for experimental `stream-one` only)
+- Negative transport configs (`grpc`, `ws` + REALITY rejected at startup; `xhttp` / `splithttp` accepted for experimental XHTTP)
 
 Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/README.md)**,
+**[scripts/live_xhttp_smoke/README.md](scripts/live_xhttp_smoke/README.md)**,
 **[docs/compatibility-status.md](docs/compatibility-status.md)**.
 
 ### Remaining gaps (see compatibility doc)
