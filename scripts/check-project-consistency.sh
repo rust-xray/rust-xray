@@ -75,18 +75,18 @@ check_xhttp_bridge_only_in_transport_xhttp() {
 
 check_packet_up_status_consistent() {
   grep -q 'pub fn packet_up_download_side_ready() -> bool' src/transport/xhttp/mode.rs || return 1
-  grep -A4 'pub fn packet_up_download_side_ready() -> bool' src/transport/xhttp/mode.rs | grep -q 'false' || return 1
+  grep -A4 'pub fn packet_up_download_side_ready() -> bool' src/transport/xhttp/mode.rs | grep -q 'true' || return 1
   grep -q 'packet_up_download_side_not_implemented' src/transport/xhttp/mode.rs || return 1
-  grep -qi 'packet-up.*skeleton\|packet-up.*runtime unsupported\|runtime is .*unsupported\|PARTIAL_UNSUPPORTED' docs/xhttp-compat-notes.md || return 1
+  grep -qi 'text/event-stream' docs/xhttp-compat-notes.md || return 1
   grep -q '501 Not Implemented' docs/xhttp-compat-notes.md || return 1
-  grep -q 'No VLESS bridge' docs/xhttp-compat-notes.md || return 1
-  ! grep -i 'packet-up.*supported' docs/xhttp-compat-notes.md | grep -vi 'unsupported'
+  grep -qi 'stream-up.*unsupported\|packet-down.*unsupported' docs/xhttp-compat-notes.md || return 1
 }
 
 check_docs_xhttp_status_consistent() {
   grep -Eiq 'stream-one.*experimental|experimental.*stream-one' README.md docs/compatibility-status.md || return 1
   grep -Eiq 'REALITY \+ XHTTP|XHTTP \+ REALITY' README.md docs/compatibility-status.md || return 1
-  grep -Eiq 'packet-up.*unsupported|unsupported.*packet-up|unsupported / gated.*packet-up|packet-up.*gated' README.md docs/compatibility-status.md || return 1
+  grep -Eiq 'packet-up.*supported|supported.*packet-up|packet-up server-side supported' README.md docs/compatibility-status.md || return 1
+  grep -Eiq 'stream-up.*unsupported|packet-down.*unsupported|unsupported / gated.*stream-up|unsupported / gated.*packet-down' README.md docs/compatibility-status.md || return 1
   grep -Eiq 'Vision over XHTTP.*unsupported|Vision over XHTTP' README.md docs/compatibility-status.md || return 1
   grep -Eiq 'grpc.*ws.*REALITY rejected|grpc.*ws.*rejected at startup' README.md || return 1
   ! sed -n '/### Not yet implemented/,/^### /p' README.md | grep -Eiq '(^|[[:space:]])xhttp($|[[:space:]]|:)' || return 1

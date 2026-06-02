@@ -35,7 +35,8 @@ connection.
 ### Experimental
 
 - **REALITY + XHTTP accepted path (experimental MVP):** server-side HTTP/1.1 / HTTP/2 `stream-one` POST → VLESS over the accepted REALITY TLS stream; official Xray 26.3.27 interop smoke passes for default / `auto` / `stream-one`
-- **XHTTP unsupported / gated:** `packet-up`, `stream-up`, `packet-down`, XMUX — config may parse; runtime is gated (`501` / fail-fast until download-side PR)
+- **XHTTP `packet-up` (experimental):** server-side supported when live smoke passes — separate GET download (`text/event-stream`) + POST upload ack; `scMaxEachPostBytes` / `scMaxBufferedPosts` enforced
+- **XHTTP unsupported / gated:** `stream-up`, `packet-down`, XMUX — config may parse; runtime returns `501` / fail-fast
 - **Vision over XHTTP:** unsupported (explicitly rejected at startup)
 - **VLESS Mux (Happ baseline):** REALITY → TLS 1.3 → VLESS auth → `command=Mux` → mux session start (live smoke validated)
 - **UDP DNS over VLESS Mux (port 53):** numeric `:53` targets (e.g. `1.1.1.1:53`) — query forwarded, response received, mux UDP response frame sent

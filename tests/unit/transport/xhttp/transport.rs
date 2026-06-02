@@ -1,4 +1,5 @@
 use super::*;
+use crate::transport::xhttp::packet_up::{shared_packet_up_manager, PacketUpLimits};
 use crate::vless::VlessUserManager;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -137,69 +138,106 @@ async fn packet_down_returns_unsupported_without_bridge() {
 }
 
 #[tokio::test]
-async fn packet_up_http1_returns_unsupported_without_bridge() {
+async fn packet_up_http1_post_creates_session_and_returns_ok() {
     let settings = XHttpSettings {
         path: "/xhttp".to_string(),
         mode: Some("packet-up".to_string()),
         ..XHttpSettings::default()
     };
-    let (response, outbound_connected) =
-        run_post_with_outbound_probe(settings, "/xhttp", "example.com").await;
+    let response = run_post(settings, "/xhttp/session-a/0", "example.com").await;
     let body = String::from_utf8_lossy(&response);
-    assert!(body.starts_with("HTTP/1.1 501 Not Implemented"), "{body}");
-    assert!(!outbound_connected);
+    assert!(body.starts_with("HTTP/1.1 200 OK"), "{body}");
 }
 
 #[tokio::test]
-async fn packet_up_http1_unsupported_response_is_explicit_501() {
+async fn packet_up_http1_get_without_session_is_rejected() {
     let settings = XHttpSettings {
         path: "/xhttp".to_string(),
         mode: Some("packet-up".to_string()),
         ..XHttpSettings::default()
     };
-    let response = run_post(settings, "/xhttp", "example.com").await;
+    let response = run_request(
+        settings,
+        b"GET /xhttp HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 404 Not Found"));
+}
+
+#[tokio::test]
+async fn packet_up_http1_get_attaches_to_session() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("packet-up".to_string()),
+        ..XHttpSettings::default()
+    };
+    let manager = shared_packet_up_manager();
+    manager
+        .begin_upload_packet(
+            "session-a",
+            Some(0),
+            PacketUpLimits::from_settings(&settings),
+        )
+        .expect("create session");
+    let response = run_request(
+        settings,
+        b"GET /xhttp/session-a HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
     let body = String::from_utf8_lossy(&response);
-    assert!(body.starts_with("HTTP/1.1 501 Not Implemented"), "{body}");
-    assert!(body.contains("Content-Length: 0"));
+    assert!(body.contains("Content-Type: text/event-stream"), "{body}");
+    assert!(body.contains("Transfer-Encoding: chunked"), "{body}");
+}
+
+#[tokio::test]
+async fn packet_up_duplicate_download_get_is_rejected() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("packet-up".to_string()),
+        ..XHttpSettings::default()
+    };
+    let manager = shared_packet_up_manager();
+    let _download_rx = manager
+        .bind_download_session("session-dup")
+        .expect("first download bind");
+    let response = run_request(
+        settings,
+        b"GET /xhttp/session-dup HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 409 Conflict"));
+}
+
+#[tokio::test]
+async fn packet_up_oversized_post_is_rejected() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("packet-up".to_string()),
+        extra: [("scMaxEachPostBytes".to_string(), serde_json::json!(16))].into(),
+        ..XHttpSettings::default()
+    };
+    let request = format!(
+        "POST /xhttp/session-big/0 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 32\r\n\r\n{}",
+        "x".repeat(32)
+    );
+    let response = run_request(settings, request.into_bytes()).await;
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 413 Payload Too Large"));
 }
 
 #[test]
-fn packet_up_h2_is_runtime_unsupported_until_download_side() {
+fn packet_up_h2_is_supported_when_download_side_ready() {
     use crate::transport::xhttp::{packet_up_download_side_ready, EffectiveXHttpMode};
     let settings = XHttpSettings {
         path: "/xhttp".to_string(),
         mode: Some("packet-up".to_string()),
         ..XHttpSettings::default()
     };
-    assert!(!packet_up_download_side_ready());
+    assert!(packet_up_download_side_ready());
     assert_eq!(
         resolve_xhttp_mode_for_settings(&settings, TransportSecurity::Reality).unwrap(),
         EffectiveXHttpMode::PacketUp
     );
-    assert_eq!(
-        xhttp_runtime_unsupported_reason(&settings, EffectiveXHttpMode::PacketUp),
-        Some("packet_up_download_side_not_implemented")
-    );
-}
-
-#[tokio::test]
-async fn packet_up_http1_rejects_quickly_without_bridge() {
-    let settings = XHttpSettings {
-        path: "/xhttp".to_string(),
-        mode: Some("packet-up".to_string()),
-        ..XHttpSettings::default()
-    };
-    let started = std::time::Instant::now();
-    let (response, outbound_connected) =
-        run_post_with_outbound_probe(settings, "/xhttp/session-id", "example.com").await;
-    let body = String::from_utf8_lossy(&response);
-    assert!(body.starts_with("HTTP/1.1 501 Not Implemented"), "{body}");
-    assert!(!outbound_connected);
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(2),
-        "packet-up reject took too long: {:?}",
-        started.elapsed()
-    );
+    assert!(xhttp_runtime_unsupported_reason(&settings, EffectiveXHttpMode::PacketUp).is_none());
 }
 
 #[tokio::test]

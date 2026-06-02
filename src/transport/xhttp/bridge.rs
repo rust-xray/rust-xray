@@ -624,6 +624,21 @@ pub(crate) async fn h2_send_chunk(
     Ok(())
 }
 
+pub(crate) async fn write_http1_chunked_chunk<S: AsyncWrite + Unpin>(
+    writer: &mut S,
+    chunk: &[u8],
+) -> io::Result<()> {
+    if chunk.is_empty() {
+        writer.write_all(b"0\r\n\r\n").await?;
+    } else {
+        let header = format!("{:x}\r\n", chunk.len());
+        writer.write_all(header.as_bytes()).await?;
+        writer.write_all(chunk).await?;
+        writer.write_all(b"\r\n").await?;
+    }
+    writer.flush().await
+}
+
 async fn write_chunked_with_timeout<W>(
     writer: &Arc<Mutex<W>>,
     chunk: &[u8],

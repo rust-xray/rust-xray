@@ -99,10 +99,8 @@ pub fn resolve_xhttp_mode(
 }
 
 /// Official Xray `packet-up` clients use a separate download GET (`/xhttp/{session}`).
-/// Upload-side plumbing exists in-tree, but end-to-end downstream is gated here until
-/// the download-side PR lands.
 pub fn packet_up_download_side_ready() -> bool {
-    false
+    true
 }
 
 /// Gated switch for end-to-end download-side interop (GET response streaming).
@@ -111,7 +109,11 @@ pub fn xhttp_download_side_ready() -> bool {
 }
 
 pub fn effective_xhttp_mode_is_supported(mode: EffectiveXHttpMode) -> bool {
-    matches!(mode, EffectiveXHttpMode::StreamOne)
+    match mode {
+        EffectiveXHttpMode::StreamOne => true,
+        EffectiveXHttpMode::PacketUp => packet_up_download_side_ready(),
+        EffectiveXHttpMode::StreamUp | EffectiveXHttpMode::PacketDown => false,
+    }
 }
 
 pub fn effective_xhttp_mode_unsupported_reason(mode: EffectiveXHttpMode) -> Option<&'static str> {

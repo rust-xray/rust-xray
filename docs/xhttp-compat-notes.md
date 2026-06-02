@@ -15,9 +15,9 @@ Scope: server-side VLESS inbound transport MVP, cross-checked against Xray-core 
 ## MVP Mapping
 
 - Accepted config networks: `xhttp`, `splithttp`, and case-insensitive `splitHTTP`.
-- Implemented effective modes: `stream-one`.
+- Implemented effective modes: `stream-one`, `packet-up` (download GET + upload POST when `packet_up_download_side_ready()`).
 - Accepted alias mode: `auto`, mapped conservatively to `stream-one`.
-- `packet-up` config parses; packet-up remains skeleton/recon-only and runtime is PARTIAL_UNSUPPORTED until download-side PR (`packet_up_download_side_ready()`).
+- `stream-up`, `packet-down`, and XMUX remain unsupported (`501` / fail-fast).
 - HTTP method: POST only for `stream-one`.
 - Request body maps to the byte stream read by the existing VLESS inbound parser.
 - Response body maps to bytes written by the existing VLESS inbound handler.
@@ -46,9 +46,17 @@ Server diagnostics event: **`xhttp download reconnaissance`** (`src/transport/xh
 
 Smoke report section **`[xhttp download reconnaissance]`** aggregates the last observed download GET across recon modes.
 
-### Download GET runtime policy (recon phase)
+### Download GET runtime policy
 
-When a request is classified as **download leg** and `xhttp_download_side_ready()` is false:
+When `xhttp_download_side_ready()` is true (packet-up end-to-end path):
+
+- `GET /xhttp/{session}` binds a bounded download receiver and streams VLESS downstream bytes on the response body.
+- Response headers include `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no`, and CORS allow headers.
+- HTTP/1.1 uses chunked transfer encoding on the download response.
+- Duplicate download GET on the same session returns `409 Conflict`.
+- Session idle timeout + explicit close still apply; disconnect ends the download stream cleanly.
+
+When download side is not ready (recon-only modes such as `stream-up` / `packet-down` before implementation):
 
 - Return **`501 Not Implemented` immediately** (no long-poll, no session bind).
 - Log: `xhttp download side not implemented` (`reason=download_side_not_implemented`).

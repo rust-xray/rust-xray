@@ -58,7 +58,8 @@ connection closes (by design).
 | Happ Proxy Utility baseline | **Experimental working** | REALITY/VLESS/Vision/Mux path reaches mux session; UDP DNS inside Mux works for numeric `:53` (live smoke validated) |
 | ML-DSA-65 baseline | **Experimental** | Valid `mldsa65Seed` accepted; invalid seed rejected at startup; raw Vision smoke passes; no cargo feature gate (see [baseline doc](./reality-mldsa65-runtime-baseline.md)) |
 | REALITY + XHTTP accepted path | **Experimental MVP** | Server-side HTTP/1.1 / HTTP/2 `stream-one` POST over accepted REALITY TLS stream; official Xray 26.3.27 interop smoke passes for default, `mode=auto`, and `mode=stream-one` over HTTP/2; path/Host validation; VLESS `flow=""` only |
-| XHTTP `packet-up` / `stream-up` / `packet-down` / XMUX | **Unsupported / gated** | Config may parse; runtime gated (`501` / fail-fast until download-side PR) |
+| XHTTP `packet-up` | **Experimental supported** | Separate GET download (`text/event-stream`, SSE headers) + POST upload ack; bounded download channel; `scMaxEachPostBytes` / `scMaxBufferedPosts`; live smoke target: PASS with official Xray client over HTTP/2 |
+| XHTTP `stream-up` / `packet-down` / XMUX | **Unsupported / gated** | Config may parse; runtime gated (`501` / fail-fast) |
 | Vision over XHTTP | **Unsupported** | Explicitly rejected at startup (`flow="xtls-rprx-vision"` over XHTTP) |
 
 **VLESS Mux wording (accurate):** not full Xray-core Mux.Cool parity. The Happ
@@ -96,7 +97,7 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | FakeDNS | Not implemented |
 | DNS inbound / dokodemo-door hijack | Not implemented |
 | Full Xray DNS module compatibility | Not implemented |
-| XHTTP `packet-up` / `stream-up` / `packet-down` / XMUX | Unsupported / gated (config parses; runtime fail-fast `501` until download-side PR) |
+| XHTTP `stream-up` / `packet-down` / XMUX | Unsupported / gated (config parses; runtime fail-fast `501`) |
 | XHTTP chunked upload / XUDP | Not implemented |
 | REALITY over gRPC / WebSocket runtime | Not implemented (configs rejected at startup) |
 | DoH through outbound | Not implemented |

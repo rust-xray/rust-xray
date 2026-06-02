@@ -66,6 +66,18 @@ and curl status summary.
 
 Pass/fail expectations vs upstream: [docs/compatibility-status.md](../../docs/compatibility-status.md).
 
+**XHTTP transport smoke** (separate runner, does not replace this REALITY suite):
+
+```bash
+bash scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh
+```
+
+- Hard gates: `stream-one`, `auto` (must PASS).
+- `packet-up` over HTTP/2: PASS when download-side interop is enabled (official Xray client `mode=packet-up`).
+- Soft/negative gates: `stream-up`, `packet-down`, XMUX remain unsupported (`501` / explicit unsupported logs).
+
+See [docs/xhttp-compat-notes.md](../../docs/xhttp-compat-notes.md).
+
 Optional environment variables for `run-live-smoke.sh`:
 
 | Variable | Default | Purpose |

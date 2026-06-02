@@ -3,6 +3,13 @@ use std::thread;
 use std::time::Duration as StdDuration;
 use tokio::io::AsyncReadExt;
 
+fn test_limits() -> PacketUpLimits {
+    PacketUpLimits {
+        max_each_post_bytes: 1_000_000,
+        max_buffered_posts: 30,
+    }
+}
+
 async fn take_reader_from_launch(launch: PacketUpBridgeLaunch) -> PacketUpSessionInputReader {
     launch.reader
 }
@@ -11,13 +18,13 @@ async fn take_reader_from_launch(launch: PacketUpBridgeLaunch) -> PacketUpSessio
 fn first_packet_creates_session_second_reuses() {
     let manager = XHttpPacketUpManager::for_test(std::time::Duration::from_secs(30), 8);
     let first = manager
-        .begin_upload_packet("session-a", Some(0))
+        .begin_upload_packet("session-a", Some(0), test_limits())
         .expect("first");
     assert_eq!(first.session_outcome, XHttpSessionEnsureOutcome::Created);
     assert_eq!(manager.meta_session_count(), 1);
 
     let second = manager
-        .begin_upload_packet("session-a", Some(1))
+        .begin_upload_packet("session-a", Some(1), test_limits())
         .expect("second");
     assert_eq!(second.session_outcome, XHttpSessionEnsureOutcome::Reused);
     assert_eq!(manager.meta_session_count(), 1);
@@ -31,21 +38,21 @@ async fn multiple_packet_bodies_form_continuous_input_stream() {
         64 * 1024,
         8,
     );
-    let p0 = manager
-        .begin_upload_packet("session-a", Some(0))
+    let mut p0 = manager
+        .begin_upload_packet("session-a", Some(0), test_limits())
         .expect("p0");
     let launch = manager
-        .append_upload_chunk(&p0, Bytes::from_static(b"hel"))
+        .append_upload_chunk(&mut p0, Bytes::from_static(b"hel"))
         .expect("c0")
         .expect("bridge");
     manager.commit_upload_packet(&p0).expect("commit0");
     manager.finish_upload_packet("session-a");
 
-    let p1 = manager
-        .begin_upload_packet("session-a", Some(1))
+    let mut p1 = manager
+        .begin_upload_packet("session-a", Some(1), test_limits())
         .expect("p1");
     manager
-        .append_upload_chunk(&p1, Bytes::from_static(b"lo"))
+        .append_upload_chunk(&mut p1, Bytes::from_static(b"lo"))
         .expect("c1");
     manager.commit_upload_packet(&p1).expect("commit1");
     manager.finish_upload_packet("session-a");
@@ -66,21 +73,21 @@ async fn per_request_eof_does_not_close_session() {
         64 * 1024,
         8,
     );
-    let p0 = manager
-        .begin_upload_packet("session-a", Some(0))
+    let mut p0 = manager
+        .begin_upload_packet("session-a", Some(0), test_limits())
         .expect("p0");
     let bridge_on_append = manager
-        .append_upload_chunk(&p0, Bytes::from_static(b"aa"))
+        .append_upload_chunk(&mut p0, Bytes::from_static(b"aa"))
         .expect("append");
     manager.commit_upload_packet(&p0).expect("commit");
     manager.finish_upload_packet("session-a");
     assert!(!manager.session_input_closed("session-a"));
 
-    let p1 = manager
-        .begin_upload_packet("session-a", Some(1))
+    let mut p1 = manager
+        .begin_upload_packet("session-a", Some(1), test_limits())
         .expect("p1");
     manager
-        .append_upload_chunk(&p1, Bytes::from_static(b"bb"))
+        .append_upload_chunk(&mut p1, Bytes::from_static(b"bb"))
         .expect("append2");
     manager.commit_upload_packet(&p1).expect("commit2");
     manager.finish_upload_packet("session-a");
@@ -97,7 +104,7 @@ fn idle_timeout_closes_session() {
         8,
     );
     manager
-        .begin_upload_packet("session-a", Some(0))
+        .begin_upload_packet("session-a", Some(0), test_limits())
         .expect("begin");
     thread::sleep(StdDuration::from_millis(30));
     let removed = manager.cleanup_idle_sessions();
@@ -109,18 +116,18 @@ fn idle_timeout_closes_session() {
 async fn backpressure_is_bounded() {
     let manager =
         XHttpPacketUpManager::for_test_with_input(std::time::Duration::from_secs(30), 8, 64, 2);
-    let handle = manager
-        .begin_upload_packet("session-a", Some(0))
+    let mut handle = manager
+        .begin_upload_packet("session-a", Some(0), test_limits())
         .expect("begin");
     let _launch = manager
-        .append_upload_chunk(&handle, Bytes::from(vec![0u8; 32]))
+        .append_upload_chunk(&mut handle, Bytes::from(vec![0u8; 32]))
         .expect("chunk1")
         .expect("bridge");
     manager
-        .append_upload_chunk(&handle, Bytes::from(vec![0u8; 32]))
+        .append_upload_chunk(&mut handle, Bytes::from(vec![0u8; 32]))
         .expect("chunk2");
     assert!(matches!(
-        manager.append_upload_chunk(&handle, Bytes::from(vec![0u8; 16])),
+        manager.append_upload_chunk(&mut handle, Bytes::from(vec![0u8; 16])),
         Err(PacketUpUploadError::Backpressure)
     ));
 }
@@ -133,22 +140,22 @@ async fn vless_bridge_starts_once_per_session() {
         64 * 1024,
         8,
     );
-    let first = manager
-        .begin_upload_packet("session-a", Some(0))
+    let mut first = manager
+        .begin_upload_packet("session-a", Some(0), test_limits())
         .expect("begin");
     let bridge_on_first_append = manager
-        .append_upload_chunk(&first, Bytes::from_static(b"a"))
+        .append_upload_chunk(&mut first, Bytes::from_static(b"a"))
         .expect("append");
     let outcome = manager.commit_upload_packet(&first).expect("commit");
     assert!(bridge_on_first_append.is_some());
     assert!(outcome.bridge_launch.is_none());
     assert!(manager.bridge_started_for("session-a"));
 
-    let second = manager
-        .begin_upload_packet("session-a", Some(1))
+    let mut second = manager
+        .begin_upload_packet("session-a", Some(1), test_limits())
         .expect("begin2");
     manager
-        .append_upload_chunk(&second, Bytes::from_static(b"b"))
+        .append_upload_chunk(&mut second, Bytes::from_static(b"b"))
         .expect("append2");
     let outcome = manager.commit_upload_packet(&second).expect("commit2");
     assert!(outcome.bridge_launch.is_none());
@@ -162,19 +169,19 @@ async fn body_chunks_appended_in_seq_order() {
         64 * 1024,
         8,
     );
-    let seq1 = manager
-        .begin_upload_packet("session-a", Some(1))
+    let mut seq1 = manager
+        .begin_upload_packet("session-a", Some(1), test_limits())
         .expect("begin1");
     manager
-        .append_upload_chunk(&seq1, Bytes::from_static(b"b"))
+        .append_upload_chunk(&mut seq1, Bytes::from_static(b"b"))
         .expect("append1");
     manager.commit_upload_packet(&seq1).expect("commit1");
 
-    let seq0 = manager
-        .begin_upload_packet("session-a", Some(0))
+    let mut seq0 = manager
+        .begin_upload_packet("session-a", Some(0), test_limits())
         .expect("begin0");
     let launch = manager
-        .append_upload_chunk(&seq0, Bytes::from_static(b"a"))
+        .append_upload_chunk(&mut seq0, Bytes::from_static(b"a"))
         .expect("append0")
         .expect("bridge");
     manager.commit_upload_packet(&seq0).expect("commit0");
@@ -193,11 +200,11 @@ async fn vless_handler_close_cleans_session() {
         64 * 1024,
         8,
     );
-    let handle = manager
-        .begin_upload_packet("session-a", Some(0))
+    let mut handle = manager
+        .begin_upload_packet("session-a", Some(0), test_limits())
         .expect("begin");
     let launch = manager
-        .append_upload_chunk(&handle, Bytes::from_static(b"x"))
+        .append_upload_chunk(&mut handle, Bytes::from_static(b"x"))
         .expect("append")
         .expect("launch");
     manager.commit_upload_packet(&handle).expect("commit");
@@ -207,6 +214,49 @@ async fn vless_handler_close_cleans_session() {
 }
 
 #[tokio::test]
+async fn buffered_posts_limit_is_enforced() {
+    let manager = XHttpPacketUpManager::for_test_with_input(
+        std::time::Duration::from_secs(30),
+        8,
+        64 * 1024,
+        8,
+    );
+    let limits = PacketUpLimits {
+        max_each_post_bytes: 1_000_000,
+        max_buffered_posts: 1,
+    };
+    let _ = manager
+        .begin_upload_packet("session-a", Some(0), limits)
+        .expect("seq0");
+    let _ = manager
+        .begin_upload_packet("session-a", Some(2), limits)
+        .expect("seq2");
+    let err = manager
+        .begin_upload_packet("session-a", Some(3), limits)
+        .unwrap_err();
+    assert_eq!(err, XHttpSessionError::MaxSessionsReached);
+}
+
+#[tokio::test]
+async fn download_bind_and_broadcast_delivers_bytes() {
+    let manager = XHttpPacketUpManager::for_test(std::time::Duration::from_secs(30), 8);
+    let runtime = manager.get_or_create_runtime("session-a");
+    let mut rx = manager.bind_download_session("session-a").expect("bind");
+    broadcast_download(&runtime, Bytes::from_static(b"down"));
+    let chunk = rx.recv().await.expect("chunk");
+    assert_eq!(&chunk[..], b"down");
+}
+
+#[tokio::test]
+async fn disconnect_cleans_download_listener() {
+    let manager = XHttpPacketUpManager::for_test(std::time::Duration::from_secs(30), 8);
+    let _ = manager.bind_download_session("session-a").expect("bind");
+    manager.detach_download_session("session-a");
+    let _ = manager
+        .bind_download_session("session-a")
+        .expect("rebind after detach");
+}
+#[tokio::test]
 async fn large_packet_stream_does_not_full_buffer() {
     let manager = XHttpPacketUpManager::for_test_with_input(
         std::time::Duration::from_secs(30),
@@ -214,11 +264,11 @@ async fn large_packet_stream_does_not_full_buffer() {
         8 * 1024,
         4,
     );
-    let handle = manager
-        .begin_upload_packet("session-a", Some(0))
+    let mut handle = manager
+        .begin_upload_packet("session-a", Some(0), test_limits())
         .expect("begin");
     let launch = manager
-        .append_upload_chunk(&handle, Bytes::from(vec![0xCDu8; 512]))
+        .append_upload_chunk(&mut handle, Bytes::from(vec![0xCDu8; 512]))
         .expect("first chunk")
         .expect("bridge");
     let mut reader = take_reader_from_launch(launch).await;
@@ -238,7 +288,7 @@ async fn large_packet_stream_does_not_full_buffer() {
 
     for _ in 1..64 {
         loop {
-            match manager.append_upload_chunk(&handle, Bytes::from(vec![0xCDu8; 512])) {
+            match manager.append_upload_chunk(&mut handle, Bytes::from(vec![0xCDu8; 512])) {
                 Ok(_) => break,
                 Err(PacketUpUploadError::Backpressure) => {
                     tokio::task::yield_now().await;

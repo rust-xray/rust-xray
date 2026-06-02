@@ -1,6 +1,4 @@
-//! Packet-up upload/session skeleton.
-//!
-//! Not enabled for end-to-end runtime until download side is implemented.
+//! Packet-up upload/session runtime with download-side streaming.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -22,6 +20,21 @@ use crate::vless::VlessUserManager;
 
 const PACKET_UP_DOWNLOAD_CHANNEL: usize = 32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PacketUpLimits {
+    pub max_each_post_bytes: u64,
+    pub max_buffered_posts: usize,
+}
+
+impl PacketUpLimits {
+    pub fn from_settings(settings: &crate::config::XHttpSettings) -> Self {
+        Self {
+            max_each_post_bytes: settings.sc_max_each_post_bytes(),
+            max_buffered_posts: settings.sc_max_buffered_posts(),
+        }
+    }
+}
+
 pub struct XHttpPacketUpManager {
     sessions: Mutex<HashMap<String, Arc<PacketUpSessionRuntime>>>,
     meta: XHttpSessionManager,
@@ -34,10 +47,13 @@ pub struct PacketUpBridgeLaunch {
     pub runtime: Arc<PacketUpSessionRuntime>,
 }
 
+#[derive(Debug)]
 pub struct PacketUpUploadHandle {
     pub session_id: String,
     pub seq: u64,
     pub session_outcome: XHttpSessionEnsureOutcome,
+    limits: PacketUpLimits,
+    post_bytes: u64,
 }
 
 pub struct PacketUpCommitOutcome {
@@ -59,6 +75,7 @@ pub struct PacketUpSessionRuntime {
     next_arrival_seq: AtomicU64,
     bridge_started: AtomicBool,
     active_uploads: AtomicU32,
+    out_of_order_posts: AtomicU32,
     bytes_streamed: AtomicU64,
     download_listeners: Mutex<Vec<mpsc::Sender<Bytes>>>,
 }
@@ -113,6 +130,7 @@ impl XHttpPacketUpManager {
         &self,
         session_id: &str,
         seq: Option<u64>,
+        limits: PacketUpLimits,
     ) -> Result<PacketUpUploadHandle, XHttpSessionError> {
         let session_outcome = self
             .meta
@@ -128,24 +146,48 @@ impl XHttpPacketUpManager {
 
         let runtime = self.get_or_create_runtime(session_id);
         runtime.active_uploads.fetch_add(1, Ordering::SeqCst);
+        let expected = runtime.next_expected_seq.load(Ordering::SeqCst);
         let resolved_seq =
             seq.unwrap_or_else(|| runtime.next_arrival_seq.fetch_add(1, Ordering::SeqCst));
+        if resolved_seq > expected {
+            let buffered = runtime
+                .seq_buffers
+                .lock()
+                .expect("packet-up seq buffers lock poisoned")
+                .len()
+                + runtime.out_of_order_posts.load(Ordering::SeqCst) as usize;
+            if buffered >= limits.max_buffered_posts {
+                runtime.active_uploads.fetch_sub(1, Ordering::SeqCst);
+                return Err(XHttpSessionError::MaxSessionsReached);
+            }
+            runtime.out_of_order_posts.fetch_add(1, Ordering::SeqCst);
+        }
 
         Ok(PacketUpUploadHandle {
             session_id: session_id.to_string(),
             seq: resolved_seq,
             session_outcome,
+            limits,
+            post_bytes: 0,
         })
     }
 
     pub fn append_upload_chunk(
         &self,
-        handle: &PacketUpUploadHandle,
+        handle: &mut PacketUpUploadHandle,
         chunk: Bytes,
     ) -> Result<Option<PacketUpBridgeLaunch>, PacketUpUploadError> {
         if chunk.is_empty() {
             return Ok(None);
         }
+        let new_total = handle.post_bytes.saturating_add(chunk.len() as u64);
+        if new_total > handle.limits.max_each_post_bytes {
+            return Err(PacketUpUploadError::PostTooLarge {
+                max_bytes: handle.limits.max_each_post_bytes,
+                received: new_total,
+            });
+        }
+        handle.post_bytes = new_total;
         let runtime = self.get_or_create_runtime(&handle.session_id);
         self.touch_session(&handle.session_id);
         let expected = runtime.next_expected_seq.load(Ordering::SeqCst);
@@ -196,6 +238,7 @@ impl XHttpPacketUpManager {
                     request_complete: false,
                 })
                 .request_complete = true;
+            runtime.out_of_order_posts.fetch_sub(1, Ordering::SeqCst);
         } else {
             return Err(PacketUpUploadError::StaleSeq {
                 expected,
@@ -250,6 +293,16 @@ impl XHttpPacketUpManager {
             }
         }
         let runtime = self.get_or_create_runtime(session_id);
+        {
+            let mut listeners = runtime
+                .download_listeners
+                .lock()
+                .expect("packet-up download listeners lock poisoned");
+            listeners.retain(|tx| !tx.is_closed());
+            if !listeners.is_empty() {
+                return Err(XHttpSessionError::DownloadAlreadyAttached);
+            }
+        }
         let (tx, rx) = mpsc::channel(PACKET_UP_DOWNLOAD_CHANNEL);
         runtime
             .download_listeners
@@ -257,6 +310,16 @@ impl XHttpPacketUpManager {
             .expect("packet-up download listeners lock poisoned")
             .push(tx);
         Ok(rx)
+    }
+
+    pub fn detach_download_session(&self, session_id: &str) {
+        if let Ok(runtime) = self.runtime_for_existing(session_id) {
+            runtime
+                .download_listeners
+                .lock()
+                .expect("packet-up download listeners lock poisoned")
+                .clear();
+        }
     }
 
     pub fn cleanup_idle_sessions(&self) -> usize {
@@ -322,9 +385,22 @@ impl XHttpPacketUpManager {
             next_arrival_seq: AtomicU64::new(0),
             bridge_started: AtomicBool::new(false),
             active_uploads: AtomicU32::new(0),
+            out_of_order_posts: AtomicU32::new(0),
             bytes_streamed: AtomicU64::new(0),
             download_listeners: Mutex::new(Vec::new()),
         })
+    }
+
+    fn runtime_for_existing(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<PacketUpSessionRuntime>, XHttpSessionError> {
+        self.sessions
+            .lock()
+            .expect("packet-up sessions lock poisoned")
+            .get(session_id)
+            .cloned()
+            .ok_or(XHttpSessionError::SessionNotFound)
     }
 
     pub(crate) fn get_or_create_runtime(&self, session_id: &str) -> Arc<PacketUpSessionRuntime> {
@@ -476,6 +552,7 @@ pub enum PacketUpUploadError {
     UploadClosed,
     Backpressure,
     StaleSeq { expected: u64, received: u64 },
+    PostTooLarge { max_bytes: u64, received: u64 },
 }
 
 impl std::fmt::Display for PacketUpUploadError {
@@ -487,6 +564,15 @@ impl std::fmt::Display for PacketUpUploadError {
                 write!(
                     f,
                     "packet-up stale seq expected={expected} received={received}"
+                )
+            }
+            Self::PostTooLarge {
+                max_bytes,
+                received,
+            } => {
+                write!(
+                    f,
+                    "packet-up post exceeds scMaxEachPostBytes max={max_bytes} received={received}"
                 )
             }
         }

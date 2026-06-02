@@ -43,6 +43,7 @@ pub enum XHttpSessionError {
     InvalidSessionIdCharset,
     MaxSessionsReached,
     SessionNotFound,
+    DownloadAlreadyAttached,
 }
 
 impl std::fmt::Display for XHttpSessionError {
@@ -60,6 +61,9 @@ impl std::fmt::Display for XHttpSessionError {
             }
             Self::MaxSessionsReached => write!(f, "xhttp session limit reached"),
             Self::SessionNotFound => write!(f, "xhttp session not found"),
+            Self::DownloadAlreadyAttached => {
+                write!(f, "xhttp packet-up download stream already attached")
+            }
         }
     }
 }
@@ -138,6 +142,9 @@ impl XHttpSessionManager {
             }
             XHttpSessionError::SessionNotFound => {
                 XHttpError::InvalidSessionId("session not found".to_string())
+            }
+            XHttpSessionError::DownloadAlreadyAttached => {
+                XHttpError::InvalidSessionId("download stream already attached".to_string())
             }
         })
     }

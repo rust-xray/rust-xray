@@ -53,18 +53,18 @@ fn stream_up_resolves_but_is_not_supported_at_runtime() {
 }
 
 #[test]
-fn packet_up_parses_but_is_partially_unsupported_until_download_side() {
+fn packet_up_supported_when_download_side_ready() {
     assert_eq!(
         resolve_xhttp_mode(Some(XHttpMode::PacketUp), false, TransportSecurity::Reality).unwrap(),
         EffectiveXHttpMode::PacketUp
     );
-    assert!(!packet_up_download_side_ready());
-    assert!(!effective_xhttp_mode_is_supported(
+    assert!(packet_up_download_side_ready());
+    assert!(effective_xhttp_mode_is_supported(
         EffectiveXHttpMode::PacketUp
     ));
     assert_eq!(
         effective_xhttp_mode_unsupported_reason(EffectiveXHttpMode::PacketUp),
-        Some("packet_up_download_side_not_implemented")
+        None
     );
 }
 
