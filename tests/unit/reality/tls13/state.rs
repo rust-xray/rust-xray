@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::protocol::enums::{NamedGroup, ProtocolVersion};
 use crate::protocol::structs::{

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::vless::protocol::{VlessCommand, VlessDestination};
 use std::future::Future;

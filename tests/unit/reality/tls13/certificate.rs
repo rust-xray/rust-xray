@@ -1,4 +1,3 @@
-
 use super::*;
 use ed25519_dalek::{Verifier, VerifyingKey};
 

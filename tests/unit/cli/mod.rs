@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn parse(argv: &[&str]) -> Result<Command, CliError> {

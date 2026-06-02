@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::reality::tls13::key_share::{
     encode_key_share_extension_body, Tls13ServerKeyShare, NAMED_GROUP_X25519, X25519_KEY_LEN,

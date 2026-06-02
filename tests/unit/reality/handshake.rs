@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::reality::auth::RealityAuthResult;
 use crate::reality::decision::RealityAccepted;

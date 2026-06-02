@@ -1,4 +1,3 @@
-
 use super::*;
 
 const TEST_PRIVATE_KEY: &str = "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4";

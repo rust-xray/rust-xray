@@ -24,7 +24,6 @@ matrix. Short version:
 
 - REALITY TCP/raw inbound, pre-auth (SNI, AEAD, policy), and **accepted** TLS 1.3 path
 - VLESS TCP inbound: UUID auth, custom string ID → UUIDv5, `flow=""` and `xtls-rprx-vision` (Vision DIRECT MVP)
-- Experimental server-side XHTTP transport MVP: REALITY accepted path → HTTP/1.1 / HTTP/2 `stream-one` POST → VLESS, `flow=""` only
 - REALITY accepted-path cipher suites: AES128-GCM, AES256-GCM, ChaCha20-Poly1305
 - VLESS fallback: default, SNI/name, HTTP path, ALPN (`http/1.1`, `h2`), PROXY v1/v2 (`xver=1|2`)
 - Network aliases: `raw`, legacy `tcp`, and experimental `xhttp` / `splithttp`
@@ -35,11 +34,13 @@ connection.
 
 ### Experimental
 
+- **REALITY + XHTTP accepted path (experimental MVP):** server-side HTTP/1.1 / HTTP/2 `stream-one` POST → VLESS over the accepted REALITY TLS stream; official Xray 26.3.27 interop smoke passes for default / `auto` / `stream-one`
+- **XHTTP unsupported / gated:** `packet-up`, `stream-up`, `packet-down`, XMUX — config may parse; runtime is gated (`501` / fail-fast until download-side PR)
+- **Vision over XHTTP:** unsupported (explicitly rejected at startup)
 - **VLESS Mux (Happ baseline):** REALITY → TLS 1.3 → VLESS auth → `command=Mux` → mux session start (live smoke validated)
 - **UDP DNS over VLESS Mux (port 53):** numeric `:53` targets (e.g. `1.1.1.1:53`) — query forwarded, response received, mux UDP response frame sent
 - **Happ Proxy Utility baseline:** REALITY/VLESS/Vision/Mux path with numeric UDP DNS on port 53 works (experimental)
 - **ML-DSA-65 baseline (experimental):** valid `mldsa65Seed` accepted, invalid seed rejected at startup, live smoke passes ([details](docs/reality-mldsa65-runtime-baseline.md))
-- **XHTTP inbound (experimental MVP):** server-side `stream-one` only; official Xray 26.3.27 interop smoke passes over HTTP/2 for default/`auto`/`stream-one`; `packet-up`, `packet-down`, XMUX, chunked HTTP/1.1 upload, XUDP, and Vision over XHTTP are not implemented
 
 ### Partial
 
@@ -51,7 +52,7 @@ connection.
 
 - Full Mux.Cool runtime, generic UDP over Mux (non-`:53`), XUDP
 - VLESS `command=Udp` (non-Mux)
-- Full XHTTP parity, REALITY over gRPC / WebSocket transport runtime
+- REALITY over gRPC / WebSocket transport runtime (rejected at startup when `security: reality`)
 - **ML-KEM** hybrid KEM (separate from ML-DSA-65; not implemented)
 - Full routing, balancers, outbound ecosystem, DoH, Vision splice/zero-copy beyond DIRECT MVP
 - DNS-over-TCP through VLESS outbound/routing (separate future task)
@@ -85,7 +86,7 @@ Validated scenarios include:
 - Cipher suite smoke (AES128 / AES256 / ChaCha20)
 - ML-DSA-65 baseline (4/4 checks when enabled in fixture)
 - Happ baseline: REALITY/Vision/Mux + UDP DNS `1.1.1.1:53` (`PASS happ reality vision mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`)
-- Negative transport configs (`grpc`, `ws` + REALITY rejected at startup)
+- Negative transport configs (`grpc`, `ws` + REALITY rejected at startup; `xhttp` / `splithttp` accepted for experimental `stream-one` only)
 
 Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/README.md)**,
 **[docs/compatibility-status.md](docs/compatibility-status.md)**.
@@ -94,7 +95,8 @@ Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/REA
 
 - Full Mux.Cool runtime; generic UDP over Mux; domain `:53` mux resolver; XUDP
 - VLESS `command=Udp` (non-Mux); full routing/outbounds
-- Full XHTTP parity; REALITY over gRPC / WebSocket runtime
+- XHTTP `packet-up` / `stream-up` / `packet-down` / XMUX; Vision over XHTTP; chunked upload / XUDP over XHTTP
+- REALITY over gRPC / WebSocket runtime (rejected at startup)
 - ML-KEM (ML-DSA-65 baseline is experimental — see docs)
 - Vision splice / zero-copy beyond DIRECT MVP
 - DNS-over-TCP through VLESS outbound/routing (separate future task)
@@ -296,7 +298,7 @@ docs/reality-accepted-path.md
 - Accepted path errors do not fallback (see policy matrix above for pre-auth fallback cases).
 - Vision DIRECT MVP only — no full splice/zero-copy beyond padding + DIRECT relay.
 - VLESS Mux: experimental Happ baseline (Vision + Mux + numeric UDP DNS `:53`); full Mux.Cool / generic UDP / XUDP not implemented.
-- VLESS `command=Udp` / XUDP; full XHTTP parity; REALITY over gRPC/WebSocket; full routing/outbounds not implemented.
+- VLESS `command=Udp` / XUDP; XHTTP `packet-up` / `stream-up` / `packet-down` / XMUX; Vision over XHTTP; REALITY over gRPC/WebSocket (rejected at startup); full routing/outbounds not implemented.
 - ML-DSA-65 cert signing: experimental baseline when `mldsa65Seed` is set; **ML-KEM not implemented**.
 - TLS 1.3 CCM cipher suites (0x1304, 0x1305) rejected on accepted path.
 

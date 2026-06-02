@@ -1,4 +1,3 @@
-
 use super::*;
 
 const USER_UUID: [u8; 16] = [0x11; 16];

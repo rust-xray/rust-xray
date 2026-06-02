@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::dns::DnsError;
 use crate::dns::QueryStrategy;

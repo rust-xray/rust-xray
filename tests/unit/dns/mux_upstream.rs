@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::dns::config::parse_dns_server;
 use crate::dns::options::MuxDnsUpstreamMode;

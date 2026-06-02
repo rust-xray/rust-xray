@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn build_client_hello_record(payload: &[u8]) -> Vec<u8> {

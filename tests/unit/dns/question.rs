@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn query(qtype: u16) -> Vec<u8> {

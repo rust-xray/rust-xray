@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::pki_types::DnsName;
 use crate::protocol::enums::ProtocolVersion;

@@ -83,7 +83,16 @@ check_packet_up_status_consistent() {
   ! grep -i 'packet-up.*supported' docs/xhttp-compat-notes.md | grep -vi 'unsupported'
 }
 
-bash -n scripts/check-project-consistency.sh
+check_docs_xhttp_status_consistent() {
+  grep -Eiq 'stream-one.*experimental|experimental.*stream-one' README.md docs/compatibility-status.md || return 1
+  grep -Eiq 'REALITY \+ XHTTP|XHTTP \+ REALITY' README.md docs/compatibility-status.md || return 1
+  grep -Eiq 'packet-up.*unsupported|unsupported.*packet-up|unsupported / gated.*packet-up|packet-up.*gated' README.md docs/compatibility-status.md || return 1
+  grep -Eiq 'Vision over XHTTP.*unsupported|Vision over XHTTP' README.md docs/compatibility-status.md || return 1
+  grep -Eiq 'grpc.*ws.*REALITY rejected|grpc.*ws.*rejected at startup' README.md || return 1
+  ! sed -n '/### Not yet implemented/,/^### /p' README.md | grep -Eiq '(^|[[:space:]])xhttp($|[[:space:]]|:)' || return 1
+  ! sed -n '/## Not Yet Implemented/,/^## /p' docs/compatibility-status.md | grep -Eiq 'XHTTP.*stream-one|stream-one.*inbound' || return 1
+}
+
 run_check cargo_fmt cargo fmt --check
 run_check cargo_check cargo check
 run_check cargo_test cargo test
@@ -93,6 +102,7 @@ run_check transport_boundary_used check_transport_boundary_used
 run_check direct_vless_handoff_only_in_transport_raw check_direct_vless_handoff_only_in_transport_raw
 run_check mux_source_of_truth check_mux_source_of_truth
 run_check packet_up_status_consistent check_packet_up_status_consistent
+run_check docs_xhttp_status_consistent check_docs_xhttp_status_consistent
 
 if [[ "${OVERALL}" -eq 0 ]]; then
   STATUS["overall"]="PASS"
@@ -111,6 +121,7 @@ for key in \
   direct_vless_handoff_only_in_transport_raw \
   mux_source_of_truth \
   packet_up_status_consistent \
+  docs_xhttp_status_consistent \
   overall
 do
   echo "${key}: ${STATUS[${key}]:-FAIL}"

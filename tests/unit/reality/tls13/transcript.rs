@@ -1,4 +1,3 @@
-
 use super::*;
 
 const SHA256_EMPTY_DIGEST: [u8; 32] = [

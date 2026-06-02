@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::codec::{Codec, Reader};
 use crate::pki_types::DnsName;

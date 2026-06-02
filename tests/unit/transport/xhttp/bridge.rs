@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::vless::config::VlessClient;
 use crate::vless::encode_vless_response_header;

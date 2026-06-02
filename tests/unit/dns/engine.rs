@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::dns::options::MuxDnsUpstreamMode;
 use crate::dns::packet::dns_query_id;

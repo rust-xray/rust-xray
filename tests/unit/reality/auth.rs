@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::codec::Codec;
 use crate::protocol::enums::ProtocolVersion;
