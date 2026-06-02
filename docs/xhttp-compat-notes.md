@@ -17,7 +17,7 @@ Scope: server-side VLESS inbound transport MVP, cross-checked against Xray-core 
 - Accepted config networks: `xhttp`, `splithttp`, and case-insensitive `splitHTTP`.
 - Implemented effective modes: `stream-one`.
 - Accepted alias mode: `auto`, mapped conservatively to `stream-one`.
-- `packet-up` config parses; runtime is PARTIAL_UNSUPPORTED until download-side PR (`packet_up_download_side_ready()`).
+- `packet-up` config parses; packet-up remains skeleton/recon-only and runtime is PARTIAL_UNSUPPORTED until download-side PR (`packet_up_download_side_ready()`).
 - HTTP method: POST only for `stream-one`.
 - Request body maps to the byte stream read by the existing VLESS inbound parser.
 - Response body maps to bytes written by the existing VLESS inbound handler.
@@ -36,7 +36,7 @@ Live smoke runs official Xray client modes intended to open a **separate downloa
 | `auto-download` | `auto` | `{"path":"/xhttp"}` |
 | `packet-down` | `packet-down` | (none) |
 
-Server diagnostics event: **`xhttp download reconnaissance`** (`src/xhttp/diagnostics.rs`), fields:
+Server diagnostics event: **`xhttp download reconnaissance`** (`src/transport/xhttp/diagnostics.rs`), fields:
 
 - `method`, `path` (session UUID redacted as `{session}`), `query_keys`, `header_names`
 - `session_id_source` (e.g. `path_segment:1`)
@@ -98,7 +98,7 @@ Official client behavior (diagnostics only; session UUID redacted as `{session}`
   - HTTP/2 `GET` / `POST` packet-up requests return **`501 Not Implemented` immediately** (no long-poll hang).
   - Log: `xhttp packet-up requires download side; not implemented` (`reason=packet_up_download_side_not_implemented`).
   - **No VLESS bridge** is started for packet-up while gated.
-- Upload-side modules (`src/xhttp/packet_up*.rs`, bounded input, seq reorder) remain in-tree for the follow-up PR; gated by `packet_up_download_side_ready()` in `src/xhttp/mode.rs`.
+- Upload-side modules (`src/transport/xhttp/packet_up*.rs`, bounded input, seq reorder) remain in-tree for the follow-up PR; gated by `packet_up_download_side_ready()` in `src/transport/xhttp/mode.rs`.
 
 ### Future PR: packet-up download side (TODO)
 
@@ -185,7 +185,7 @@ Captured via `./scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh` with official 
 
 ## Diagnostics tooling
 
-- Module: `src/xhttp/diagnostics.rs`
+- Module: `src/transport/xhttp/diagnostics.rs`
 - Live smoke report sections:
   - `[packet-up diagnostics]` / `packet_up_observed_request_shapes`
   - `[xhttp download reconnaissance]` / download GET metadata

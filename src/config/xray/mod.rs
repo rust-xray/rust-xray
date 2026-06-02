@@ -21,4 +21,5 @@ pub use validate::{
 };
 
 #[cfg(test)]
+#[path = "../../../tests/unit/config/xray.rs"]
 mod tests;

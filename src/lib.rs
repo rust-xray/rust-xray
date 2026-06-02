@@ -19,7 +19,6 @@ pub mod stats;
 pub mod tls;
 pub mod transport;
 pub mod vless;
-pub mod xhttp;
 
 /// Re-exports the contents of the [rustls-pki-types](https://docs.rs/rustls-pki-types) crate for easy access
 pub mod pki_types {

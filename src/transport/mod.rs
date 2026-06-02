@@ -1,7 +1,7 @@
 //! Inbound transport adapters between REALITY application streams and VLESS.
 
-mod raw;
-mod xhttp;
+pub mod raw;
+pub mod xhttp;
 
 use std::io;
 use std::sync::Arc;
@@ -10,13 +10,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 
 pub use crate::config::normalized::XHttpRuntimeConfig;
-pub use crate::xhttp::matching::{
+pub use xhttp::matching::{
     host_matches, method_matches_packet_up_download, method_matches_packet_up_upload,
     method_matches_stream_one, path_matches, query_keys, request_path_component,
     validate_packet_up_request, validate_xhttp_stream_one_request, xhttp_match_reject_reason_label,
     XHttpMatchRejectReason, XHttpMatchSettings, XHttpRequestDescriptor,
 };
-pub use crate::xhttp::mode::{
+pub use xhttp::mode::{
     configured_xhttp_mode, configured_xhttp_mode_label, effective_xhttp_mode_is_supported,
     effective_xhttp_mode_label, effective_xhttp_mode_unsupported_reason, parse_xhttp_mode,
     resolve_xhttp_mode, transport_security_label, EffectiveXHttpMode, TransportSecurity,
@@ -142,75 +142,5 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn accepted_transport_from_normalized_raw_tcp() {
-        let transport =
-            AcceptedTransport::from_inbound_transport_config(&InboundTransportConfig::RawTcp)
-                .unwrap();
-        assert_eq!(transport, AcceptedTransport::RawTcp);
-    }
-
-    #[test]
-    fn accepted_transport_from_normalized_xhttp() {
-        let config = XHttpRuntimeConfig {
-            path: "/xhttp".to_string(),
-            host: Some("example.com".to_string()),
-            mode: "stream-one".to_string(),
-        };
-        let transport = AcceptedTransport::from_inbound_transport_config(
-            &InboundTransportConfig::XHttp(config.clone()),
-        )
-        .unwrap();
-        assert_eq!(transport, AcceptedTransport::XHttp(config));
-    }
-
-    #[test]
-    fn accepted_transport_from_reality_runtime_raw_tcp() {
-        let transport =
-            AcceptedTransport::from_reality_runtime(&TransportNetwork::RawTcp, None).unwrap();
-        assert_eq!(transport, AcceptedTransport::RawTcp);
-    }
-
-    #[test]
-    fn accepted_transport_from_reality_runtime_xhttp() {
-        let settings = XHttpSettings {
-            path: "/xhttp".to_string(),
-            mode: Some("stream-one".to_string()),
-            ..XHttpSettings::default()
-        };
-        let transport =
-            AcceptedTransport::from_reality_runtime(&TransportNetwork::XHttp, Some(&settings))
-                .unwrap();
-        assert_eq!(
-            transport,
-            AcceptedTransport::XHttp(XHttpRuntimeConfig {
-                path: "/xhttp".to_string(),
-                host: None,
-                mode: "stream-one".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn dispatch_kind_labels() {
-        assert_eq!(AcceptedTransport::RawTcp.kind_label(), "raw");
-        assert_eq!(
-            AcceptedTransport::XHttp(XHttpRuntimeConfig {
-                path: "/".to_string(),
-                host: None,
-                mode: "auto".to_string(),
-            })
-            .kind_label(),
-            "xhttp"
-        );
-    }
-
-    #[test]
-    fn raw_transport_entrypoint_is_wired() {
-        let raw = AcceptedTransport::RawTcp;
-        assert_eq!(raw.kind_label(), "raw");
-    }
-}
+#[path = "../../tests/unit/transport/mod.rs"]
+mod tests;
