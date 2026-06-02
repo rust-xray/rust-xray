@@ -44,6 +44,7 @@ use super::packet_up::{shared_packet_up_manager, spawn_packet_up_bridge, PacketU
 use super::session::XHttpSessionManager;
 
 const MAX_HTTP_HEADER_SIZE: usize = 16 * 1024;
+const HTTP1_UPLOAD_READ_BUFFER: usize = 16 * 1024;
 const HTTP2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 const PACKET_UP_DOWNLOAD_RECV_TIMEOUT: Duration = Duration::from_secs(30);
 const PACKET_UP_DOWNLOAD_RESPONSE_HEADERS_HTTP1: &str = "HTTP/1.1 200 OK\r\nX-Accel-Buffering: no\r\nCache-Control: no-store\r\nContent-Type: text/event-stream\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
@@ -608,26 +609,12 @@ fn log_xhttp_mode_unsupported(
     effective_mode: EffectiveXHttpMode,
     reason: &str,
 ) {
-    if effective_mode == EffectiveXHttpMode::PacketUp {
-        log_packet_up_download_side_unsupported(inbound_tag, conn_id, reason);
-        return;
-    }
     warn!(
         inbound_tag,
         conn_id,
         mode = effective_xhttp_mode_label(effective_mode),
         reason,
         "xhttp mode unsupported"
-    );
-}
-
-fn log_packet_up_download_side_unsupported(inbound_tag: &str, conn_id: u64, reason: &str) {
-    warn!(
-        inbound_tag,
-        conn_id,
-        mode = effective_xhttp_mode_label(EffectiveXHttpMode::PacketUp),
-        reason,
-        "xhttp packet-up requires download side; not implemented"
     );
 }
 
@@ -1443,31 +1430,154 @@ async fn handle_packet_up_http1_download<S: AsyncWrite + Unpin>(
     stream.shutdown().await
 }
 
-async fn read_http1_request_body<S: AsyncRead + Unpin>(
+async fn read_http1_upload_bytes<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    buffer: &mut Vec<u8>,
+) -> io::Result<usize> {
+    let mut tmp = [0u8; HTTP1_UPLOAD_READ_BUFFER];
+    let read = stream.read(&mut tmp).await?;
+    if read > 0 {
+        buffer.extend_from_slice(&tmp[..read]);
+    }
+    Ok(read)
+}
+
+fn chunked_size_line_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(2).position(|window| window == b"\r\n")
+}
+
+fn parse_chunked_size_line(buffer: &[u8]) -> io::Result<usize> {
+    let line_end = chunked_size_line_end(buffer).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "malformed xhttp packet-up chunked upload: missing chunk size line",
+        )
+    })?;
+    let size_line = std::str::from_utf8(&buffer[..line_end]).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("malformed xhttp packet-up chunked upload: {err}"),
+        )
+    })?;
+    let size_hex = size_line.split(';').next().unwrap_or("").trim();
+    usize::from_str_radix(size_hex, 16).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("malformed xhttp packet-up chunked upload chunk size: {err}"),
+        )
+    })
+}
+
+async fn stream_http1_chunked_upload<S, F>(
+    stream: &mut S,
+    mut buffer: Vec<u8>,
+    mut on_chunk: F,
+) -> Result<(), String>
+where
+    S: AsyncRead + Unpin,
+    F: FnMut(Bytes) -> Result<(), String>,
+{
+    loop {
+        while chunked_size_line_end(&buffer).is_none() {
+            if read_http1_upload_bytes(stream, &mut buffer)
+                .await
+                .map_err(|err| err.to_string())?
+                == 0
+            {
+                return Err(
+                    "truncated xhttp packet-up chunked upload before chunk size line".to_string(),
+                );
+            }
+        }
+        let size = parse_chunked_size_line(&buffer).map_err(|err| err.to_string())?;
+        let line_end = chunked_size_line_end(&buffer).expect("size line present");
+        buffer.drain(..line_end + 2);
+
+        if size == 0 {
+            while chunked_size_line_end(&buffer).is_none() {
+                if read_http1_upload_bytes(stream, &mut buffer)
+                    .await
+                    .map_err(|err| err.to_string())?
+                    == 0
+                {
+                    break;
+                }
+            }
+            return Ok(());
+        }
+
+        while buffer.len() < size + 2 {
+            if read_http1_upload_bytes(stream, &mut buffer)
+                .await
+                .map_err(|err| err.to_string())?
+                == 0
+            {
+                return Err("truncated xhttp packet-up chunked upload body".to_string());
+            }
+        }
+        if &buffer[size..size + 2] != b"\r\n" {
+            return Err("malformed xhttp packet-up chunked upload chunk terminator".to_string());
+        }
+        let chunk = Bytes::copy_from_slice(&buffer[..size]);
+        buffer.drain(..size + 2);
+        on_chunk(chunk)?;
+    }
+}
+
+async fn stream_http1_content_length_upload<S, F>(
+    stream: &mut S,
+    prebuffer: Vec<u8>,
+    content_length: Option<u64>,
+    mut on_chunk: F,
+) -> Result<(), String>
+where
+    S: AsyncRead + Unpin,
+    F: FnMut(Bytes) -> Result<(), String>,
+{
+    let expected = content_length.unwrap_or(0) as usize;
+    let mut received = prebuffer.len();
+    if !prebuffer.is_empty() {
+        on_chunk(Bytes::from(prebuffer))?;
+    }
+    while received < expected {
+        let to_read = (expected - received).min(HTTP1_UPLOAD_READ_BUFFER);
+        let mut buf = vec![0u8; to_read];
+        let read = stream.read(&mut buf).await.map_err(|err| err.to_string())?;
+        if read == 0 {
+            return Err("truncated xhttp packet-up upload body".to_string());
+        }
+        received += read;
+        on_chunk(Bytes::from(buf[..read].to_vec()))?;
+    }
+    Ok(())
+}
+
+async fn stream_http1_packet_up_upload_body<S, F>(
     stream: &mut S,
     prebuffer: Vec<u8>,
     content_length: Option<u64>,
     transfer_encoding: Option<&str>,
-) -> io::Result<Vec<u8>> {
+    on_chunk: F,
+) -> Result<(), String>
+where
+    S: AsyncRead + Unpin,
+    F: FnMut(Bytes) -> Result<(), String>,
+{
     if transfer_encoding.is_some_and(|value| value.to_ascii_lowercase().contains("chunked")) {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "xhttp packet-up chunked upload is not supported",
-        ));
+        stream_http1_chunked_upload(stream, prebuffer, on_chunk).await
+    } else {
+        stream_http1_content_length_upload(stream, prebuffer, content_length, on_chunk).await
     }
-    let mut body = prebuffer;
-    if let Some(len) = content_length {
-        let target = len as usize;
-        while body.len() < target {
-            let mut buf = vec![0u8; (target - body.len()).min(16 * 1024)];
-            let read = stream.read(&mut buf).await?;
-            if read == 0 {
-                break;
-            }
-            body.extend_from_slice(&buf[..read]);
-        }
+}
+
+fn packet_up_upload_error_status(err: &str) -> &'static str {
+    if err.contains("backpressure") {
+        "503 Service Unavailable"
+    } else if err.contains("scMaxEachPostBytes") || err.contains("PostTooLarge") {
+        "413 Payload Too Large"
+    } else {
+        "400 Bad Request"
     }
-    Ok(body)
 }
 
 async fn handle_packet_up_http1_upload<S: AsyncRead + AsyncWrite + Unpin>(
@@ -1499,28 +1609,48 @@ async fn handle_packet_up_http1_upload<S: AsyncRead + AsyncWrite + Unpin>(
 
     let content_length = request_content_length(head).ok().flatten();
     let transfer_encoding = head.header("transfer-encoding").map(str::to_string);
-    let body = match read_http1_request_body(
+    let mut upload_error: Option<String> = None;
+    let mut bridge_launch = None;
+    let mut total_bytes = 0usize;
+    match stream_http1_packet_up_upload_body(
         stream,
         prebuffer,
         content_length,
         transfer_encoding.as_deref(),
+        |chunk| {
+            if chunk.is_empty() {
+                return Ok(());
+            }
+            total_bytes += chunk.len();
+            match manager.append_upload_chunk(&mut upload_handle, chunk) {
+                Ok(Some(launch)) => {
+                    bridge_launch = Some(launch);
+                    Ok(())
+                }
+                Ok(None) => Ok(()),
+                Err(err) => Err(err.to_string()),
+            }
+        },
     )
     .await
     {
-        Ok(body) => body,
-        Err(err) => {
-            warn!(inbound_tag, conn_id, error = %err, "xhttp packet-up upload body read failed");
-            return write_status(stream, "501 Not Implemented").await;
+        Ok(()) => {}
+        Err(err)
+            if err.contains("malformed")
+                || err.contains("truncated")
+                || err.contains("chunk size") =>
+        {
+            warn!(
+                inbound_tag,
+                conn_id,
+                session_id = %session_id,
+                error = %err,
+                "xhttp packet-up upload body read failed"
+            );
+            manager.finish_upload_packet(&session_id);
+            return write_status(stream, "400 Bad Request").await;
         }
-    };
-
-    let mut upload_error: Option<String> = None;
-    let mut bridge_launch = None;
-    if !body.is_empty() {
-        match manager.append_upload_chunk(&mut upload_handle, Bytes::from(body)) {
-            Ok(launch) => bridge_launch = launch,
-            Err(err) => upload_error = Some(err.to_string()),
-        }
+        Err(err) => upload_error = Some(err),
     }
 
     if upload_error.is_none() {
@@ -1535,6 +1665,15 @@ async fn handle_packet_up_http1_upload<S: AsyncRead + AsyncWrite + Unpin>(
     }
     manager.finish_upload_packet(&session_id);
 
+    if total_bytes > 0 {
+        debug!(
+            session_id = %session_id,
+            seq = upload_handle.seq,
+            bytes = total_bytes,
+            "xhttp packet-up body appended"
+        );
+    }
+
     if let Some(launch) = bridge_launch {
         spawn_packet_up_bridge(launch, users, stats_state, inbound_tag.to_string(), conn_id);
     }
@@ -1548,14 +1687,7 @@ async fn handle_packet_up_http1_upload<S: AsyncRead + AsyncWrite + Unpin>(
             error = %err,
             "xhttp packet-up upload failed"
         );
-        let status = if err.contains("backpressure") {
-            "503 Service Unavailable"
-        } else if err.contains("scMaxEachPostBytes") {
-            "413 Payload Too Large"
-        } else {
-            "400 Bad Request"
-        };
-        return write_status(stream, status).await;
+        return write_status(stream, packet_up_upload_error_status(&err)).await;
     }
 
     write_status(stream, "200 OK").await

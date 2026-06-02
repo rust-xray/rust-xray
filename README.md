@@ -96,7 +96,7 @@ Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/REA
 
 - Full Mux.Cool runtime; generic UDP over Mux; domain `:53` mux resolver; XUDP
 - VLESS `command=Udp` (non-Mux); full routing/outbounds
-- XHTTP `packet-up` / `stream-up` / `packet-down` / XMUX; Vision over XHTTP; chunked upload / XUDP over XHTTP
+- XHTTP `stream-up` / `packet-down` / XMUX; Vision over XHTTP; XUDP over XHTTP
 - REALITY over gRPC / WebSocket runtime (rejected at startup)
 - ML-KEM (ML-DSA-65 baseline is experimental — see docs)
 - Vision splice / zero-copy beyond DIRECT MVP

@@ -58,7 +58,8 @@ connection closes (by design).
 | Happ Proxy Utility baseline | **Experimental working** | REALITY/VLESS/Vision/Mux path reaches mux session; UDP DNS inside Mux works for numeric `:53` (live smoke validated) |
 | ML-DSA-65 baseline | **Experimental** | Valid `mldsa65Seed` accepted; invalid seed rejected at startup; raw Vision smoke passes; no cargo feature gate (see [baseline doc](./reality-mldsa65-runtime-baseline.md)) |
 | REALITY + XHTTP accepted path | **Experimental MVP** | Server-side HTTP/1.1 / HTTP/2 `stream-one` POST over accepted REALITY TLS stream; official Xray 26.3.27 interop smoke passes for default, `mode=auto`, and `mode=stream-one` over HTTP/2; path/Host validation; VLESS `flow=""` only |
-| XHTTP `packet-up` | **Experimental supported** | Separate GET download (`text/event-stream`, SSE headers) + POST upload ack; bounded download channel; `scMaxEachPostBytes` / `scMaxBufferedPosts`; live smoke target: PASS with official Xray client over HTTP/2 |
+| XHTTP `packet-up` over HTTP/2 | **Experimental supported** | Separate GET download + POST upload ack; official Xray 26.3.27 live smoke PASS (`mode_packet_up`) |
+| XHTTP `packet-up` HTTP/1.1 chunked upload | **Experimental supported (low-level live TCP)** | `Transfer-Encoding: chunked` streaming upload on HTTP/1 adapter; `h1_chunked_upload_unit_smoke` + `h1_chunked_upload_live_or_origin_smoke` PASS; **official Xray H1 origin interop NOT verified** (client uses HTTP/2 on REALITY) |
 | XHTTP `stream-up` / `packet-down` / XMUX | **Unsupported / gated** | Config may parse; runtime gated (`501` / fail-fast) |
 | Vision over XHTTP | **Unsupported** | Explicitly rejected at startup (`flow="xtls-rprx-vision"` over XHTTP) |
 
@@ -98,7 +99,8 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | DNS inbound / dokodemo-door hijack | Not implemented |
 | Full Xray DNS module compatibility | Not implemented |
 | XHTTP `stream-up` / `packet-down` / XMUX | Unsupported / gated (config parses; runtime fail-fast `501`) |
-| XHTTP chunked upload / XUDP | Not implemented |
+| XHTTP XUDP | Not implemented |
+| XHTTP XMUX concurrency controls | Not implemented (config tolerated; runtime reject when `xmux` present) |
 | REALITY over gRPC / WebSocket runtime | Not implemented (configs rejected at startup) |
 | DoH through outbound | Not implemented |
 | DNS-over-TCP through VLESS outbound / routing | Not implemented (see [dns-future.md](./dns-future.md)) |

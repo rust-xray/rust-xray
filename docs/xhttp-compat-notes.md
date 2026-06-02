@@ -102,19 +102,12 @@ Official client behavior (diagnostics only; session UUID redacted as `{session}`
 ### Runtime policy (this branch)
 
 - Config `mode: packet-up` parses and resolves to effective `packet-up`.
-- Runtime is **PARTIAL_UNSUPPORTED** until download-side interop is complete:
-  - HTTP/2 `GET` / `POST` packet-up requests return **`501 Not Implemented` immediately** (no long-poll hang).
-  - Log: `xhttp packet-up requires download side; not implemented` (`reason=packet_up_download_side_not_implemented`).
-  - **No VLESS bridge** is started for packet-up while gated.
-- Upload-side modules (`src/transport/xhttp/packet_up*.rs`, bounded input, seq reorder) remain in-tree for the follow-up PR; gated by `packet_up_download_side_ready()` in `src/transport/xhttp/mode.rs`.
-
-### Future PR: packet-up download side (TODO)
-
-1. Flip `packet_up_download_side_ready()` after interop validation.
-2. Wire `GET /xhttp/{session}` → bounded download channel ← VLESS downstream (`broadcast_download`).
-3. Keep upload `POST /xhttp/{session}/{seq}` ack-only; do **not** duplex downstream on upload response.
-4. Close policy: idle timeout + explicit session close; download GET ends when session closes (no infinite hang).
-5. Re-run live smoke; target `mode_packet_up: PASS` only when curl checks succeed end-to-end.
+- When `packet_up_download_side_ready()` is true (current branch):
+  - `GET /xhttp/{session}` binds download stream (`text/event-stream`, chunked HTTP/1.1 or HTTP/2 DATA).
+  - `POST /xhttp/{session}/{seq}` accepts upload body (HTTP/2 DATA or HTTP/1.1 `Content-Length` / `Transfer-Encoding: chunked`) and returns ack-only `200`.
+  - Limits: `scMaxEachPostBytes`, `scMaxBufferedPosts`, bounded input backpressure.
+  - Duplicate download GET on the same session returns `409 Conflict`.
+- `stream-up`, `packet-down`, and XMUX remain **`501 Not Implemented`** fail-fast.
 
 ## Observed `packet-up` Request Model (Xray 26.3.27 live smoke)
 
@@ -130,9 +123,9 @@ Captured via `./scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh` with official 
 | header names | browser-like set on GET: `accept`, `accept-encoding`, `accept-language`, `cache-control`, `dnt`, `pragma`, `priority`, `referer`, `sec-ch-ua*`, `sec-fetch-*`, `user-agent` |
 | session id source | `path_segment:1` — UUID after configured base path |
 | seq id source | `path_segment:2` on upload POST (not present on observed GET) |
-| body model | GET: empty; upload POST: `content-length` body streamed in chunks (not captured in smoke while server returned 501) |
+| body model | GET: empty; upload POST: streamed body (`content-length` or HTTP/1.1 chunked) |
 | separate download side observed | yes — standalone GET per session on independent REALITY connections |
-| implemented in this PR | **no** — explicit `501` fail-fast; upload plumbing in-tree but gated until download-side PR |
+| implemented in this branch | **yes** — download GET + upload POST ack; HTTP/1.1 chunked upload supported |
 
 ### First observed request shape (download GET)
 
@@ -158,26 +151,22 @@ Captured via `./scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh` with official 
 
 - Official client opened **two independent REALITY/TCP connections** in one curl attempt (`conn_id=1` and `conn_id=2`), each carrying one HTTP/2 GET to a different `/xhttp/{session}` path.
 - No follow-up HTTP/2 stream was observed on the same connection after the first GET (`request_index` stayed `0` per connection).
-- Interpretation: download side likely uses standalone GET request(s) per session, not `stream-one` duplex POST. Upload POST (with VLESS payload body) was **not captured** in this smoke because the server currently returns `501 Not Implemented` before interop proceeds.
+- Interpretation: download side uses standalone GET request(s) per session, not `stream-one` duplex POST. Upload POST carries VLESS payload chunks with ack-only `200` response.
 
-### Server behavior (this PR)
+### Server behavior (this branch)
 
 - Config parses tolerant for `packet-up`.
-- Runtime effective mode `packet-up` is **PARTIAL_UNSUPPORTED**:
-  - HTTP/2 `GET /xhttp/{session}` and `POST /xhttp/{session}/{seq}` return **`501 Not Implemented` immediately**.
-  - Log: `xhttp packet-up requires download side; not implemented`.
-  - No VLESS bridge; live smoke classifies `mode_packet_up: UNSUPPORTED` (not FAIL/hang).
-- HTTP/1 `packet-up` uses the same explicit `501` path via mode unsupported handling.
+- Runtime effective mode `packet-up` is **supported** when `packet_up_download_side_ready()`:
+  - HTTP/2 and HTTP/1.1 `GET /xhttp/{session}` and `POST /xhttp/{session}/{seq}` are handled on the accepted REALITY stream.
+  - Live smoke target: `mode_packet_up: PASS` with official Xray client over HTTP/2 (`scMaxEachPostBytes` in client/server `extra`).
 - `packet-down`, `stream-up`, and XMUX remain explicit runtime `501`.
-- Diagnostics event `xhttp packet-up request shape` is still emitted before reject (shape capture).
 
 ## Unsupported (not yet implemented)
 
 - `packet-down` and multi-request split upload/download beyond packet-up MVP.
 - XMUX behavior beyond tolerant config parsing and explicit runtime reject.
 - `seqStr` / alternate `sessionPlacement` (query/header) — only path suffix observed so far.
-- HTTP/1 packet-up adapter.
-- Chunked request body decoding in the HTTP/1.1 adapter (stream-one path).
+- Chunked request body on **stream-one** HTTP/1.1 path (still `501`).
 - XUDP over XHTTP.
 - CDN bypass tuning beyond the basic HTTP/2 interop path.
 - Vision over XHTTP.

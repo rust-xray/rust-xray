@@ -224,6 +224,103 @@ async fn packet_up_oversized_post_is_rejected() {
     assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 413 Payload Too Large"));
 }
 
+#[tokio::test]
+async fn packet_up_http1_get_invalid_session_id_rejected() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("packet-up".to_string()),
+        ..XHttpSettings::default()
+    };
+    let response = run_request(
+        settings,
+        b"GET /xhttp/../escape HTTP/1.1\r\nHost: example.com\r\n\r\n",
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 400 Bad Request"));
+}
+
+#[tokio::test]
+async fn packet_up_http1_chunked_upload_accepted() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("packet-up".to_string()),
+        ..XHttpSettings::default()
+    };
+    let payload = b"packet-up-chunked";
+    let request = format!(
+        "POST /xhttp/session-chunk/0 HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+        payload.len(),
+        std::str::from_utf8(payload).unwrap()
+    );
+    let response = run_request(settings, request.into_bytes()).await;
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200 OK"));
+}
+
+#[tokio::test]
+async fn packet_up_http1_malformed_chunked_upload_rejected() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("packet-up".to_string()),
+        ..XHttpSettings::default()
+    };
+    let response = run_request(
+        settings,
+        b"POST /xhttp/session-bad/0 HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\n",
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 400 Bad Request"));
+}
+
+#[tokio::test]
+async fn packet_up_http1_chunked_early_eof_rejected_and_session_reusable() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("packet-up".to_string()),
+        ..XHttpSettings::default()
+    };
+    let truncated = b"POST /xhttp/session-eof/0 HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel";
+    let first = run_partial_request(settings.clone(), truncated).await;
+    assert!(
+        String::from_utf8_lossy(&first).starts_with("HTTP/1.1 400 Bad Request"),
+        "{}",
+        String::from_utf8_lossy(&first)
+    );
+
+    let recovery = run_post_chunked(settings, "session-eof", 1, b"ok").await;
+    assert!(String::from_utf8_lossy(&recovery).starts_with("HTTP/1.1 200 OK"));
+}
+
+#[tokio::test]
+async fn packet_up_http1_oversized_chunked_upload_rejected() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("packet-up".to_string()),
+        extra: [("scMaxEachPostBytes".to_string(), serde_json::json!(10))].into(),
+        ..XHttpSettings::default()
+    };
+    let body = format!(
+        "POST /xhttp/session-big-chunk/0 HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n6\r\n{}\r\n6\r\n{}\r\n0\r\n\r\n",
+        "a".repeat(6),
+        "b".repeat(6)
+    );
+    let response = run_request(settings, body.into_bytes()).await;
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 413 Payload Too Large"));
+}
+
+#[tokio::test]
+async fn packet_up_http1_chunked_buffered_posts_limit_enforced() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("packet-up".to_string()),
+        extra: [("scMaxBufferedPosts".to_string(), serde_json::json!(1))].into(),
+        ..XHttpSettings::default()
+    };
+    let first = run_post_chunked(settings.clone(), "session-buf", 2, b"x").await;
+    assert!(String::from_utf8_lossy(&first).starts_with("HTTP/1.1 200 OK"));
+    let second = run_post_chunked(settings, "session-buf", 3, b"y").await;
+    assert!(String::from_utf8_lossy(&second).starts_with("HTTP/1.1 400 Bad Request"));
+}
+
 #[test]
 fn packet_up_h2_is_supported_when_download_side_ready() {
     use crate::transport::xhttp::{packet_up_download_side_ready, EffectiveXHttpMode};
@@ -319,6 +416,37 @@ async fn run_request(settings: XHttpSettings, request: impl AsRef<[u8]>) -> Vec<
     client.read_to_end(&mut response).await.unwrap();
     let _ = task.await.unwrap();
     response
+}
+
+async fn run_partial_request(settings: XHttpSettings, request: impl AsRef<[u8]>) -> Vec<u8> {
+    let (mut client, server) = tokio::io::duplex(2048);
+    let users = Arc::new(VlessUserManager::new("xhttp-test", Vec::new()));
+    let task =
+        tokio::spawn(async move { serve_xhttp_stream_one(server, &settings, users, None).await });
+    client.write_all(request.as_ref()).await.unwrap();
+    client.shutdown().await.unwrap();
+    let mut response = Vec::new();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.read_to_end(&mut response),
+    )
+    .await;
+    let _ = task.await;
+    response
+}
+
+async fn run_post_chunked(
+    settings: XHttpSettings,
+    session_id: &str,
+    seq: u64,
+    payload: &[u8],
+) -> Vec<u8> {
+    let request = format!(
+        "POST /xhttp/{session_id}/{seq} HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+        payload.len(),
+        std::str::from_utf8(payload).unwrap_or("")
+    );
+    run_request(settings, request.into_bytes()).await
 }
 
 async fn run_accepted_post(settings: XHttpSettings, request_target: &str, host: &str) -> Vec<u8> {

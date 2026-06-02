@@ -182,7 +182,7 @@ is_download_recon_mode() {
 
 is_expected_unsupported_mode() {
   case "$1" in
-    packet_up|stream_up|packet_down|auto_download) return 0 ;;
+    stream_up|packet_down|auto_download) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -234,6 +234,14 @@ else:
     server_xhttp.pop("mode", None)
     client_xhttp.pop("mode", None)
 
+if mode_key in ("packet_up", "stream_up", "auto_download"):
+    packet_up_extra = {
+        "scMaxEachPostBytes": 1_000_000,
+        "scMaxBufferedPosts": 30,
+    }
+    server_xhttp["extra"] = packet_up_extra
+    client_xhttp["extra"] = packet_up_extra
+
 download_settings_json = os.environ.get("DOWNLOAD_SETTINGS_JSON", "").strip()
 if download_settings_json:
     download_settings = json.loads(download_settings_json)
@@ -279,11 +287,6 @@ classify_failure() {
     return
   fi
   if grep -Fq "xhttp download side not implemented" "${server_log}" \
-    && grep -Fq "REALITY listener started" "${server_log}"; then
-    printf 'unsupported_mode'
-    return
-  fi
-  if grep -Fq "xhttp packet-up requires download side; not implemented" "${server_log}" \
     && grep -Fq "REALITY listener started" "${server_log}"; then
     printf 'unsupported_mode'
     return
@@ -422,10 +425,6 @@ run_mode_impl() {
   bridge_started="$(count_log 'xhttp bridge started' "${server_log}")"
   bridge_completed="$(count_log 'xhttp bridge completed' "${server_log}")"
   unsupported_mode="$(count_log 'xhttp mode unsupported' "${server_log}")"
-  if [[ "${unsupported_mode}" == "0" ]] \
-    && grep -Fq "xhttp packet-up requires download side; not implemented" "${server_log}"; then
-    unsupported_mode=1
-  fi
 
   XHTTP_REQUEST_RECEIVED=$((XHTTP_REQUEST_RECEIVED + received))
   XHTTP_BRIDGE_STARTED=$((XHTTP_BRIDGE_STARTED + bridge_started))
@@ -599,6 +598,87 @@ else:
 PY
 }
 
+H1_CHUNKED_UNIT_SMOKE=unknown
+H1_CHUNKED_LIVE_SMOKE=unknown
+
+run_h1_chunked_unit_smoke() {
+  local log="${XHTTP_WORK_DIR}/h1-chunked-unit-smoke.log"
+  local -a tests=(
+    packet_up_http1_chunked_upload_accepted
+    packet_up_http1_malformed_chunked_upload_rejected
+    packet_up_http1_chunked_early_eof_rejected_and_session_reusable
+    packet_up_http1_oversized_chunked_upload_rejected
+    packet_up_http1_chunked_buffered_posts_limit_enforced
+  )
+  echo "[h1 chunked upload unit smoke]" >>"${XHTTP_REPORT_PATH}"
+  : >"${log}"
+  local test_name failed=0
+  for test_name in "${tests[@]}"; do
+    if ! (
+      cd "${REPO_ROOT}"
+      cargo test --lib "${test_name}" -- --exact --quiet
+    ) >>"${log}" 2>&1; then
+      failed=1
+      break
+    fi
+  done
+  if [[ "${failed}" == "0" ]]; then
+    H1_CHUNKED_UNIT_SMOKE=PASS
+    echo "h1_chunked_upload_unit_smoke: PASS" >>"${XHTTP_REPORT_PATH}"
+  else
+    H1_CHUNKED_UNIT_SMOKE=FAIL
+    echo "h1_chunked_upload_unit_smoke: FAIL" >>"${XHTTP_REPORT_PATH}"
+    echo "[h1 chunked upload unit smoke log]" >>"${XHTTP_REPORT_PATH}"
+    tail -40 "${log}" >>"${XHTTP_REPORT_PATH}" || true
+  fi
+  echo >>"${XHTTP_REPORT_PATH}"
+}
+
+run_h1_chunked_live_smoke() {
+  local log="${XHTTP_WORK_DIR}/h1-chunked-live-smoke.log"
+  local -a tests=(
+    live_tcp_chunked_upload_accepted
+    live_tcp_malformed_chunked_rejected
+    live_tcp_oversized_chunked_rejected
+    live_tcp_early_eof_cleans_session
+    live_tcp_duplicate_download_get_conflict
+    live_tcp_stream_up_unsupported
+    live_tcp_packet_down_unsupported
+  )
+  echo "[h1 chunked upload live tcp smoke]" >>"${XHTTP_REPORT_PATH}"
+  echo "note: exercises serve_xhttp_stream_one over real TcpStream (not official Xray REALITY/H1 origin)" >>"${XHTTP_REPORT_PATH}"
+  : >"${log}"
+  local test_name failed=0
+  for test_name in "${tests[@]}"; do
+    if ! (
+      cd "${REPO_ROOT}"
+      cargo test --test xhttp_h1_chunked_live_probe "${test_name}" -- --exact --quiet
+    ) >>"${log}" 2>&1; then
+      failed=1
+      break
+    fi
+  done
+  if [[ "${failed}" == "0" ]]; then
+    if (
+      cd "${REPO_ROOT}"
+      cargo test --lib runtime_config_rejects_xhttp_vision_flow -- --exact --quiet
+    ) >>"${log}" 2>&1; then
+      H1_CHUNKED_LIVE_SMOKE=PASS
+      echo "h1_chunked_upload_live_or_origin_smoke: PASS" >>"${XHTTP_REPORT_PATH}"
+      echo "official_xray_h1_origin_interop: NOT_VERIFIED" >>"${XHTTP_REPORT_PATH}"
+    else
+      failed=1
+    fi
+  fi
+  if [[ "${failed}" != "0" ]]; then
+    H1_CHUNKED_LIVE_SMOKE=FAIL
+    echo "h1_chunked_upload_live_or_origin_smoke: FAIL" >>"${XHTTP_REPORT_PATH}"
+    echo "[h1 chunked upload live tcp smoke log]" >>"${XHTTP_REPORT_PATH}"
+    tail -40 "${log}" >>"${XHTTP_REPORT_PATH}" || true
+  fi
+  echo >>"${XHTTP_REPORT_PATH}"
+}
+
 write_summary() {
   local versions=""
   if ((${#HTTP_VERSIONS[@]} > 0)); then
@@ -624,6 +704,9 @@ write_summary() {
     echo "xhttp_bridge_started: ${XHTTP_BRIDGE_STARTED}"
     echo "xhttp_bridge_completed: ${XHTTP_BRIDGE_COMPLETED}"
     echo "xhttp_unsupported_mode: ${XHTTP_UNSUPPORTED_MODE}"
+    echo "h1_chunked_upload_unit_smoke: ${H1_CHUNKED_UNIT_SMOKE}"
+    echo "h1_chunked_upload_live_or_origin_smoke: ${H1_CHUNKED_LIVE_SMOKE}"
+    echo "official_xray_h1_origin_interop: NOT_VERIFIED"
     echo
     echo "[packet-up diagnostics]"
     if ((${#PACKET_UP_SHAPE_LINES[@]} > 0)); then
@@ -663,14 +746,14 @@ write_summary() {
 assert_acceptance() {
   local failures=0
 
-  for required_mode in default auto stream_one; do
+  for required_mode in default auto stream_one packet_up; do
     if [[ "${MODE_RESULT[${required_mode}]:-FAIL}" != "PASS" ]]; then
       echo "acceptance failed: mode_${required_mode} must PASS" >&2
       failures=1
     fi
   done
 
-  for unsupported_mode in packet_up stream_up auto_download packet_down; do
+  for unsupported_mode in stream_up auto_download packet_down; do
     case "${MODE_RESULT[${unsupported_mode}]:-FAIL}" in
       PASS|UNSUPPORTED) ;;
       *)
@@ -686,6 +769,16 @@ assert_acceptance() {
 
   if [[ ! -f "${XHTTP_REPORT_PATH}" ]]; then
     echo "acceptance failed: report.txt missing" >&2
+    failures=1
+  fi
+
+  if [[ "${H1_CHUNKED_UNIT_SMOKE}" != "PASS" ]]; then
+    echo "acceptance failed: h1_chunked_upload_unit_smoke must PASS" >&2
+    failures=1
+  fi
+
+  if [[ "${H1_CHUNKED_LIVE_SMOKE}" != "PASS" ]]; then
+    echo "acceptance failed: h1_chunked_upload_live_or_origin_smoke must PASS" >&2
     failures=1
   fi
 
@@ -720,6 +813,9 @@ main() {
   run_mode stream_up
   run_mode auto_download
   run_mode packet_down
+
+  run_h1_chunked_unit_smoke
+  run_h1_chunked_live_smoke
 
   write_summary
   cat "${XHTTP_REPORT_PATH}"

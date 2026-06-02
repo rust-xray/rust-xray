@@ -1054,39 +1054,35 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
     }
 
     if let Some(mut api_task) = api_task {
-        loop {
-            tokio::select! {
-                api_result = &mut api_task => {
-                    match api_result {
-                        Ok(Ok(())) => {
-                            crate::startup_log::eprintln_bootstrap(
-                                "critical task exited: api server returned",
-                            );
-                            error!("Xray API server task exited unexpectedly");
-                        }
-                        Ok(Err(err)) => {
-                            crate::startup_log::eprintln_bootstrap(format!(
-                                "critical task exited: api server error: {err}"
-                            ));
-                            error!(error = %err, "Xray API server task failed");
-                            return Err(err);
-                        }
-                        Err(join_err) => {
-                            crate::startup_log::eprintln_bootstrap(format!(
-                                "critical task exited: api server join error: {join_err}"
-                            ));
-                            error!(error = %join_err, "Xray API server task join failed");
-                            return Err(std::io::Error::other(join_err));
-                        }
+        tokio::select! {
+            api_result = &mut api_task => {
+                match api_result {
+                    Ok(Ok(())) => {
+                        crate::startup_log::eprintln_bootstrap(
+                            "critical task exited: api server returned",
+                        );
+                        error!("Xray API server task exited unexpectedly");
                     }
-                    break;
+                    Ok(Err(err)) => {
+                        crate::startup_log::eprintln_bootstrap(format!(
+                            "critical task exited: api server error: {err}"
+                        ));
+                        error!(error = %err, "Xray API server task failed");
+                        return Err(err);
+                    }
+                    Err(join_err) => {
+                        crate::startup_log::eprintln_bootstrap(format!(
+                            "critical task exited: api server join error: {join_err}"
+                        ));
+                        error!(error = %join_err, "Xray API server task join failed");
+                        return Err(std::io::Error::other(join_err));
+                    }
                 }
-                _ = wait_shutdown_signal() => {
-                    info!("rust-xray shutting down after signal");
-                    crate::startup_log::eprintln_bootstrap("rust-xray shutting down after signal");
-                    api_task.abort();
-                    break;
-                }
+            }
+            _ = wait_shutdown_signal() => {
+                info!("rust-xray shutting down after signal");
+                crate::startup_log::eprintln_bootstrap("rust-xray shutting down after signal");
+                api_task.abort();
             }
         }
     } else {
