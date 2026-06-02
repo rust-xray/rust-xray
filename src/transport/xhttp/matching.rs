@@ -192,6 +192,39 @@ pub fn method_matches_packet_up_download(method: &str) -> bool {
     method.eq_ignore_ascii_case("GET")
 }
 
+pub fn parse_stream_up_path(configured_base: &str, request_target: &str) -> Option<String> {
+    let parsed = parse_packet_up_path(configured_base, request_target)?;
+    if parsed.seq.is_some() {
+        return None;
+    }
+    Some(parsed.session_id)
+}
+
+pub fn stream_up_path_has_seq(configured_base: &str, request_target: &str) -> bool {
+    parse_packet_up_path(configured_base, request_target).is_some_and(|parsed| parsed.seq.is_some())
+}
+
+pub fn validate_stream_up_request(
+    settings: &XHttpMatchSettings<'_>,
+    request: &XHttpRequestDescriptor<'_>,
+    security: TransportSecurity,
+) -> Result<String, XHttpMatchRejectReason> {
+    if !host_matches(settings.host, request.host, security) {
+        return Err(XHttpMatchRejectReason::HostMismatch);
+    }
+    if request.method.eq_ignore_ascii_case("POST")
+        && stream_up_path_has_seq(settings.path, request.request_target)
+    {
+        return Err(XHttpMatchRejectReason::PathMismatch);
+    }
+    let session_id = parse_stream_up_path(settings.path, request.request_target)
+        .ok_or(XHttpMatchRejectReason::PathMismatch)?;
+    if !request.method.eq_ignore_ascii_case("GET") && !request.method.eq_ignore_ascii_case("POST") {
+        return Err(XHttpMatchRejectReason::MethodMismatch);
+    }
+    Ok(session_id)
+}
+
 pub fn validate_packet_up_request(
     settings: &XHttpMatchSettings<'_>,
     request: &XHttpRequestDescriptor<'_>,

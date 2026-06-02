@@ -340,22 +340,13 @@ impl XHttpPacketUpManager {
     }
 
     pub fn close_session(&self, session_id: &str, reason: &str) {
-        if self.meta.close(session_id, reason).is_ok() {
-            let mut sessions = self
-                .sessions
-                .lock()
-                .expect("packet-up sessions lock poisoned");
-            if let Some(runtime) = sessions.remove(session_id) {
-                runtime.input.close();
-            }
-        } else {
-            let mut sessions = self
-                .sessions
-                .lock()
-                .expect("packet-up sessions lock poisoned");
-            if let Some(runtime) = sessions.remove(session_id) {
-                runtime.input.close();
-            }
+        let _ = self.meta.close(session_id, reason);
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("packet-up sessions lock poisoned");
+        if let Some(runtime) = sessions.remove(session_id) {
+            runtime.input.close();
         }
     }
 

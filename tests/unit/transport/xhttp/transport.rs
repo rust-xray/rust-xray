@@ -1,5 +1,6 @@
 use super::*;
 use crate::transport::xhttp::packet_up::{shared_packet_up_manager, PacketUpLimits};
+use crate::transport::xhttp::stream_up::shared_stream_up_manager;
 use crate::vless::VlessUserManager;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -338,17 +339,78 @@ fn packet_up_h2_is_supported_when_download_side_ready() {
 }
 
 #[tokio::test]
-async fn stream_up_returns_unsupported_without_bridge() {
+async fn stream_up_http1_post_without_seq_attaches_upload() {
     let settings = XHttpSettings {
         path: "/xhttp".to_string(),
         mode: Some("stream-up".to_string()),
         ..XHttpSettings::default()
     };
-    let (response, outbound_connected) =
-        run_post_with_outbound_probe(settings, "/xhttp", "example.com").await;
+    let response = run_post(settings, "/xhttp/session-a", "example.com").await;
     let body = String::from_utf8_lossy(&response);
-    assert!(body.starts_with("HTTP/1.1 501 Not Implemented"), "{body}");
-    assert!(!outbound_connected);
+    assert!(body.starts_with("HTTP/1.1 200 OK"), "{body}");
+}
+
+#[tokio::test]
+async fn stream_up_http1_post_with_seq_is_rejected() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("stream-up".to_string()),
+        ..XHttpSettings::default()
+    };
+    let response = run_post(settings, "/xhttp/session-a/0", "example.com").await;
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 400 Bad Request"));
+}
+
+#[tokio::test]
+async fn stream_up_http1_get_attaches_to_session() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("stream-up".to_string()),
+        ..XHttpSettings::default()
+    };
+    let response = run_request(
+        settings,
+        b"GET /xhttp/session-a HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    let body = String::from_utf8_lossy(&response);
+    assert!(body.contains("Content-Type: text/event-stream"), "{body}");
+    assert!(body.contains("Transfer-Encoding: chunked"), "{body}");
+}
+
+#[tokio::test]
+async fn stream_up_duplicate_download_get_is_rejected() {
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("stream-up".to_string()),
+        ..XHttpSettings::default()
+    };
+    let manager = shared_stream_up_manager();
+    let _download_rx = manager
+        .bind_download_session("session-dup")
+        .expect("first download bind");
+    let response = run_request(
+        settings,
+        b"GET /xhttp/session-dup HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 409 Conflict"));
+}
+
+#[test]
+fn stream_up_h2_is_supported_when_download_side_ready() {
+    use crate::transport::xhttp::{stream_up_download_side_ready, EffectiveXHttpMode};
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        mode: Some("stream-up".to_string()),
+        ..XHttpSettings::default()
+    };
+    assert!(stream_up_download_side_ready());
+    assert_eq!(
+        resolve_xhttp_mode_for_settings(&settings, TransportSecurity::Reality).unwrap(),
+        EffectiveXHttpMode::StreamUp
+    );
+    assert!(xhttp_runtime_unsupported_reason(&settings, EffectiveXHttpMode::StreamUp).is_none());
 }
 
 #[tokio::test]

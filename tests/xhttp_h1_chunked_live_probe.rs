@@ -179,7 +179,7 @@ async fn live_tcp_duplicate_download_get_conflict() {
 }
 
 #[tokio::test]
-async fn live_tcp_stream_up_unsupported() {
+async fn live_tcp_stream_up_post_without_session_is_rejected() {
     let settings = XHttpSettings {
         path: "/xhttp".to_string(),
         mode: Some("stream-up".to_string()),
@@ -189,7 +189,7 @@ async fn live_tcp_stream_up_unsupported() {
     let request = b"POST /xhttp HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n";
     let response = http1_exchange(addr, request).await;
     assert!(
-        String::from_utf8_lossy(&response).starts_with("HTTP/1.1 501 Not Implemented"),
+        String::from_utf8_lossy(&response).starts_with("HTTP/1.1 400 Bad Request"),
         "{}",
         String::from_utf8_lossy(&response)
     );

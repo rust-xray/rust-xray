@@ -38,17 +38,18 @@ fn stream_one_resolves_to_stream_one() {
 }
 
 #[test]
-fn stream_up_resolves_but_is_not_supported_at_runtime() {
+fn stream_up_resolves_and_is_supported_at_runtime() {
     assert_eq!(
         resolve_xhttp_mode(Some(XHttpMode::StreamUp), false, TransportSecurity::Reality).unwrap(),
         EffectiveXHttpMode::StreamUp
     );
-    assert!(!effective_xhttp_mode_is_supported(
+    assert!(stream_up_download_side_ready());
+    assert!(effective_xhttp_mode_is_supported(
         EffectiveXHttpMode::StreamUp
     ));
     assert_eq!(
         effective_xhttp_mode_unsupported_reason(EffectiveXHttpMode::StreamUp),
-        Some("stream_up_not_implemented")
+        None
     );
 }
 

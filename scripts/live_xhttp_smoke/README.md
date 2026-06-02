@@ -40,8 +40,8 @@ Run from the repository root:
 | `mode_auto` | PASS |
 | `mode_stream_one` | PASS |
 | `mode_packet_up` | PASS (HTTP/2, official Xray 26.3.27) |
+| `mode_stream_up` | PASS (HTTP/2, official Xray 26.3.27) |
 | `mode_auto_download` | PASS |
-| `mode_stream_up` | UNSUPPORTED |
 | `mode_packet_down` | UNSUPPORTED (expected client config parse fail) |
 | `h1_chunked_upload_unit_smoke` | PASS |
 

@@ -58,9 +58,10 @@ connection closes (by design).
 | Happ Proxy Utility baseline | **Experimental working** | REALITY/VLESS/Vision/Mux path reaches mux session; UDP DNS inside Mux works for numeric `:53` (live smoke validated) |
 | ML-DSA-65 baseline | **Experimental** | Valid `mldsa65Seed` accepted; invalid seed rejected at startup; raw Vision smoke passes; no cargo feature gate (see [baseline doc](./reality-mldsa65-runtime-baseline.md)) |
 | REALITY + XHTTP `stream-one` | **Experimental supported** | HTTP/1.1 / HTTP/2 POST over accepted REALITY TLS stream; official Xray 26.3.27 interop smoke PASS for default / `auto` / `stream-one` over HTTP/2; VLESS `flow=""` only |
+| XHTTP `stream-up` over HTTP/2 | **Experimental supported** | GET download + POST upload on `/xhttp/{session}`; official Xray 26.3.27 live smoke **PASS** (`mode_stream_up`) |
 | XHTTP `packet-up` over HTTP/2 | **Experimental supported** | Separate GET download + POST upload ack; official Xray 26.3.27 live smoke **PASS** (`mode_packet_up`, `mode_auto_download`) |
 | XHTTP `packet-up` HTTP/1.1 chunked upload | **Experimental supported (unit smoke)** | `Transfer-Encoding: chunked` streaming upload on HTTP/1 adapter; `h1_chunked_upload_unit_smoke` **PASS**; **official Xray H1 origin interop not verified** (client uses HTTP/2 on REALITY) |
-| XHTTP `stream-up` / `packet-down` / XMUX | **Unsupported / gated** | Config may parse; runtime gated (`501` / fail-fast) |
+| XHTTP `packet-down` / XMUX | **Unsupported / gated** | Config may parse; runtime gated (`501` / fail-fast) |
 | Vision over XHTTP | **Unsupported** | Explicitly rejected at startup (`flow="xtls-rprx-vision"` over XHTTP) |
 
 **VLESS Mux wording (accurate):** not full Xray-core Mux.Cool parity. The Happ
@@ -98,7 +99,7 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | FakeDNS | Not implemented |
 | DNS inbound / dokodemo-door hijack | Not implemented |
 | Full Xray DNS module compatibility | Not implemented |
-| XHTTP `stream-up` / `packet-down` / XMUX | Unsupported / gated (config parses; runtime fail-fast `501`) |
+| XHTTP `packet-down` / XMUX | Unsupported / gated (config parses; runtime fail-fast `501`) |
 | XHTTP XUDP over XHTTP | Not implemented |
 | REALITY over gRPC / WebSocket runtime | Not implemented (configs rejected at startup) |
 | DoH through outbound | Not implemented |
@@ -158,7 +159,7 @@ mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`).
 
 | Suite | Command | Covers |
 |-------|---------|--------|
-| Live REALITY smoke | `make live-smoke` | Vision, fallback matrix, ciphers, ML-DSA-65, Happ mux UDP DNS baseline, transport negatives (`grpc` / `ws` + REALITY rejected; `xhttp` accepted for experimental XHTTP) |
+| Live REALITY smoke | `make live-smoke` | Vision, fallback matrix, ciphers, ML-DSA-65, Happ mux UDP DNS baseline, unsupported UDP/XUDP probes with TCP regressions, transport rejection checks (`grpc` / `ws` + REALITY rejected; `xhttp` accepted for experimental XHTTP) |
 | Live XHTTP smoke | `bash scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh` | Official Xray 26.3.27 interop matrix + `h1_chunked_upload_unit_smoke` (see [XHTTP smoke README](../scripts/live_xhttp_smoke/README.md)) |
 | Remna compat | `bash scripts/remna_compat/run-local-api-smoke.sh` | gRPC StatsService, panel fixture load |
 | Config audit tests | `cargo test` | Parse policy, fallback selection unit tests |

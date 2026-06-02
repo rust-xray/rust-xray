@@ -34,9 +34,10 @@ connection.
 
 ### Experimental
 
-- **REALITY + XHTTP accepted path (experimental MVP):** server-side HTTP/1.1 / HTTP/2 `stream-one` and `packet-up` over accepted REALITY TLS stream; official Xray 26.3.27 interop smoke PASS for default / `auto` / `stream-one` / `packet-up` / `auto-download` (HTTP/2)
+- **REALITY + XHTTP accepted path (experimental MVP):** server-side HTTP/1.1 / HTTP/2 `stream-one`, `stream-up`, and `packet-up` over accepted REALITY TLS stream; official Xray 26.3.27 interop smoke PASS for default / `auto` / `stream-one` / `stream-up` / `packet-up` / `auto-download` (HTTP/2)
 - **XHTTP `packet-up` (experimental supported):** GET download + POST upload ack; live smoke PASS (`mode_packet_up`); HTTP/1.1 chunked upload unit smoke PASS; official Xray H1 interop **not verified**
-- **XHTTP unsupported / gated:** `stream-up`, `packet-down`, XMUX — config may parse; runtime returns `501` / fail-fast
+- **XHTTP `stream-up` (experimental supported):** GET download + POST upload on `/xhttp/{session}`; live smoke PASS (`mode_stream_up`) with official Xray 26.3.27 over HTTP/2
+- **XHTTP unsupported / gated:** `packet-down`, XMUX — config may parse; runtime returns `501` / fail-fast
 - **Vision over XHTTP:** unsupported (explicitly rejected at startup)
 - **VLESS Mux (Happ baseline):** REALITY → TLS 1.3 → VLESS auth → `command=Mux` → mux session start (live smoke validated)
 - **UDP DNS over VLESS Mux (port 53):** numeric `:53` targets (e.g. `1.1.1.1:53`) — query forwarded, response received, mux UDP response frame sent
@@ -87,7 +88,7 @@ Validated scenarios include:
 - Cipher suite smoke (AES128 / AES256 / ChaCha20)
 - ML-DSA-65 baseline (4/4 checks when enabled in fixture)
 - Happ baseline: REALITY/Vision/Mux + UDP DNS `1.1.1.1:53` (`PASS happ reality vision mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`)
-- Negative transport configs (`grpc`, `ws` + REALITY rejected at startup; `xhttp` / `splithttp` accepted for experimental XHTTP)
+- Transport rejection checks (`grpc`, `ws` + REALITY rejected at startup; `xhttp` / `splithttp` accepted for experimental XHTTP)
 
 Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/README.md)**,
 **[scripts/live_xhttp_smoke/README.md](scripts/live_xhttp_smoke/README.md)**,
@@ -97,7 +98,7 @@ Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/REA
 
 - Full Mux.Cool runtime; generic UDP over Mux; domain `:53` mux resolver; XUDP
 - VLESS `command=Udp` (non-Mux); full routing/outbounds
-- XHTTP `stream-up` / `packet-down` / XMUX; Vision over XHTTP; XUDP over XHTTP
+- XHTTP `packet-down` / XMUX; Vision over XHTTP; XUDP over XHTTP
 - REALITY over gRPC / WebSocket runtime (rejected at startup)
 - ML-KEM (ML-DSA-65 baseline is experimental — see docs)
 - Vision splice / zero-copy beyond DIRECT MVP

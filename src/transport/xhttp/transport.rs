@@ -32,8 +32,9 @@ use super::extract::{
 use super::matching::{
     host_matches, method_matches_packet_up_download, method_matches_packet_up_upload,
     method_matches_stream_one, parse_packet_up_path, parse_packet_up_upload_seq_strict,
-    path_matches, query_keys, request_path_component, xhttp_match_reject_reason_label,
-    XHttpMatchRejectReason, XHttpMatchSettings, XHttpRequestDescriptor,
+    parse_stream_up_path, path_matches, query_keys, request_path_component, stream_up_path_has_seq,
+    xhttp_match_reject_reason_label, XHttpMatchRejectReason, XHttpMatchSettings,
+    XHttpRequestDescriptor,
 };
 use super::mode::{
     configured_xhttp_mode, configured_xhttp_mode_label, effective_xhttp_mode_label,
@@ -42,6 +43,7 @@ use super::mode::{
 };
 use super::packet_up::{shared_packet_up_manager, spawn_packet_up_bridge, PacketUpLimits};
 use super::session::XHttpSessionManager;
+use super::stream_up::{shared_stream_up_manager, spawn_stream_up_bridge, StreamUpLimits};
 
 const MAX_HTTP_HEADER_SIZE: usize = 16 * 1024;
 const HTTP1_UPLOAD_READ_BUFFER: usize = 16 * 1024;
@@ -83,6 +85,24 @@ fn extract_packet_up_upload_seq(
             XHttpError::MalformedPacketRequest("invalid packet-up upload path".to_string()),
         ),
     }
+}
+
+fn extract_stream_up_session_id(
+    settings: &XHttpSettings,
+    request_target: &str,
+    method: &str,
+) -> Result<String, XHttpError> {
+    if method.eq_ignore_ascii_case("POST")
+        && stream_up_path_has_seq(settings.effective_path(), request_target)
+    {
+        return Err(XHttpError::MalformedPacketRequest(
+            "stream-up upload path must not include seq".to_string(),
+        ));
+    }
+    let session_id = parse_stream_up_path(settings.effective_path(), request_target)
+        .ok_or(XHttpError::MissingSessionId)?;
+    XHttpSessionManager::validate_session_id_as_xhttp_error(&session_id)?;
+    Ok(session_id)
 }
 
 static NEXT_XHTTP_CONN_ID: AtomicU64 = AtomicU64::new(1);
@@ -1136,6 +1156,7 @@ async fn handle_packet_up_h2_download(
     }
 
     manager.detach_download_session(&session_id);
+    manager.close_session(&session_id, "download_disconnected");
     let _ = send.send_data(Bytes::new(), true);
     Ok(())
 }
@@ -1365,6 +1386,285 @@ async fn handle_xhttp_h2_packet_up(
     send_h2_empty_response(respond, StatusCode::METHOD_NOT_ALLOWED).await
 }
 
+async fn handle_stream_up_h2_download(
+    session_id: String,
+    mut respond: h2::server::SendResponse<Bytes>,
+    inbound_tag: &str,
+    conn_id: u64,
+) -> io::Result<()> {
+    let manager = shared_stream_up_manager();
+    let mut download_rx = match manager.bind_download_session(&session_id) {
+        Ok(rx) => rx,
+        Err(err) => {
+            warn!(
+                inbound_tag,
+                conn_id,
+                session_id = %session_id,
+                error = %err,
+                "xhttp stream-up download session rejected"
+            );
+            let status = if err == super::session::XHttpSessionError::DownloadAlreadyAttached {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            return send_h2_empty_response(respond, status).await;
+        }
+    };
+
+    let response =
+        packet_up_download_h2_response().map_err(|err| io::Error::other(err.to_string()))?;
+    let mut send = respond
+        .send_response(response, false)
+        .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))?;
+
+    debug!(
+        inbound_tag,
+        conn_id,
+        session_id = %session_id,
+        "xhttp stream-up download stream opened"
+    );
+
+    loop {
+        manager.touch_session(&session_id);
+        let recv_timeout = manager.download_wait_timeout(&session_id);
+        match tokio::time::timeout(recv_timeout, download_rx.recv()).await {
+            Ok(Some(chunk)) => {
+                if chunk.is_empty() {
+                    continue;
+                }
+                if h2_send_chunk(&mut send, chunk).await.is_err() {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                if manager.upload_attached_for(&session_id) {
+                    continue;
+                }
+                warn!(
+                    inbound_tag,
+                    conn_id,
+                    session_id = %session_id,
+                    timeout_secs = recv_timeout.as_secs(),
+                    "xhttp stream-up download recv timed out"
+                );
+                break;
+            }
+        }
+    }
+
+    manager.detach_download_session(&session_id);
+    let _ = send.send_data(Bytes::new(), true);
+    Ok(())
+}
+
+async fn handle_stream_up_h2_upload(
+    session_id: String,
+    mut body: h2::RecvStream,
+    mut respond: h2::server::SendResponse<Bytes>,
+    inbound_tag: &str,
+    conn_id: u64,
+    users: Arc<VlessUserManager>,
+    stats_state: Option<StatsState>,
+    limits: StreamUpLimits,
+) -> io::Result<()> {
+    let manager = shared_stream_up_manager();
+    let mut upload_handle = match manager.attach_upload(&session_id, limits) {
+        Ok(handle) => handle,
+        Err(err) => {
+            warn!(
+                inbound_tag,
+                conn_id,
+                session_id = %session_id,
+                error = %err,
+                "xhttp stream-up upload session rejected"
+            );
+            let status = if err == super::session::XHttpSessionError::UploadAlreadyAttached {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return send_h2_empty_response(respond, status).await;
+        }
+    };
+
+    let post_response = Response::builder()
+        .status(StatusCode::OK)
+        .body(())
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    let mut post_send = respond
+        .send_response(post_response, false)
+        .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))?;
+
+    let bridge_launch = match manager.launch_upload_bridge(&session_id) {
+        Ok(launch) => launch,
+        Err(err) => {
+            warn!(
+                inbound_tag,
+                conn_id,
+                session_id = %session_id,
+                error = %err,
+                "xhttp stream-up bridge launch failed"
+            );
+            manager.close_session(&session_id, "bridge_launch_failed");
+            let _ = post_send.send_data(Bytes::new(), true);
+            return Ok(());
+        }
+    };
+    if let Some(launch) = bridge_launch {
+        spawn_stream_up_bridge(launch, users, stats_state, inbound_tag.to_string(), conn_id);
+    }
+
+    let mut upload_error: Option<String> = None;
+    let mut total_bytes = 0usize;
+    while let Some(data) = body.data().await {
+        manager.touch_session(&session_id);
+        match data {
+            Ok(chunk) => {
+                let len = chunk.len();
+                total_bytes += len;
+                let _ = body.flow_control().release_capacity(len);
+                match manager.append_upload_chunk(&mut upload_handle, chunk) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        upload_error = Some(err.to_string());
+                        break;
+                    }
+                }
+            }
+            Err(err)
+                if matches!(
+                    err.reason(),
+                    Some(h2::Reason::NO_ERROR | h2::Reason::CANCEL)
+                ) =>
+            {
+                break;
+            }
+            Err(err) => {
+                upload_error = Some(err.to_string());
+                break;
+            }
+        }
+    }
+
+    manager.finish_upload(&session_id);
+
+    if total_bytes > 0 {
+        debug!(
+            session_id = %session_id,
+            bytes = total_bytes,
+            "xhttp stream-up body appended"
+        );
+    }
+
+    if let Some(err) = upload_error {
+        warn!(
+            inbound_tag,
+            conn_id,
+            session_id = %session_id,
+            error = %err,
+            "xhttp stream-up upload failed"
+        );
+        manager.close_session(&session_id, "upload_failed");
+        let _ = post_send.send_data(Bytes::new(), true);
+        return Ok(());
+    }
+
+    let _ = post_send.send_data(Bytes::new(), true);
+    Ok(())
+}
+
+async fn handle_xhttp_h2_stream_up(
+    request: Request<h2::RecvStream>,
+    respond: h2::server::SendResponse<Bytes>,
+    settings: &XHttpSettings,
+    inbound_tag: &str,
+    users: Arc<VlessUserManager>,
+    stats_state: Option<StatsState>,
+    conn_id: u64,
+) -> io::Result<()> {
+    let method = request.method().as_str().to_string();
+    let request_target = h2_request_target(&request);
+    let host = request
+        .headers()
+        .get(http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| request.uri().authority().map(|value| value.as_str()));
+
+    log_xhttp_request_received(
+        inbound_tag,
+        conn_id,
+        &method,
+        &request_target,
+        host,
+        "HTTP/2",
+    );
+
+    let match_settings = xhttp_match_settings(settings);
+    if !host_matches(match_settings.host, host, TransportSecurity::Reality) {
+        log_xhttp_host_result(
+            inbound_tag,
+            conn_id,
+            &match_settings,
+            host,
+            false,
+            Some(XHttpMatchRejectReason::HostMismatch),
+        );
+        return send_h2_empty_response(respond, StatusCode::NOT_FOUND).await;
+    }
+    log_xhttp_host_result(inbound_tag, conn_id, &match_settings, host, true, None);
+
+    let session_id = match extract_stream_up_session_id(settings, &request_target, &method) {
+        Ok(session_id) => session_id,
+        Err(err) => {
+            warn!(
+                inbound_tag,
+                conn_id,
+                error = %err,
+                "xhttp stream-up session extraction failed"
+            );
+            return send_h2_empty_response(respond, packet_up_error_status(&err)).await;
+        }
+    };
+
+    if method_matches_packet_up_upload(&method) {
+        let body_hint = packet_up_body_hint(h2_content_length(&request), 0);
+        debug!(
+            inbound_tag,
+            conn_id,
+            session_id = %session_id,
+            body_hint = %body_hint,
+            "xhttp stream-up upload request received"
+        );
+        return handle_stream_up_h2_upload(
+            session_id,
+            request.into_body(),
+            respond,
+            inbound_tag,
+            conn_id,
+            users,
+            stats_state,
+            StreamUpLimits::from_settings(settings),
+        )
+        .await;
+    }
+
+    if method_matches_packet_up_download(&method) {
+        let body_hint = packet_up_body_hint(None, 0);
+        debug!(
+            inbound_tag,
+            conn_id,
+            session_id = %session_id,
+            body_hint = %body_hint,
+            "xhttp stream-up download request received"
+        );
+        return handle_stream_up_h2_download(session_id, respond, inbound_tag, conn_id).await;
+    }
+
+    send_h2_empty_response(respond, StatusCode::METHOD_NOT_ALLOWED).await
+}
+
 async fn handle_packet_up_http1_download<S: AsyncWrite + Unpin>(
     stream: &mut S,
     session_id: String,
@@ -1426,6 +1726,7 @@ async fn handle_packet_up_http1_download<S: AsyncWrite + Unpin>(
     }
 
     manager.detach_download_session(&session_id);
+    manager.close_session(&session_id, "download_disconnected");
     write_http1_chunked_chunk(stream, &[]).await?;
     stream.shutdown().await
 }
@@ -1693,6 +1994,263 @@ async fn handle_packet_up_http1_upload<S: AsyncRead + AsyncWrite + Unpin>(
     write_status(stream, "200 OK").await
 }
 
+fn stream_up_upload_error_status(err: &str) -> &'static str {
+    if err.contains("backpressure") {
+        "503 Service Unavailable"
+    } else if err.contains("scMaxEachPostBytes") || err.contains("UploadTooLarge") {
+        "413 Payload Too Large"
+    } else {
+        "400 Bad Request"
+    }
+}
+
+async fn handle_stream_up_http1_download<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    session_id: String,
+    inbound_tag: &str,
+    conn_id: u64,
+) -> io::Result<()> {
+    let manager = shared_stream_up_manager();
+    let mut download_rx = match manager.bind_download_session(&session_id) {
+        Ok(rx) => rx,
+        Err(err) => {
+            warn!(
+                inbound_tag,
+                conn_id,
+                session_id = %session_id,
+                error = %err,
+                "xhttp stream-up download session rejected"
+            );
+            let status = if err == super::session::XHttpSessionError::DownloadAlreadyAttached {
+                "409 Conflict"
+            } else {
+                "404 Not Found"
+            };
+            return write_status(stream, status).await;
+        }
+    };
+
+    stream
+        .write_all(PACKET_UP_DOWNLOAD_RESPONSE_HEADERS_HTTP1.as_bytes())
+        .await?;
+    debug!(
+        inbound_tag,
+        conn_id,
+        session_id = %session_id,
+        "xhttp stream-up download stream opened"
+    );
+
+    loop {
+        manager.touch_session(&session_id);
+        let recv_timeout = manager.download_wait_timeout(&session_id);
+        match tokio::time::timeout(recv_timeout, download_rx.recv()).await {
+            Ok(Some(chunk)) => {
+                if chunk.is_empty() {
+                    continue;
+                }
+                if write_http1_chunked_chunk(stream, &chunk).await.is_err() {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                if manager.upload_attached_for(&session_id) {
+                    continue;
+                }
+                warn!(
+                    inbound_tag,
+                    conn_id,
+                    session_id = %session_id,
+                    timeout_secs = recv_timeout.as_secs(),
+                    "xhttp stream-up download recv timed out"
+                );
+                break;
+            }
+        }
+    }
+
+    manager.detach_download_session(&session_id);
+    write_http1_chunked_chunk(stream, &[]).await?;
+    stream.shutdown().await
+}
+
+async fn handle_stream_up_http1_upload<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    head: &XHttpRequestHead,
+    prebuffer: Vec<u8>,
+    session_id: String,
+    inbound_tag: &str,
+    conn_id: u64,
+    users: Arc<VlessUserManager>,
+    stats_state: Option<StatsState>,
+    limits: StreamUpLimits,
+) -> io::Result<()> {
+    let manager = shared_stream_up_manager();
+    let mut upload_handle = match manager.attach_upload(&session_id, limits) {
+        Ok(handle) => handle,
+        Err(err) => {
+            warn!(
+                inbound_tag,
+                conn_id,
+                session_id = %session_id,
+                error = %err,
+                "xhttp stream-up upload session rejected"
+            );
+            let status = if err == super::session::XHttpSessionError::UploadAlreadyAttached {
+                "409 Conflict"
+            } else {
+                "400 Bad Request"
+            };
+            return write_status(stream, status).await;
+        }
+    };
+
+    let content_length = request_content_length(head).ok().flatten();
+    let transfer_encoding = head.header("transfer-encoding").map(str::to_string);
+    let bridge_launch = match manager.launch_upload_bridge(&session_id) {
+        Ok(launch) => launch,
+        Err(err) => {
+            warn!(
+                inbound_tag,
+                conn_id,
+                session_id = %session_id,
+                error = %err,
+                "xhttp stream-up bridge launch failed"
+            );
+            manager.close_session(&session_id, "bridge_launch_failed");
+            return write_status(stream, stream_up_upload_error_status(&err.to_string())).await;
+        }
+    };
+    if let Some(launch) = bridge_launch {
+        spawn_stream_up_bridge(launch, users, stats_state, inbound_tag.to_string(), conn_id);
+    }
+
+    let mut upload_error: Option<String> = None;
+    let mut total_bytes = 0usize;
+    match stream_http1_packet_up_upload_body(
+        stream,
+        prebuffer,
+        content_length,
+        transfer_encoding.as_deref(),
+        |chunk| {
+            if chunk.is_empty() {
+                return Ok(());
+            }
+            total_bytes += chunk.len();
+            match manager.append_upload_chunk(&mut upload_handle, chunk) {
+                Ok(()) => Ok(()),
+                Err(err) => Err(err.to_string()),
+            }
+        },
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(err)
+            if err.contains("malformed")
+                || err.contains("truncated")
+                || err.contains("chunk size") =>
+        {
+            warn!(
+                inbound_tag,
+                conn_id,
+                session_id = %session_id,
+                error = %err,
+                "xhttp stream-up upload body read failed"
+            );
+            manager.finish_upload(&session_id);
+            manager.close_session(&session_id, "upload_body_invalid");
+            return write_status(stream, "400 Bad Request").await;
+        }
+        Err(err) => upload_error = Some(err),
+    }
+
+    manager.finish_upload(&session_id);
+
+    if total_bytes > 0 {
+        debug!(
+            session_id = %session_id,
+            bytes = total_bytes,
+            "xhttp stream-up body appended"
+        );
+    }
+
+    if let Some(err) = upload_error {
+        warn!(
+            inbound_tag,
+            conn_id,
+            session_id = %session_id,
+            error = %err,
+            "xhttp stream-up upload failed"
+        );
+        manager.close_session(&session_id, "upload_failed");
+        return write_status(stream, stream_up_upload_error_status(&err)).await;
+    }
+
+    write_status(stream, "200 OK").await
+}
+
+async fn handle_xhttp_http1_stream_up<S>(
+    mut stream: S,
+    settings: &XHttpSettings,
+    head: &XHttpRequestHead,
+    prebuffer: Vec<u8>,
+    inbound_tag: &str,
+    conn_id: u64,
+    users: Arc<VlessUserManager>,
+    stats_state: Option<StatsState>,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let match_settings = xhttp_match_settings(settings);
+    if !host_matches(
+        match_settings.host,
+        head.header("host"),
+        TransportSecurity::Reality,
+    ) {
+        return write_status(&mut stream, "404 Not Found").await;
+    }
+
+    if method_matches_packet_up_upload(&head.method) {
+        let session_id = match extract_stream_up_session_id(
+            settings,
+            &head.request_target,
+            &head.method,
+        ) {
+            Ok(session_id) => session_id,
+            Err(err) => {
+                warn!(inbound_tag, conn_id, error = %err, "xhttp stream-up session extraction failed");
+                return write_status(&mut stream, "400 Bad Request").await;
+            }
+        };
+        return handle_stream_up_http1_upload(
+            &mut stream,
+            head,
+            prebuffer,
+            session_id,
+            inbound_tag,
+            conn_id,
+            users,
+            stats_state,
+            StreamUpLimits::from_settings(settings),
+        )
+        .await;
+    }
+
+    if method_matches_packet_up_download(&head.method) {
+        let session_id =
+            match extract_stream_up_session_id(settings, &head.request_target, &head.method) {
+                Ok(session_id) => session_id,
+                Err(_) => return write_status(&mut stream, "400 Bad Request").await,
+            };
+        return handle_stream_up_http1_download(&mut stream, session_id, inbound_tag, conn_id)
+            .await;
+    }
+
+    write_status(&mut stream, "405 Method Not Allowed").await
+}
+
 async fn handle_xhttp_http1_packet_up<S>(
     mut stream: S,
     settings: &XHttpSettings,
@@ -1895,6 +2453,20 @@ where
         .await;
     }
 
+    if effective_mode == EffectiveXHttpMode::StreamUp {
+        return handle_xhttp_http1_stream_up(
+            stream,
+            settings,
+            &head,
+            prebuffer,
+            inbound_tag,
+            conn_id,
+            users,
+            stats_state,
+        )
+        .await;
+    }
+
     debug!(
         inbound_tag,
         conn_id,
@@ -1954,6 +2526,69 @@ where
     .await
 }
 
+async fn serve_xhttp_h2_session_modes<S>(
+    mut connection: h2::server::Connection<S, Bytes>,
+    settings: &XHttpSettings,
+    inbound_tag: &str,
+    users: Arc<VlessUserManager>,
+    stats_state: Option<StatsState>,
+    conn_id: u64,
+    effective_mode: EffectiveXHttpMode,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    while let Some(request) = connection.accept().await {
+        let Ok((request, mut respond)) = request else {
+            continue;
+        };
+        let settings = settings.clone();
+        let inbound_tag = inbound_tag.to_string();
+        let users = Arc::clone(&users);
+        let stats = stats_state.clone();
+        match effective_mode {
+            EffectiveXHttpMode::PacketUp => {
+                tokio::spawn(async move {
+                    let _ = handle_xhttp_h2_packet_up(
+                        request,
+                        respond,
+                        &settings,
+                        &inbound_tag,
+                        users,
+                        stats,
+                        conn_id,
+                    )
+                    .await;
+                });
+            }
+            EffectiveXHttpMode::StreamUp => {
+                tokio::spawn(async move {
+                    let _ = handle_xhttp_h2_stream_up(
+                        request,
+                        respond,
+                        &settings,
+                        &inbound_tag,
+                        users,
+                        stats,
+                        conn_id,
+                    )
+                    .await;
+                });
+            }
+            _ => {
+                let response = match Response::builder().status(StatusCode::NOT_FOUND).body(()) {
+                    Ok(response) => response,
+                    Err(_) => continue,
+                };
+                if let Ok(mut send) = respond.send_response(response, false) {
+                    let _ = send.send_data(Bytes::new(), true);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn serve_xhttp_h2_stream_one<S>(
     stream: S,
     settings: &XHttpSettings,
@@ -1973,6 +2608,22 @@ where
             format!("xhttp h2 handshake failed: {err}"),
         )
     })?;
+    let packet_up = effective_mode == EffectiveXHttpMode::PacketUp
+        && xhttp_runtime_unsupported_reason(settings, effective_mode).is_none();
+    let stream_up = effective_mode == EffectiveXHttpMode::StreamUp
+        && xhttp_runtime_unsupported_reason(settings, effective_mode).is_none();
+    if packet_up || stream_up {
+        return serve_xhttp_h2_session_modes(
+            connection,
+            settings,
+            inbound_tag,
+            users,
+            stats_state,
+            conn_id,
+            effective_mode,
+        )
+        .await;
+    }
     let Some(request) = connection.accept().await else {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -1985,45 +2636,7 @@ where
             format!("xhttp h2 request failed: {err}"),
         )
     })?;
-    let settings_for_driver = settings.clone();
-    let packet_up = effective_mode == EffectiveXHttpMode::PacketUp
-        && xhttp_runtime_unsupported_reason(&settings_for_driver, effective_mode).is_none();
-    let inbound_tag_driver = inbound_tag.to_string();
-    let users_driver = Arc::clone(&users);
-    let stats_driver = stats_state.clone();
-    let driver = tokio::spawn(async move {
-        while let Some(request) = connection.accept().await {
-            let Ok((request, mut respond)) = request else {
-                continue;
-            };
-            if packet_up {
-                let users = Arc::clone(&users_driver);
-                let stats = stats_driver.clone();
-                let inbound_tag = inbound_tag_driver.clone();
-                let settings = settings_for_driver.clone();
-                tokio::spawn(async move {
-                    let _ = handle_xhttp_h2_packet_up(
-                        request,
-                        respond,
-                        &settings,
-                        &inbound_tag,
-                        users,
-                        stats,
-                        conn_id,
-                    )
-                    .await;
-                });
-                continue;
-            }
-            let response = match Response::builder().status(StatusCode::NOT_FOUND).body(()) {
-                Ok(response) => response,
-                Err(_) => continue,
-            };
-            if let Ok(mut send) = respond.send_response(response, false) {
-                let _ = send.send_data(Bytes::new(), true);
-            }
-        }
-    });
+    let driver = tokio::spawn(async move { while connection.accept().await.is_some() {} });
     let result = handle_xhttp_h2_request(
         request,
         respond,
@@ -2108,6 +2721,19 @@ async fn handle_xhttp_h2_request(
 
     if effective_mode == EffectiveXHttpMode::PacketUp {
         return handle_xhttp_h2_packet_up(
+            request,
+            respond,
+            settings,
+            inbound_tag,
+            users,
+            stats_state,
+            conn_id,
+        )
+        .await;
+    }
+
+    if effective_mode == EffectiveXHttpMode::StreamUp {
+        return handle_xhttp_h2_stream_up(
             request,
             respond,
             settings,

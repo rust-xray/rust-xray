@@ -144,3 +144,41 @@ fn validate_request_accepts_official_client_shape() {
         validate_xhttp_stream_one_request(&settings, &request, TransportSecurity::Reality).is_ok()
     );
 }
+
+#[test]
+fn parse_stream_up_path_rejects_seq_suffix() {
+    assert_eq!(
+        parse_stream_up_path("/xhttp", "/xhttp/session-a"),
+        Some("session-a".to_string())
+    );
+    assert!(parse_stream_up_path("/xhttp", "/xhttp/session-a/0").is_none());
+    assert!(stream_up_path_has_seq("/xhttp", "/xhttp/session-a/0"));
+}
+
+#[test]
+fn validate_stream_up_request_accepts_get_and_post_without_seq() {
+    let settings = XHttpMatchSettings {
+        path: "/xhttp",
+        host: None,
+    };
+    for method in ["GET", "POST"] {
+        let request = XHttpRequestDescriptor {
+            method,
+            request_target: "/xhttp/session-a",
+            host: Some("example.com"),
+        };
+        assert_eq!(
+            validate_stream_up_request(&settings, &request, TransportSecurity::Reality).unwrap(),
+            "session-a"
+        );
+    }
+    let upload_with_seq = XHttpRequestDescriptor {
+        method: "POST",
+        request_target: "/xhttp/session-a/0",
+        host: Some("example.com"),
+    };
+    assert!(matches!(
+        validate_stream_up_request(&settings, &upload_with_seq, TransportSecurity::Reality),
+        Err(XHttpMatchRejectReason::PathMismatch)
+    ));
+}

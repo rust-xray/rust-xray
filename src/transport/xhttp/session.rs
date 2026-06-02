@@ -44,6 +44,7 @@ pub enum XHttpSessionError {
     MaxSessionsReached,
     SessionNotFound,
     DownloadAlreadyAttached,
+    UploadAlreadyAttached,
 }
 
 impl std::fmt::Display for XHttpSessionError {
@@ -63,6 +64,9 @@ impl std::fmt::Display for XHttpSessionError {
             Self::SessionNotFound => write!(f, "xhttp session not found"),
             Self::DownloadAlreadyAttached => {
                 write!(f, "xhttp packet-up download stream already attached")
+            }
+            Self::UploadAlreadyAttached => {
+                write!(f, "xhttp stream-up upload stream already attached")
             }
         }
     }
@@ -145,6 +149,9 @@ impl XHttpSessionManager {
             }
             XHttpSessionError::DownloadAlreadyAttached => {
                 XHttpError::InvalidSessionId("download stream already attached".to_string())
+            }
+            XHttpSessionError::UploadAlreadyAttached => {
+                XHttpError::InvalidSessionId("upload stream already attached".to_string())
             }
         })
     }
@@ -245,6 +252,20 @@ impl XHttpSessionManager {
             .get(id)
             .cloned()
             .ok_or(XHttpSessionError::SessionNotFound)
+    }
+
+    pub fn touch(&self, id: &str) -> Result<(), XHttpSessionError> {
+        Self::validate_session_id(id)?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("xhttp session manager lock poisoned");
+        if let Some(session) = sessions.get_mut(id) {
+            session.last_seen = Instant::now();
+            Ok(())
+        } else {
+            Err(XHttpSessionError::SessionNotFound)
+        }
     }
 }
 

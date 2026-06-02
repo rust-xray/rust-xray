@@ -172,7 +172,7 @@ negative_client_config() {
   printf '%s\n' "${output}"
 }
 
-run_negative_vless_phase() {
+run_unsupported_vless_phase() {
   local name="$1"
   local server_config="$2"
   local client_config_path="$3"
@@ -188,36 +188,36 @@ run_negative_vless_phase() {
   if [[ "${probe_mode}" == "curl-tcp" ]]; then
     curl -sS -o /dev/null -m 10 \
       -x "socks5h://127.0.0.1:${SMOKE_SOCKS_PORT}" \
-      "${SMOKE_QUICK_URL}" >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+      "${SMOKE_QUICK_URL}" >>"${SMOKE_WORK_DIR}/unsupported-${name}.log" 2>&1 || true
   elif [[ "${probe_mode}" == "mux-cool" ]]; then
     # Xray opens the mux carrier only after at least one proxied TCP request.
     curl -sS -o /dev/null -m 10 \
       -x "socks5h://127.0.0.1:${SMOKE_SOCKS_PORT}" \
-      "${SMOKE_QUICK_URL}" >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+      "${SMOKE_QUICK_URL}" >>"${SMOKE_WORK_DIR}/unsupported-${name}.log" 2>&1 || true
     python3 "${SCRIPT_DIR}/vless-negative-probe.py" "${probe_mode}" "${SMOKE_SOCKS_PORT}" \
-      >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+      >>"${SMOKE_WORK_DIR}/unsupported-${name}.log" 2>&1 || true
   elif [[ "${probe_mode}" == "mux-udp" ]]; then
     curl -sS -o /dev/null -m 10 \
       -x "socks5h://127.0.0.1:${SMOKE_SOCKS_PORT}" \
-      "${SMOKE_QUICK_URL}" >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+      "${SMOKE_QUICK_URL}" >>"${SMOKE_WORK_DIR}/unsupported-${name}.log" 2>&1 || true
     python3 "${SCRIPT_DIR}/vless-negative-probe.py" mux-udp "${SMOKE_SOCKS_PORT}" "1.1.1.1" 54 \
-      >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+      >>"${SMOKE_WORK_DIR}/unsupported-${name}.log" 2>&1 || true
   else
     python3 "${SCRIPT_DIR}/vless-negative-probe.py" "${probe_mode}" "${SMOKE_SOCKS_PORT}" \
-      >>"${SMOKE_WORK_DIR}/negative-${name}.log" 2>&1 || true
+      >>"${SMOKE_WORK_DIR}/unsupported-${name}.log" 2>&1 || true
   fi
   sleep 0.5
   SMOKE_CLIENT_CONFIG_FOR_REGRESSION="${regression_client}"
-  smoke_expect_vless_negative "${name}" "${decrypt_before}" "${patterns[@]}"
+  smoke_expect_unsupported_vless_probe "${name}" "${decrypt_before}" "${patterns[@]}"
   unset SMOKE_CLIENT_CONFIG_FOR_REGRESSION
   unset SMOKE_REGRESSION_SERVER_CONFIG
 }
 
-phase_negative_udp_dns() {
+phase_unsupported_udp_dns() {
   local client
   client="$(negative_client_config udp-dns "" 0 "")"
-  run_negative_vless_phase \
-    "negative-udp-dns" \
+  run_unsupported_vless_phase \
+    "udp-dns-unsupported" \
     "${SERVER_EMPTY}" \
     "${client}" \
     "udp-dns" \
@@ -226,11 +226,11 @@ phase_negative_udp_dns() {
     "unsupported vless command"
 }
 
-phase_negative_udp_quic() {
+phase_unsupported_udp_quic() {
   local client
   client="$(negative_client_config udp-quic "" 0 "")"
-  run_negative_vless_phase \
-    "negative-udp-quic" \
+  run_unsupported_vless_phase \
+    "udp-quic-unsupported" \
     "${SERVER_EMPTY}" \
     "${client}" \
     "udp-quic" \
@@ -239,13 +239,13 @@ phase_negative_udp_quic() {
     "unsupported vless command"
 }
 
-phase_negative_udp_vision() {
+phase_unsupported_udp_vision() {
   local client regression_client
   client="$(negative_client_config udp-vision "xtls-rprx-vision" 0 "")"
   regression_client="$(client_config udp-vision-regression "xtls-rprx-vision")"
   SMOKE_REGRESSION_SERVER_CONFIG="${SERVER_VISION}"
-  run_negative_vless_phase \
-    "negative-udp-vision" \
+  run_unsupported_vless_phase \
+    "udp-vision-unsupported" \
     "${SERVER_VISION}" \
     "${client}" \
     "udp-dns" \
@@ -254,13 +254,13 @@ phase_negative_udp_vision() {
     "UDP unsupported"
 }
 
-phase_negative_mux_non_dns_udp() {
+phase_unsupported_mux_non_dns_udp() {
   local client regression_client
   client="$(negative_client_config mux-non-dns "xtls-rprx-vision" 1 "")"
   regression_client="$(client_config mux-non-dns-regression "xtls-rprx-vision")"
   SMOKE_REGRESSION_SERVER_CONFIG="${SERVER_VISION}"
-  run_negative_vless_phase \
-    "negative-mux-non-dns-udp" \
+  run_unsupported_vless_phase \
+    "mux-non-dns-udp-unsupported" \
     "${SERVER_VISION}" \
     "${client}" \
     "mux-udp" \
@@ -297,15 +297,15 @@ phase_happ_reality_vision_mux_udp_dns() {
   pass_phase "vless mux udp dns 1.1.1.1:53"
 }
 
-phase_negative_mux() {
-  phase_negative_mux_non_dns_udp
+phase_unsupported_mux() {
+  phase_unsupported_mux_non_dns_udp
 }
 
-phase_negative_xudp() {
+phase_unsupported_xudp() {
   local client
   client="$(negative_client_config xudp "" 0 "xudp")"
-  run_negative_vless_phase \
-    "negative-xudp" \
+  run_unsupported_vless_phase \
+    "xudp-unsupported" \
     "${SERVER_EMPTY}" \
     "${client}" \
     "udp-dns" \
@@ -315,12 +315,12 @@ phase_negative_xudp() {
     "unsupported vless command"
 }
 
-run_negative_vless_phases() {
-  run_phase "negative UDP DNS via SOCKS" phase_negative_udp_dns
-  run_phase "negative UDP 443 / QUIC attempt" phase_negative_udp_quic
-  run_phase "negative UDP + Vision flow" phase_negative_udp_vision
-  run_phase "negative Mux non-DNS UDP" phase_negative_mux
-  run_phase "negative XUDP request" phase_negative_xudp
+run_unsupported_vless_phases() {
+  run_phase "UDP DNS unsupported via SOCKS + TCP regression" phase_unsupported_udp_dns
+  run_phase "UDP 443 / QUIC unsupported + TCP regression" phase_unsupported_udp_quic
+  run_phase "UDP + Vision unsupported + TCP regression" phase_unsupported_udp_vision
+  run_phase "Mux non-DNS UDP unsupported + TCP regression" phase_unsupported_mux
+  run_phase "XUDP unsupported + TCP regression" phase_unsupported_xudp
 }
 
 phase_regression_empty_flow() {
@@ -444,7 +444,7 @@ phase_wrong_uuid() {
   local client
   client="$(client_config wrong-uuid "xtls-rprx-vision" "22222222-2222-2222-2222-222222222222")"
   smoke_start_stack "${SERVER_VISION}" "${client}"
-  smoke_expect_curl_fail "negative-wrong-uuid" -m 20 "${SMOKE_QUICK_URL}"
+  smoke_expect_curl_fail "wrong-uuid-rejected" -m 20 "${SMOKE_QUICK_URL}"
   smoke_log_contains "unknown vless client id" || smoke_log_contains "REALITY accepted path failed"
 }
 
@@ -973,12 +973,12 @@ main() {
   run_phase "vision 100 sequential requests" phase_vision_sequential_100
   run_phase "vision 50 parallel requests" phase_vision_parallel_50
   run_phase "vision 100MB download" phase_download_100mb
-  run_phase "negative wrong UUID" phase_wrong_uuid
+  run_phase "wrong UUID rejected" phase_wrong_uuid
   run_phase "flow mismatch empty account + vision client" phase_flow_mismatch_empty_account_vision_client
   run_phase "flow mismatch vision account + empty client" phase_flow_mismatch_vision_account_empty_client
   run_phase "network alias raw" phase_network_raw_alias
   run_phase "mldsa65 reality raw vision" phase_mldsa65_seed_raw_vision
-  run_phase "negative mldsa65 invalid seed" phase_mldsa65_invalid_seed_rejected
+  run_phase "mldsa65 invalid seed rejected" phase_mldsa65_invalid_seed_rejected
   run_phase "network alias tcp regression" phase_network_tcp_regression
   run_phase "transport xhttp starts" phase_transport_xhttp_starts
   run_phase "transport grpc unsupported" phase_transport_grpc_unsupported
@@ -992,7 +992,7 @@ main() {
 
   run_phase "happ reality vision mux udp dns baseline" phase_happ_reality_vision_mux_udp_dns
 
-  run_negative_vless_phases
+  run_unsupported_vless_phases
 
   echo
   smoke_write_report "${SMOKE_REPORT_PATH}"

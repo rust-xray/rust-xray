@@ -301,7 +301,7 @@ smoke_log_matches_any() {
   return 1
 }
 
-smoke_expect_vless_negative() {
+smoke_expect_unsupported_vless_probe() {
   local name="$1"
   local decrypt_before="$2"
   shift 2

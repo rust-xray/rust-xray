@@ -16,6 +16,7 @@ pub mod mode;
 pub mod packet_up;
 pub mod packet_up_input;
 pub mod session;
+pub mod stream_up;
 pub mod transport;
 
 pub use bridge::{run_h2_stream_one_bridge, run_http1_stream_one_bridge, run_packet_up_bridge};
@@ -35,15 +36,17 @@ pub use extract::{
 pub use matching::{
     host_matches, method_matches_packet_up_download, method_matches_packet_up_upload,
     method_matches_stream_one, parse_packet_up_path, parse_packet_up_upload_seq_strict,
-    path_matches, query_keys, request_path_component, validate_packet_up_request,
-    validate_xhttp_stream_one_request, xhttp_match_reject_reason_label, PacketUpPathMatch,
-    XHttpMatchRejectReason, XHttpMatchSettings, XHttpRequestDescriptor,
+    parse_stream_up_path, path_matches, query_keys, request_path_component, stream_up_path_has_seq,
+    validate_packet_up_request, validate_stream_up_request, validate_xhttp_stream_one_request,
+    xhttp_match_reject_reason_label, PacketUpPathMatch, XHttpMatchRejectReason, XHttpMatchSettings,
+    XHttpRequestDescriptor,
 };
 pub use mode::{
     configured_xhttp_mode, configured_xhttp_mode_label, effective_xhttp_mode_is_supported,
     effective_xhttp_mode_label, effective_xhttp_mode_unsupported_reason,
-    packet_up_download_side_ready, parse_xhttp_mode, resolve_xhttp_mode, transport_security_label,
-    xhttp_download_side_ready, EffectiveXHttpMode, TransportSecurity, XHttpError, XHttpMode,
+    packet_up_download_side_ready, parse_xhttp_mode, resolve_xhttp_mode,
+    stream_up_download_side_ready, transport_security_label, xhttp_download_side_ready,
+    EffectiveXHttpMode, TransportSecurity, XHttpError, XHttpMode,
 };
 pub use packet_up::{
     broadcast_download, shared_packet_up_manager, spawn_packet_up_bridge, PacketUpBridgeLaunch,
@@ -57,6 +60,10 @@ pub use packet_up_input::{
 pub use session::{
     XHttpSession, XHttpSessionEnsureOutcome, XHttpSessionError, XHttpSessionManager,
     XHttpSessionState,
+};
+pub use stream_up::{
+    shared_stream_up_manager, StreamUpLimits, StreamUpUploadError, StreamUpUploadHandle,
+    XHttpStreamUpManager,
 };
 pub use transport::serve_xhttp_stream_one;
 

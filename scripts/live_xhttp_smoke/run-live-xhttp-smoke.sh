@@ -182,7 +182,7 @@ is_download_recon_mode() {
 
 is_expected_unsupported_mode() {
   case "$1" in
-    stream_up|packet_down|auto_download) return 0 ;;
+    packet_down|auto_download) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -700,14 +700,14 @@ write_summary() {
 assert_acceptance() {
   local failures=0
 
-  for required_mode in default auto stream_one packet_up auto_download; do
+  for required_mode in default auto stream_one packet_up auto_download stream_up; do
     if [[ "${MODE_RESULT[${required_mode}]:-FAIL}" != "PASS" ]]; then
       echo "acceptance failed: mode_${required_mode} must PASS" >&2
       failures=1
     fi
   done
 
-  for unsupported_mode in stream_up packet_down; do
+  for unsupported_mode in packet_down; do
     case "${MODE_RESULT[${unsupported_mode}]:-FAIL}" in
       PASS|UNSUPPORTED) ;;
       *)

@@ -103,16 +103,22 @@ pub fn packet_up_download_side_ready() -> bool {
     true
 }
 
+/// Official Xray `stream-up` clients use GET + POST on `/xhttp/{session}`.
+pub fn stream_up_download_side_ready() -> bool {
+    true
+}
+
 /// Gated switch for end-to-end download-side interop (GET response streaming).
 pub fn xhttp_download_side_ready() -> bool {
-    packet_up_download_side_ready()
+    packet_up_download_side_ready() || stream_up_download_side_ready()
 }
 
 pub fn effective_xhttp_mode_is_supported(mode: EffectiveXHttpMode) -> bool {
     match mode {
         EffectiveXHttpMode::StreamOne => true,
         EffectiveXHttpMode::PacketUp => packet_up_download_side_ready(),
-        EffectiveXHttpMode::StreamUp | EffectiveXHttpMode::PacketDown => false,
+        EffectiveXHttpMode::StreamUp => stream_up_download_side_ready(),
+        EffectiveXHttpMode::PacketDown => false,
     }
 }
 
@@ -121,6 +127,7 @@ pub fn effective_xhttp_mode_unsupported_reason(mode: EffectiveXHttpMode) -> Opti
         EffectiveXHttpMode::StreamOne => None,
         EffectiveXHttpMode::PacketUp if packet_up_download_side_ready() => None,
         EffectiveXHttpMode::PacketUp => Some("packet_up_download_side_not_implemented"),
+        EffectiveXHttpMode::StreamUp if stream_up_download_side_ready() => None,
         EffectiveXHttpMode::StreamUp => Some("stream_up_not_implemented"),
         EffectiveXHttpMode::PacketDown => Some("packet_down_not_implemented"),
     }

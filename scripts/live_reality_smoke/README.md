@@ -55,10 +55,12 @@ bash scripts/live_reality_smoke/run-live-smoke.sh
 ```
 
 The automated runner executes regression checks, Vision stress coverage (100 sequential
-+ 50 parallel requests, 100MB download), negative/flow-mismatch cases, network alias
-(`raw` vs legacy `tcp`), HTTP (`--http1.1` / `--http2`) and TLS (`--tls-max 1.2` /
-default 1.3) modes, VLESS `fallbacks[]` routing (default, SNI/name, HTTP path, ALPN,
-PROXY v1/v2), cipher forcing, ML-DSA-65 baseline checks, Happ mux UDP DNS baseline (REALITY/Vision/Mux + `1.1.1.1:53`, server log at
++ 50 parallel requests, 100MB download), explicit rejection checks, unsupported
+UDP/XUDP probes followed by TCP regression checks, flow-mismatch cases, network
+alias (`raw` vs legacy `tcp`), HTTP (`--http1.1` / `--http2`) and TLS
+(`--tls-max 1.2` / default 1.3) modes, VLESS `fallbacks[]` routing (default,
+SNI/name, HTTP path, ALPN, PROXY v1/v2), cipher forcing, ML-DSA-65 baseline
+checks, Happ mux UDP DNS baseline (REALITY/Vision/Mux + `1.1.1.1:53`, server log at
 `rust_xray=debug` for `mux udp response frame sent`), then writes a local report
 under `/tmp/rust-xray-live-smoke-*/report.txt` with accepted-path counters, Vision
 DIRECT command counts, Happ mux baseline log grep counts, AES-GCM decrypt failures,
@@ -83,8 +85,8 @@ See **[scripts/live_xhttp_smoke/README.md](../live_xhttp_smoke/README.md)** and
 | `mode_auto` | PASS |
 | `mode_stream_one` | PASS |
 | `mode_packet_up` (HTTP/2, official Xray 26.3.27) | PASS |
+| `mode_stream_up` (HTTP/2, official Xray 26.3.27) | PASS |
 | `mode_auto_download` | PASS |
-| `mode_stream_up` | UNSUPPORTED |
 | `mode_packet_down` | UNSUPPORTED (expected client config parse fail) |
 | `h1_chunked_upload_unit_smoke` | PASS |
 
@@ -157,8 +159,9 @@ Validated against **Xray-core 26.3.27**:
 - Vision smoke: `rust-xray-server.vision.fixture.json` + `xray-client-smoke.vision.fixture.json` (`flow: "xtls-rprx-vision"`).
 - Vision MVP uses padding framing + DIRECT copy relay (no raw splice).
 - Automated `run-live-smoke.sh` covers 10MB/100MB downloads, 100 sequential + 50 parallel
-  Vision requests, wrong UUID, flow mismatch negatives, `network: raw` alias, HTTP/TLS
-  modes, openssl fallback, and bad shortId/SNI fallback.
+  Vision requests, wrong UUID rejection, flow mismatch rejection, unsupported
+  UDP/XUDP probes plus TCP regressions, `network: raw` alias, HTTP/TLS modes,
+  openssl fallback, and bad shortId/SNI fallback.
 - Failures after REALITY accept close the connection (no fallback) — check server logs.
 
 ## Notes
