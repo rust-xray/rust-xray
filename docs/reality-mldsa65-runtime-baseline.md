@@ -22,7 +22,7 @@ Confirmed PASS coverage:
 - fallback matrix PASS: default, SNI/name, HTTP path, ALPN http/1.1, ALPN h2,
   ALPN h2 curl, xver=1 PROXY v1, xver=2 PROXY v2
 - cipher matrix PASS: AES128, AES256, ChaCha20
-- UDP/Mux/XUDP negative PASS (non-Mux UDP / XUDP rejected; Mux Happ baseline + non-DNS UDP negative — see [compatibility-status.md](../../docs/compatibility-status.md))
+- UDP/Mux/XUDP unsupported probes PASS with TCP regressions (non-Mux UDP / XUDP rejected; Mux Happ baseline + non-DNS UDP unsupported probe — see [compatibility-status.md](../../docs/compatibility-status.md))
 
 ## Invariants
 

@@ -42,4 +42,4 @@ The accepted REALITY runtime is built from `NormalizedConfig.inbounds` through `
 
 - Keep `RealityInboundRuntime` as a compatibility test/helper path only while old parser tests exist.
 - Expand normalized routing only when routing/balancer runtime support is implemented.
-- Keep XHTTP packet-up in shadow/skeleton status until the download side is implemented.
+- Keep XHTTP `packet-down` / XMUX gated until their runtime paths are implemented.

@@ -16,6 +16,7 @@ build-musl-release:
 
 live-smoke:
 	bash scripts/live_reality_smoke/run-live-smoke.sh
+	bash scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh
 
 fixture-test:
 	cargo test --test reality_fixture -- --nocapture

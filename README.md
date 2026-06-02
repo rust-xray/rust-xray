@@ -1,12 +1,12 @@
 # rust-xray
 
-Экспериментальная реализация части Xray/VLESS REALITY на Rust.
+Experimental Rust implementation of selected Xray/VLESS REALITY behavior.
 
-Проект поднимает TCP-listener по `inbound` из Xray-совместимого `config.json`,
-читает первый TLS `ClientHello`, проверяет REALITY-кандидата (AEAD + policy)
-и либо проксирует обычный/невалидный трафик на fallback-адрес из
-`realitySettings.dest` / `realitySettings.target`, либо попадает в accepted path
-для валидного REALITY-клиента.
+The project starts a TCP listener from an Xray-compatible `config.json`
+`inbound`, reads the first TLS `ClientHello`, validates the REALITY candidate
+(AEAD + policy), and either relays ordinary/invalid traffic to the fallback
+address from `realitySettings.dest` / `realitySettings.target` or enters the
+accepted path for a valid REALITY client.
 
 **Non-REALITY clients are relayed to `dest`.**
 
@@ -141,13 +141,13 @@ Secrets (`privateKey`, `auth_key`, ECDHE shared secrets, traffic secrets, plaint
 `session_id`, private signing keys) are **not logged** in production paths. Debug
 logs may include `client_version`, `unix_time`, and shortId **prefix length** only.
 
-## Требования
+## Requirements
 
 - Rust stable
 - Cargo
-- Доступный TCP-адрес для `listen:port` из конфигурации
+- An available TCP address for the configured `listen:port`
 
-## Сборка, тесты и live smoke
+## Build, Tests, And Live Smoke
 
 ```bash
 cargo fmt
@@ -176,22 +176,22 @@ Manual REALITY accepted-path smoke test (local Xray client + `rust-xray` server)
 **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/README.md)** —
 test-only keys, not for production. Automated runner: `make live-smoke`.
 
-Release-сборка:
+Release build:
 
 ```bash
 cargo build --release
 ```
 
-## Конфигурация
+## Configuration
 
-По умолчанию бинарник читает `./config.json`. Путь можно передать первым
-аргументом:
+By default, the binary reads `./config.json`. You can pass a config path as the
+first argument:
 
 ```bash
 cargo run --bin rust-xray -- ./config.json
 ```
 
-Минимальный пример:
+Minimal example:
 
 ```json
 {
@@ -233,7 +233,7 @@ cargo run --bin rust-xray -- ./config.json
 }
 ```
 
-## Запуск
+## Running
 
 ```bash
 cargo run --bin rust-xray -- ./config.json
@@ -263,8 +263,8 @@ For reproducible latency comparison with Go Xray-core, see **[docs/latency-measu
 
 ## Troubleshooting
 
-| Симптом / лог | Возможная причина |
-|---------------|-------------------|
+| Symptom / log | Possible cause |
+|---------------|----------------|
 | `REALITY fallback: SNI missing` | Client without SNI |
 | `REALITY session_id auth failed` | Invalid REALITY ciphertext / key |
 | `REALITY accepted client` | Pre-auth passed; accepted path started |
@@ -276,7 +276,7 @@ For reproducible latency comparison with Go Xray-core, see **[docs/latency-measu
 | `unsupported non-DNS UDP mux substream` | Generic UDP over Mux not implemented (non-`:53` ports) |
 | `REALITY accepted path failed` | Handshake/VLESS error (no fallback) |
 
-## Структура проекта
+## Project Layout
 
 ```
 src/
@@ -295,13 +295,13 @@ src/
 docs/reality-accepted-path.md
 ```
 
-## Ограничения
+## Limitations
 
 - **Not an Xray-core replacement** and **not production-ready** (experiment branch).
 - Accepted path errors do not fallback (see policy matrix above for pre-auth fallback cases).
 - Vision DIRECT MVP only — no full splice/zero-copy beyond padding + DIRECT relay.
 - VLESS Mux: experimental Happ baseline (Vision + Mux + numeric UDP DNS `:53`); full Mux.Cool / generic UDP / XUDP not implemented.
-- VLESS `command=Udp` / XUDP; XHTTP `packet-up` / `stream-up` / `packet-down` / XMUX; Vision over XHTTP; REALITY over gRPC/WebSocket (rejected at startup); full routing/outbounds not implemented.
+- VLESS `command=Udp` / XUDP; XHTTP `packet-down` / XMUX; Vision over XHTTP; REALITY over gRPC/WebSocket (rejected at startup); full routing/outbounds not implemented.
 - ML-DSA-65 cert signing: experimental baseline when `mldsa65Seed` is set; **ML-KEM not implemented**.
 - TLS 1.3 CCM cipher suites (0x1304, 0x1305) rejected on accepted path.
 

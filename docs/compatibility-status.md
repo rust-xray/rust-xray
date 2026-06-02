@@ -172,8 +172,8 @@ mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`).
 | `mode_auto` | PASS |
 | `mode_stream_one` | PASS |
 | `mode_packet_up` (HTTP/2, official Xray 26.3.27) | PASS |
+| `mode_stream_up` (HTTP/2, official Xray 26.3.27) | PASS |
 | `mode_auto_download` | PASS |
-| `mode_stream_up` | UNSUPPORTED |
 | `mode_packet_down` | UNSUPPORTED (expected client config parse fail) |
 | `h1_chunked_upload_unit_smoke` | PASS |
 | Official Xray H1 chunked interop | **Not verified** |
