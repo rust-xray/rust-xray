@@ -1,12 +1,15 @@
 mod auth;
 mod certificate;
 mod decision;
+pub mod dest_dial;
 mod fixture;
 pub mod handshake;
 pub mod key_share;
 mod mldsa65;
 pub mod mldsa65_crypto;
 mod mlkem768;
+pub mod post_handshake;
+mod post_handshake_probe;
 mod server;
 mod session;
 mod short_id;
@@ -25,6 +28,10 @@ pub use certificate::{
 };
 pub use decision::{
     inspect_reality_client_hello, RealityAccepted, RealityDecision, RealityInspectConfig,
+};
+pub use dest_dial::{
+    dial_reality_dest, RealityDestDialConfig, RealityDestProxyEndpoints, RealityDestStream,
+    RealityDestTransport,
 };
 pub use fixture::{
     decode_reality_fixture_client_hello, format_reality_client_version,
@@ -52,6 +59,12 @@ pub use mldsa65::{
     MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET, MLDSA65_SEED_LEN, MLDSA65_SIGNATURE_LEN,
     MLDSA65_VERIFY_KEY_LEN,
 };
+pub use post_handshake::{
+    parse_post_handshake_application_record_lengths, post_handshake_parse_error,
+    PostHandshakeParseError, PostHandshakeProbeCache, PostHandshakeProbeKey,
+    PostHandshakeProbeState, RealityAlpnProfile,
+};
+pub use post_handshake_probe::{post_handshake_probe_cache, start_reality_post_handshake_probes};
 pub use server::{handle_accepted_reality_client, handle_accepted_reality_client_traced};
 pub use session::{
     short_id_prefix_len, validate_reality_client_auth, RealityClientAuth, RealityValidationConfig,

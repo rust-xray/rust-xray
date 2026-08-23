@@ -128,8 +128,9 @@ pub async fn handle_accepted_reality_client_traced(
         "dest ServerHello observed"
     );
 
-    let state = prepare_reality_tls13_state(dest_handshake, accepted)
+    let mut state = prepare_reality_tls13_state(dest_handshake, accepted)
         .map_err(|err| stage_error(RealityAcceptedStage::Tls13State, err))?;
+    state.post_handshake_dest_addr = dest_addr.to_string();
 
     let cipher_suite = state.suite.name;
 

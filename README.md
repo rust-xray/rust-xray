@@ -23,6 +23,7 @@ matrix. Short version:
 ### Working
 
 - REALITY TCP/raw inbound, pre-auth (SNI, AEAD, policy), and **accepted** TLS 1.3 path
+- **REALITY post-handshake record-length detection/cache (Stage 5B):** proactive `dest × serverName × ALPN` probes at startup; runtime cache lookup; post-client-Finished camouflage ApplicationData emission on accepted path
 - REALITY pre-auth **X25519MLKEM768 ClientHello parsing**: hybrid `key_share` (`0x11EC`, 1216 bytes) parsed as opaque carrier; trailing 32-byte X25519 used for REALITY auth when no valid standalone `X25519` entry exists (upstream two-pass selection). **Does not** negotiate hybrid TLS on the accepted path.
 - VLESS TCP inbound: UUID auth, custom string ID → UUIDv5, `flow=""` and `xtls-rprx-vision` (Vision DIRECT MVP)
 - REALITY accepted-path cipher suites: AES128-GCM, AES256-GCM, ChaCha20-Poly1305
@@ -58,6 +59,9 @@ connection.
 - REALITY over gRPC / WebSocket transport runtime (rejected at startup when `security: reality`)
 - **ML-KEM-768 cryptography** and **TLS 1.3 negotiated X25519MLKEM768** on the REALITY accepted path (hybrid ServerHello, 64-byte shared secret, dest group mirroring — Stage 3+; pre-auth hybrid **carrier parsing only** in Stage 2)
 - Full routing, balancers, outbound ecosystem, DoH, Vision splice/zero-copy beyond DIRECT MVP
+- REALITY post-handshake **Stage 5C** extras: target extra-CCS tolerance probing, `GlobalMaxCSSMsgCount` / `MaxUselessRecords`, alert-driven probe paths
+- REALITY probe **exact uTLS ClientHello fingerprint** parity (`HelloGolang` / `HelloChrome_Auto`) — probes use rustls (**partial** parity; record-length detection only)
+- REALITY session resumption on accepted path
 - DNS-over-TCP through VLESS outbound/routing (separate future task)
 - Full Xray-core drop-in compatibility
 
@@ -325,6 +329,7 @@ docs/reality-accepted-path.md
 - VLESS Mux: experimental Happ baseline (Vision + Mux + numeric UDP DNS `:53`); full Mux.Cool / generic UDP / XUDP not implemented.
 - VLESS `command=Udp` / XUDP; XHTTP `packet-down` / XMUX; Vision over XHTTP; REALITY over gRPC/WebSocket (rejected at startup); full routing/outbounds not implemented.
 - ML-DSA-65 cert signing: experimental baseline when `mldsa65Seed` is set; **ML-KEM-768 crypto and hybrid TLS negotiation not implemented** (Stage 2: pre-auth hybrid `key_share` carrier parsing only)
+- REALITY post-handshake probes use **rustls** ClientHello (not uTLS); fingerprint parity is **partial** — see [reality-accepted-path.md](docs/reality-accepted-path.md#stage-5-post-handshake-record-mirroring)
 - TLS 1.3 CCM cipher suites (0x1304, 0x1305) rejected on accepted path.
 
 Full matrix: **[docs/compatibility-status.md](docs/compatibility-status.md)**.

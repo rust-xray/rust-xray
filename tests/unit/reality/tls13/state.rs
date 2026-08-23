@@ -1,6 +1,8 @@
 use super::*;
 #[path = "position6_camouflage.rs"]
 mod position6_camouflage;
+#[path = "../post_handshake/emission.rs"]
+mod post_handshake_emission;
 #[path = "record_shape_emission.rs"]
 mod record_shape_emission;
 use crate::protocol::enums::{NamedGroup, ProtocolVersion};

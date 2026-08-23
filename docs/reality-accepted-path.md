@@ -44,7 +44,10 @@ Rough sequence:
    key schedule and transcript state (not a single-record patch).
 9. **Read client Finished** — `readClientFinished`; validate client handshake
    completion.
-10. **Hand off `Conn`** — application-data read/write (decrypted stream) goes to
+10. **Emit post-handshake camouflage records (Stage 5B)** — after verified client
+    Finished, emit cached dummy TLS ApplicationData records observed from proactive
+    `dest` probes (separate from optional Stage 5A position-6 record).
+11. **Hand off `Conn`** — application-data read/write (decrypted stream) goes to
     the upper protocol layer (VLESS, Vision, etc.).
 
 Key point: after step 6, the server must speak **valid TLS 1.3** to the client.
@@ -66,6 +69,56 @@ When comparing with upstream Go/XTLS REALITY server handshake code:
 | TLS record framing + encryption | `src/tls/records.rs`, `tls13/record_crypto.rs` | **Working** |
 | Dest observation → state setup | `fetch_dest_handshake`, `prepare_reality_tls13_state` (`handshake.rs`) | **Working** |
 | Application stream handoff | `RealityTls13ApplicationStream` → `run_inbound_transport` | **Working** |
+| Post-handshake probe cache + emission (Stage 5B) | `post_handshake/`, `post_handshake_probe.rs` | **Working** |
+| Position-6 camouflage record (Stage 5A) | `build_position6_camouflage_record` | **Working** |
+
+## Stage 5: post-handshake record mirroring
+
+Upstream REALITY mirrors target post-handshake TLS record **lengths** so the
+accepted server flight looks like the real destination. rust-xray splits this
+into two independent mechanisms:
+
+### Stage 5A — position-6 record (target initial server-flight shape)
+
+- Observed from dest ServerHello flight as `next_encrypted_record_wire_len`
+- Emitted **immediately after server Finished** inside
+  `build_encrypted_server_handshake_records`
+- Encrypted under **server application traffic secret**, sequence **0**
+- Application writer continues at sequence **1** when present
+- **Does not** update handshake transcript after server Finished plaintext is
+  already committed
+
+### Stage 5B — cached post-handshake records (proactive detector)
+
+- Background probes at startup: **`dest × serverName × 3 ALPN profiles`**
+  - `None` — ClientHello without ALPN
+  - `Http11` — ALPN with first offer not `h2` (probe offers `http/1.1`)
+  - `H2` — first ALPN offer `h2` (probe offers `h2`, `http/1.1`)
+- Probe TLS client: **rustls** with normal certificate verification (native
+  roots + `webpki-roots` fallback)
+- Raw capture after client handshake completes; parser collects consecutive
+  `17 03 03` ApplicationData wire lengths (`5 + payload_len`) without decryption
+- Cache key: `PostHandshakeProbeKey { dest_addr, server_name, alpn_profile }`
+- Runtime: after **verified client Finished**, bounded wait (5s) on cache;
+  timeout → emit nothing (not a handshake failure)
+- Emission uses the same padded empty ApplicationData encryptor API as Stage 5A
+- Continues the **current** server application write sequence (seq 0 if no
+  position-6, seq 1 if position-6 was sent)
+- **Does not** update transcript or re-derive application secrets
+
+### Fingerprint parity
+
+**PARTIAL.** Upstream proactive detection uses uTLS (`HelloGolang` /
+`HelloChrome`-class ClientHello). rust-xray probes use the project's **rustls**
+stack with profile-appropriate ALPN only. Post-handshake **record-length**
+detection is the goal; ClientHello fingerprint is not matched to uTLS.
+
+### Not yet (Stage 5C+)
+
+- Target extra-CCS tolerance probing / `MaxUselessRecords`
+- `GlobalMaxCSSMsgCount` useless-record probing
+- Alert-driven probe completion paths
+- Real TLS session resumption on the accepted path
 
 ## Deterministic Rust vectors (non-smoke)
 
@@ -98,6 +151,8 @@ Live matrix remains `scripts/live_reality_smoke/run-live-smoke.sh` unchanged.
 | TLS 1.3 cipher suite model | `src/reality/tls13/cipher_suite.rs` | Done |
 | Handshake message builders | `src/reality/tls13/messages.rs`, `certificate.rs` | Done on accepted path |
 | TLS 1.3 handshake driver | `complete_reality_tls13_handshake` | Done (live smoke) |
+| Post-handshake probe cache + Stage 5B emission | `src/reality/post_handshake/`, `post_handshake_probe.rs` | Done (unit + integration tests) |
+| Position-6 Stage 5A camouflage record | `RealityTls13ServerState::build_position6_camouflage_record` | Done |
 | Accepted entry | `handle_accepted_reality_client` in `server.rs` | Done |
 | VLESS + transport handoff | `run_inbound_transport` after TLS app stream | Done |
 | VLESS config users | `build_vless_clients`, `VlessClientObject` | Done |
@@ -247,6 +302,9 @@ Use this as a checklist. Items are ordered roughly by dependency.
 ```
 src/reality/decision.rs   — inspect_reality_client_hello → Accepted | Fallback
 src/reality/server.rs     — handle_accepted_reality_client (observation + full handshake)
+src/reality/post_handshake/   — ALPN profiles, probe cache, rustls probe, raw parser, Stage 5B emission
+src/reality/post_handshake_probe.rs — startup scheduling (`dest × SNI × ALPN`)
+src/reality/dest_dial.rs      — shared TCP/Unix dest dial + PROXY v1/v2
 src/reality/handshake.rs  — fetch_dest_handshake, extract_observed_server_hello, prepare_reality_tls13_state
 src/reality/tls13/
   state.rs                — RealityTls13ServerState, complete_reality_tls13_handshake

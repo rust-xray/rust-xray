@@ -31,6 +31,9 @@ hmac = "0.12"
 ml-dsa = "0.1"
 ml-kem = { version = "0.3.2", default-features = false, features = ["getrandom", "zeroize"] }
 rustls-pki-types = "1.8.0"
+rustls = { version = "0.23.13", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+webpki-roots = "0.26"
 serde = {version = "1", features = ["derive"]}
 serde_json = "1"
 sha2 = "0.10.8"

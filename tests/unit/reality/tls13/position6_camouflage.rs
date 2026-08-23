@@ -14,7 +14,7 @@ use crate::tls::records::{
     TLS_RECORD_APPLICATION_DATA,
 };
 
-fn flight_with_encrypted_lens(
+pub(super) fn flight_with_encrypted_lens(
     ee: usize,
     cert: usize,
     cert_verify: usize,
@@ -29,7 +29,7 @@ fn flight_with_encrypted_lens(
     }
 }
 
-fn flight_with_position6(
+pub(super) fn flight_with_position6(
     ee: usize,
     cert: usize,
     cert_verify: usize,

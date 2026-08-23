@@ -23,8 +23,8 @@ use crate::outbound::{log_dns_outbounds, OutboundConnectRuntime};
 use crate::protocol::structs::ClientHelloPayload;
 use crate::proxy::relay_fallback_with_xver;
 use crate::reality::{
-    handle_accepted_reality_client_traced, inspect_reality_client_hello, RealityDecision,
-    RealityInspectConfig,
+    handle_accepted_reality_client_traced, inspect_reality_client_hello,
+    start_reality_post_handshake_probes, RealityDecision, RealityInspectConfig,
 };
 use crate::runtime::InboundUserManagers;
 use crate::stats::{StatsRegistry, StatsState};
@@ -973,6 +973,13 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
             "REALITY runtime loaded OK"
         );
     }
+
+    let probe_inbounds: Vec<VlessRealityInbound> = server_config
+        .inbounds
+        .iter()
+        .map(|inbound| inbound.inbound.clone())
+        .collect();
+    start_reality_post_handshake_probes(&probe_inbounds);
 
     for inbound in &server_config.inbounds {
         inbound_users.register(Arc::clone(&inbound.user_manager));

@@ -13,6 +13,10 @@ use crate::reality::certificate::{
 };
 use crate::reality::handshake::RealityObservedServerHello;
 use crate::reality::mldsa65::Mldsa65Seed;
+use crate::reality::post_handshake::{
+    emit_post_handshake_camouflage_records, post_handshake_probe_key,
+    resolve_post_handshake_wire_lengths,
+};
 use crate::reality::stages::{self, stage_error, RealityAcceptedStage};
 use crate::reality::target_server_flight::{
     ObservedEncryptedHandshakeSlot, ObservedTargetTls13ServerFlight,
@@ -68,6 +72,8 @@ pub struct RealityTls13ServerState {
     ///
     /// Incremented when a position-6 camouflage record is sent under the server application
     /// traffic secret (upstream REALITY switches write keys before this record).
+    /// Fallback/probe destination (`realitySettings.dest`) for post-handshake cache lookup.
+    pub post_handshake_dest_addr: String,
     pub server_application_write_sequence: u64,
 }
 
@@ -157,6 +163,7 @@ impl RealityTls13ServerState {
             client_finished_verified: false,
             application_secret_transcript_hash: None,
             application_secrets: None,
+            post_handshake_dest_addr: String::new(),
             server_application_write_sequence: 0,
         })
     }
@@ -677,16 +684,42 @@ where
         )
     })?;
 
-    let read_keys = derive_traffic_key(
-        state.suite,
-        &application_secrets.client_application_traffic_secret,
-    )
-    .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
     let write_keys = derive_traffic_key(
         state.suite,
         &application_secrets.server_application_traffic_secret,
     )
     .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
+    let mut write_encryptor = Tls13RecordEncryptor::with_traffic_secret(
+        state.suite,
+        write_keys,
+        application_secrets
+            .server_application_traffic_secret
+            .clone(),
+    )
+    .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
+    write_encryptor.sequence = state.server_application_write_sequence;
+
+    if let Some(server_name) = state.accepted.sni.as_deref() {
+        let dest_addr = state.post_handshake_dest_addr.as_str();
+        let probe_key = post_handshake_probe_key(dest_addr, server_name, client_hello_payload);
+        let cached_wire_lengths = resolve_post_handshake_wire_lengths(&probe_key).await;
+        emit_post_handshake_camouflage_records(
+            &mut stream,
+            state.suite,
+            &mut write_encryptor,
+            &cached_wire_lengths,
+        )
+        .await
+        .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
+        state.server_application_write_sequence = write_encryptor.sequence;
+    }
+
+    let read_keys = derive_traffic_key(
+        state.suite,
+        &application_secrets.client_application_traffic_secret,
+    )
+    .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
+
     let read_decryptor = Tls13RecordDecryptor::with_traffic_secret(
         state.suite,
         read_keys,
@@ -695,16 +728,6 @@ where
             .clone(),
     )
     .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
-    let write_encryptor = Tls13RecordEncryptor::with_traffic_secret(
-        state.suite,
-        write_keys,
-        application_secrets
-            .server_application_traffic_secret
-            .clone(),
-    )
-    .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
-    let mut write_encryptor = write_encryptor;
-    write_encryptor.sequence = state.server_application_write_sequence;
 
     info!(
         stage = stages::TLS13_APPLICATION_STREAM_READY,

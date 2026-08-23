@@ -14,11 +14,11 @@ pub use config::{
     vless_flow_distribution, VlessClient,
 };
 pub use fallback::{
-    build_fallback_context, build_proxy_protocol_v1, build_proxy_protocol_v2,
-    fallback_match_kind_label, looks_like_http_request, parse_fallback_dest,
-    resolve_fallback_selection, resolve_fallback_target, select_vless_fallback,
-    validate_fallback_configs, validate_fallback_xver, FallbackConfig, FallbackContext,
-    FallbackDest, FallbackMatchKind, FallbackSelection,
+    build_fallback_context, build_proxy_protocol_v1, build_proxy_protocol_v2, extract_client_alpn,
+    extract_client_alpn_offers, fallback_match_kind_label, looks_like_http_request,
+    parse_fallback_dest, resolve_fallback_selection, resolve_fallback_target,
+    select_vless_fallback, validate_fallback_configs, validate_fallback_xver, FallbackConfig,
+    FallbackContext, FallbackDest, FallbackMatchKind, FallbackSelection,
 };
 pub use inbound::{
     handle_reality_vless_tcp_inbound, handle_reality_vless_tcp_inbound_traced,

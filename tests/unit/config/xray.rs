@@ -1815,6 +1815,8 @@ fn reality_inbound_runtime_debug_does_not_expose_secrets() {
         vless_fallbacks: Vec::new(),
         transport: TransportNetwork::RawTcp,
         xhttp_settings: None,
+        dest_xver: 0,
+        dest_transport: crate::reality::RealityDestTransport::Tcp,
     };
     let debug = format!("{runtime:?}");
 

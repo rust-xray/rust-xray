@@ -4,11 +4,11 @@ use crate::config::xray::validate::{eq_ignore_ascii_case, validate_vless_reality
 use crate::config::xray::{
     api_dokodemo_inbound_tag, effective_reality_max_client_ver, effective_reality_min_client_ver,
     extract_api_inbound_tls_material, get_inbound_reality_settings, inbound_listen_addr,
-    inbound_vless_settings, is_vless_reality_inbound, reality_dest_addr, reality_mldsa65_seed,
-    reality_private_key, reality_server_names, reality_short_ids, resolve_api_listen,
-    validate_reality_inbound_config_policy, ApiListenSource, ApiTlsMaterial, InboundObject,
-    OutboundObject, RealityInboundRuntime, RoutingRuleObject, TransportNetwork, XHttpSettings,
-    XrayConfig,
+    inbound_vless_settings, is_vless_reality_inbound, reality_dest_addr, reality_dest_transport,
+    reality_dest_xver, reality_mldsa65_seed, reality_private_key, reality_server_names,
+    reality_short_ids, resolve_api_listen, validate_reality_inbound_config_policy, ApiListenSource,
+    ApiTlsMaterial, InboundObject, OutboundObject, RealityInboundRuntime, RoutingRuleObject,
+    TransportNetwork, XHttpSettings, XrayConfig,
 };
 use crate::dns::{DnsConfig, DnsServerConfig, QueryStrategy};
 use crate::reality::MLDSA65_SEED_LEN;
@@ -94,6 +94,8 @@ pub struct RealityServerConfig {
     pub show: bool,
     pub mldsa65_seed: Option<[u8; MLDSA65_SEED_LEN]>,
     pub decryption: String,
+    pub dest_xver: u8,
+    pub dest_transport: crate::reality::RealityDestTransport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,6 +335,8 @@ pub fn normalize_vless_reality_inbound(
             show: settings.show,
             mldsa65_seed: mldsa65_seed.map(|seed| *seed.as_bytes()),
             decryption,
+            dest_xver: reality_dest_xver(settings)?,
+            dest_transport: reality_dest_transport(settings),
         },
         fallbacks,
     })
@@ -454,6 +458,8 @@ pub fn vless_reality_matches_runtime(
         && normalized.reality.mldsa65_seed
             == runtime.mldsa65_seed.as_ref().map(|seed| *seed.as_bytes())
         && normalized.reality.decryption == runtime.vless_decryption
+        && normalized.reality.dest_xver == runtime.dest_xver
+        && normalized.reality.dest_transport == runtime.dest_transport
         && normalized.fallbacks == runtime.vless_fallbacks
         && normalized.users.len() == runtime.vless_clients.len()
         && transport_matches_runtime(&normalized.transport, runtime)

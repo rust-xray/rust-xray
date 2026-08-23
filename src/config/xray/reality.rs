@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tracing::info;
 
-use crate::vless::{validate_fallback_configs, FallbackConfig};
+use crate::vless::{validate_fallback_configs, validate_fallback_xver, FallbackConfig};
 use serde_json::Value;
 
 use super::raw::{
@@ -58,6 +58,8 @@ pub struct RealityInboundRuntime {
     pub vless_fallbacks: Vec<FallbackConfig>,
     pub transport: TransportNetwork,
     pub xhttp_settings: Option<XHttpSettings>,
+    pub dest_xver: u8,
+    pub dest_transport: crate::reality::RealityDestTransport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +106,8 @@ impl std::fmt::Debug for RealityInboundRuntime {
             .field("vless_fallbacks", &self.vless_fallbacks)
             .field("transport", &self.transport)
             .field("xhttp_settings", &self.xhttp_settings)
+            .field("dest_xver", &self.dest_xver)
+            .field("dest_transport", &self.dest_transport)
             .finish()
     }
 }
@@ -238,6 +242,23 @@ pub fn reality_dest_addr(settings: &RealitySettingsObject) -> std::io::Result<St
     }
 }
 
+pub fn reality_dest_xver(settings: &RealitySettingsObject) -> std::io::Result<u8> {
+    let xver = u8::try_from(settings.xver).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("realitySettings.xver out of range: {}", settings.xver),
+        )
+    })?;
+    validate_fallback_xver(xver)?;
+    Ok(xver)
+}
+
+pub fn reality_dest_transport(
+    settings: &RealitySettingsObject,
+) -> crate::reality::RealityDestTransport {
+    crate::reality::RealityDestTransport::parse_config_value(settings.transport_type.as_deref())
+}
+
 pub fn reality_private_key(settings: &RealitySettingsObject) -> std::io::Result<&str> {
     match settings.private_key.as_deref() {
         Some(key) if !key.is_empty() => Ok(key),
@@ -310,6 +331,8 @@ struct ParsedRealityInbound {
     clients: Vec<VlessClientObject>,
     fallbacks: Vec<FallbackConfig>,
     xhttp_settings: Option<XHttpSettings>,
+    dest_xver: u8,
+    dest_transport: crate::reality::RealityDestTransport,
 }
 
 fn parse_reality_inbound_for_merge(
@@ -405,6 +428,8 @@ fn parse_reality_inbound_for_merge(
         clients,
         fallbacks,
         xhttp_settings,
+        dest_xver: reality_dest_xver(settings)?,
+        dest_transport: reality_dest_transport(settings),
     })
 }
 
@@ -518,6 +543,8 @@ fn build_reality_inbound_runtime_from_group(
         vless_fallbacks: primary.fallbacks.clone(),
         transport: primary.merge_key.transport.clone(),
         xhttp_settings: primary.xhttp_settings.clone(),
+        dest_xver: primary.dest_xver,
+        dest_transport: primary.dest_transport,
     })
 }
 
