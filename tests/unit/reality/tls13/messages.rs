@@ -6,11 +6,11 @@ use crate::reality::tls13::TLS_AES_128_GCM_SHA256;
 use crate::tls::parse_tls_server_hello_handshake;
 
 fn sample_server_hello_params(session_id_echo: Vec<u8>) -> Tls13ServerHelloParams {
-    let key_share = Tls13ServerKeyShare {
-        group: NAMED_GROUP_X25519,
-        public_key: [0x55; X25519_KEY_LEN],
-        shared_secret: [0x66; X25519_KEY_LEN],
-    };
+    let key_share = Tls13ServerKeyShare::from_test_parts(
+        NAMED_GROUP_X25519,
+        vec![0x55; X25519_KEY_LEN],
+        vec![0x66; X25519_KEY_LEN],
+    );
 
     Tls13ServerHelloParams {
         random: [0x11; 32],

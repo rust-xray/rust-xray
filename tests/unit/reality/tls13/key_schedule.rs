@@ -173,6 +173,33 @@ fn derive_handshake_traffic_secrets_output_lengths_match_hash_len_sha384() {
 }
 
 #[test]
+fn derive_handshake_traffic_secrets_accepts_64_byte_hybrid_shared_secret() {
+    let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+    let hybrid_shared_secret: [u8; 64] = core::array::from_fn(|i| 0xA0 + (i as u8));
+    assert_eq!(hybrid_shared_secret.len(), 64);
+    let transcript = [0x20u8; SHA256_OUTPUT_LEN];
+
+    let secrets = derive_handshake_traffic_secrets(suite, &hybrid_shared_secret, &transcript)
+        .expect("valid hybrid handshake secrets");
+
+    assert_eq!(secrets.handshake_secret.len(), SHA256_OUTPUT_LEN);
+    assert_eq!(
+        secrets.client_handshake_traffic_secret.len(),
+        SHA256_OUTPUT_LEN
+    );
+    assert_eq!(
+        secrets.server_handshake_traffic_secret.len(),
+        SHA256_OUTPUT_LEN
+    );
+
+    let x25519_only = [0xA0u8; 32];
+    let x25519_secrets = derive_handshake_traffic_secrets(suite, &x25519_only, &transcript)
+        .expect("valid x25519 handshake secrets");
+
+    assert_ne!(secrets.handshake_secret, x25519_secrets.handshake_secret);
+}
+
+#[test]
 fn derive_handshake_traffic_secrets_is_deterministic() {
     let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
     let ecdhe = [0x55u8; 32];

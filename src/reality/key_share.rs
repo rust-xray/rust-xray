@@ -22,6 +22,20 @@ pub const MLKEM768_ENCAPSULATION_KEY_LEN: usize = 1184;
 pub const X25519_MLKEM768_CLIENT_KEY_SHARE_LEN: usize =
     MLKEM768_ENCAPSULATION_KEY_LEN + X25519_PUBLIC_KEY_LEN;
 
+/// ML-KEM-768 ciphertext length in server hybrid key_share.
+pub const MLKEM768_CIPHERTEXT_LEN: usize = 1088;
+
+/// ML-KEM-768 shared secret length in bytes.
+pub const MLKEM768_SHARED_SECRET_LEN: usize = 32;
+
+/// ServerHello X25519MLKEM768 key_exchange length: ciphertext + X25519 public key.
+pub const X25519_MLKEM768_SERVER_KEY_SHARE_LEN: usize =
+    MLKEM768_CIPHERTEXT_LEN + X25519_PUBLIC_KEY_LEN;
+
+/// TLS hybrid shared secret length: ML-KEM shared secret || X25519 shared secret.
+pub const X25519_MLKEM768_SHARED_SECRET_LEN: usize =
+    MLKEM768_SHARED_SECRET_LEN + X25519_PUBLIC_KEY_LEN;
+
 const fn invalid_public_key_len(len: usize) -> bool {
     len != X25519_PUBLIC_KEY_LEN
 }

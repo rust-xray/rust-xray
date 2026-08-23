@@ -240,8 +240,8 @@ fn prepare_server_hello_with_hybrid_and_standalone_client_keyshares_stays_x25519
 
     let server_share = state.server_key_share.as_ref().expect("server key share");
     assert_eq!(server_share.group, TLS13_NAMED_GROUP_X25519);
-    assert_eq!(server_share.public_key.len(), X25519_KEY_EXCHANGE_LEN);
-    assert_eq!(server_share.shared_secret.len(), X25519_KEY_EXCHANGE_LEN);
+    assert_eq!(server_share.key_exchange().len(), X25519_KEY_EXCHANGE_LEN);
+    assert_eq!(server_share.shared_secret().len(), X25519_KEY_EXCHANGE_LEN);
 }
 
 #[test]

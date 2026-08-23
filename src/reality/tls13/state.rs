@@ -224,7 +224,7 @@ impl RealityTls13ServerState {
 
         let secrets = derive_handshake_traffic_secrets(
             self.suite,
-            &server_key_share.shared_secret,
+            server_key_share.shared_secret(),
             transcript_hash,
         )?;
         self.handshake_secrets = Some(secrets);

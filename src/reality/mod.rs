@@ -6,6 +6,7 @@ pub mod handshake;
 pub mod key_share;
 mod mldsa65;
 pub mod mldsa65_crypto;
+mod mlkem768;
 mod server;
 mod session;
 mod short_id;

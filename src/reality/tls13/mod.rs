@@ -27,6 +27,7 @@ pub use cipher_suite::{
     TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256,
 };
 
+pub use crate::reality::key_share::NAMED_GROUP_X25519MLKEM768;
 pub use key_schedule::{
     compute_finished_verify_data, derive_application_traffic_secrets, derive_finished_key,
     derive_handshake_traffic_secrets, derive_master_secret, derive_secret_sha256,
@@ -36,7 +37,9 @@ pub use key_schedule::{
 };
 pub use key_share::{
     encode_key_share_extension_body, extract_client_x25519_key_share,
-    generate_x25519_server_key_share, Tls13ServerKeyShare, NAMED_GROUP_X25519, X25519_KEY_LEN,
+    extract_client_x25519mlkem768_hybrid_key_share, generate_x25519_server_key_share,
+    generate_x25519mlkem768_server_key_share, Tls13ServerKeyShare, NAMED_GROUP_X25519,
+    X25519_KEY_LEN,
 };
 pub use messages::{
     build_encrypted_extensions_empty, build_finished, build_handshake_message,
