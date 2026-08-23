@@ -29,8 +29,8 @@ use super::key_schedule::{
     Tls13ApplicationSecrets, Tls13HandshakeSecrets,
 };
 use super::key_share::{
-    encode_key_share_extension_body, extract_client_x25519_key_share,
-    generate_x25519_server_key_share, Tls13ServerKeyShare,
+    encode_key_share_extension_body, generate_server_key_share_for_observed_group,
+    Tls13ServerKeyShare,
 };
 use super::messages::{
     build_encrypted_extensions_empty, build_finished, build_tls13_server_hello,
@@ -71,6 +71,7 @@ impl fmt::Debug for ObservedServerHelloDebug<'_> {
                 "cipher_suite",
                 &format!("0x{:04x}", self.0.server_hello.cipher_suite),
             )
+            .field("selected_key_share_group", &self.0.selected_key_share_group)
             .field(
                 "raw_handshake_message_len",
                 &self.0.raw_handshake_message.len(),
@@ -152,15 +153,9 @@ impl RealityTls13ServerState {
         &mut self,
         client_hello: &ClientHelloPayload,
     ) -> std::io::Result<&[u8]> {
-        let client_public_key =
-            extract_client_x25519_key_share(client_hello)?.ok_or_else(|| {
-                Error::new(
-                    ErrorKind::Unsupported,
-                    "TLS 1.3 accepted ServerHello requires client X25519 key_share",
-                )
-            })?;
-
-        let server_key_share = generate_x25519_server_key_share(client_public_key)?;
+        let selected_group = self.observed_server_hello.selected_key_share_group;
+        let server_key_share =
+            generate_server_key_share_for_observed_group(selected_group, client_hello)?;
         let key_share_extension_body = encode_key_share_extension_body(&server_key_share)?;
 
         // TODO: transcript must include full ClientHello handshake message and generated

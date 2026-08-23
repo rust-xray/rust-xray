@@ -5,10 +5,15 @@ use crate::protocol::structs::{
 };
 use crate::reality::auth::RealityAuthResult;
 use crate::reality::decision::RealityAccepted;
+use crate::reality::key_share::{
+    NAMED_GROUP_X25519MLKEM768, X25519_MLKEM768_SERVER_KEY_SHARE_LEN, X25519_PUBLIC_KEY_LEN,
+};
 use crate::reality::session::RealityClientAuth;
 use crate::reality::tls13::{Tls13HashAlgorithm, TLS_AES_128_GCM_SHA256};
 use crate::tls::TlsRecordContentType;
 use std::io::ErrorKind;
+
+const X25519_KEY_EXCHANGE_LEN: usize = X25519_PUBLIC_KEY_LEN;
 
 fn build_server_hello_handshake_message(extensions: &[(u16, &[u8])]) -> Vec<u8> {
     build_server_hello_handshake_message_with_cipher(extensions, TLS_AES_128_GCM_SHA256)
@@ -50,12 +55,30 @@ fn x25519_key_share_bytes(key_exchange: &[u8]) -> Vec<u8> {
     data
 }
 
+fn x25519mlkem768_key_share_bytes(key_exchange: &[u8]) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&NAMED_GROUP_X25519MLKEM768.to_be_bytes());
+    data.extend_from_slice(&(key_exchange.len() as u16).to_be_bytes());
+    data.extend_from_slice(key_exchange);
+    data
+}
+
 fn valid_tls13_x25519_server_hello_message() -> Vec<u8> {
     build_server_hello_handshake_message(&[
         (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
         (
             EXTENSION_KEY_SHARE,
             &x25519_key_share_bytes(&[0x22; X25519_KEY_EXCHANGE_LEN]),
+        ),
+    ])
+}
+
+fn valid_tls13_x25519mlkem768_server_hello_message() -> Vec<u8> {
+    build_server_hello_handshake_message(&[
+        (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
+        (
+            EXTENSION_KEY_SHARE,
+            &x25519mlkem768_key_share_bytes(&vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN]),
         ),
     ])
 }
@@ -177,6 +200,33 @@ fn extract_observed_server_hello_accepts_valid_tls13_x25519() {
             .group,
         NAMED_GROUP_X25519
     );
+    assert_eq!(observed.selected_key_share_group, NamedGroup::X25519);
+}
+
+#[test]
+fn extract_observed_server_hello_accepts_valid_tls13_x25519mlkem768() {
+    let message = valid_tls13_x25519mlkem768_server_hello_message();
+    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+
+    let observed =
+        extract_observed_server_hello(&dest_handshake).expect("valid hybrid ServerHello");
+
+    assert_eq!(
+        observed.selected_key_share_group,
+        NamedGroup::X25519MLKEM768
+    );
+    let key_share = parse_server_hello_key_share(
+        observed
+            .server_hello
+            .get_extension(EXTENSION_KEY_SHARE)
+            .expect("key_share present"),
+    )
+    .expect("valid key_share");
+    assert_eq!(key_share.group, NAMED_GROUP_X25519MLKEM768);
+    assert_eq!(
+        key_share.key_exchange.len(),
+        X25519_MLKEM768_SERVER_KEY_SHARE_LEN
+    );
 }
 
 #[test]
@@ -234,11 +284,11 @@ fn extract_observed_server_hello_rejects_non_x25519_key_share() {
 
     let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert!(err.to_string().contains("X25519"));
+    assert!(err.to_string().contains("0x0017"));
 }
 
 #[test]
-fn extract_observed_server_hello_rejects_x25519_key_share_wrong_length() {
+fn extract_observed_server_hello_rejects_x25519_key_share_len_31() {
     let message = build_server_hello_handshake_message(&[
         (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
         (EXTENSION_KEY_SHARE, &x25519_key_share_bytes(&[0x22; 31])),
@@ -248,6 +298,73 @@ fn extract_observed_server_hello_rejects_x25519_key_share_wrong_length() {
     let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidData);
     assert!(err.to_string().contains("32 bytes"));
+}
+
+#[test]
+fn extract_observed_server_hello_rejects_x25519_key_share_len_33() {
+    let message = build_server_hello_handshake_message(&[
+        (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
+        (EXTENSION_KEY_SHARE, &x25519_key_share_bytes(&[0x22; 33])),
+    ]);
+    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+
+    let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(err.to_string().contains("32 bytes"));
+}
+
+#[test]
+fn extract_observed_server_hello_rejects_hybrid_key_share_len_1119() {
+    let message = build_server_hello_handshake_message(&[
+        (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
+        (
+            EXTENSION_KEY_SHARE,
+            &x25519mlkem768_key_share_bytes(&vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN - 1]),
+        ),
+    ]);
+    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+
+    let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(err.to_string().contains("1120"));
+}
+
+#[test]
+fn extract_observed_server_hello_rejects_hybrid_key_share_len_1121() {
+    let message = build_server_hello_handshake_message(&[
+        (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
+        (
+            EXTENSION_KEY_SHARE,
+            &x25519mlkem768_key_share_bytes(&vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN + 1]),
+        ),
+    ]);
+    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+
+    let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(err.to_string().contains("1120"));
+}
+
+#[test]
+fn extract_observed_server_hello_rejects_truncated_key_share_extension() {
+    let mut key_share = x25519_key_share_bytes(&[0x22; X25519_KEY_EXCHANGE_LEN]);
+    key_share.pop();
+
+    let message = build_server_hello_handshake_message(&[
+        (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
+        (EXTENSION_KEY_SHARE, &key_share),
+    ]);
+    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+
+    let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
+    assert!(
+        matches!(
+            err.kind(),
+            ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+        ),
+        "unexpected error kind: {:?}",
+        err.kind()
+    );
 }
 
 #[test]
@@ -261,6 +378,24 @@ fn prepare_reality_tls13_state_creates_state_for_valid_observed_server_hello() {
     assert_eq!(state.suite.name, "TLS_AES_128_GCM_SHA256");
     assert_eq!(state.transcript.algorithm(), Tls13HashAlgorithm::Sha256);
     assert_eq!(state.accepted.sni, Some("example.com".to_string()));
+    assert_eq!(
+        state.observed_server_hello.selected_key_share_group,
+        NamedGroup::X25519
+    );
+}
+
+#[test]
+fn prepare_reality_tls13_state_stores_hybrid_selected_key_share_group() {
+    let dest_handshake = dest_handshake_from_server_hello_message(
+        &valid_tls13_x25519mlkem768_server_hello_message(),
+    );
+    let state = prepare_reality_tls13_state(dest_handshake, sample_accepted())
+        .expect("valid TLS 1.3 state with hybrid dest");
+
+    assert_eq!(
+        state.observed_server_hello.selected_key_share_group,
+        NamedGroup::X25519MLKEM768
+    );
 }
 
 #[test]

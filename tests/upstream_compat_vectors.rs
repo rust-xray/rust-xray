@@ -203,3 +203,111 @@ fn proxy_v2_fixture_matches_vless_builder() {
 
     assert_eq!(header.as_slice(), FIXTURE);
 }
+
+#[test]
+fn reality_target_server_hello_key_share_observation_vector() {
+    use rust_xray::protocol::enums::NamedGroup;
+    use rust_xray::reality::handshake::{extract_observed_server_hello, RealityDestHandshake};
+    use rust_xray::reality::key_share::{
+        NAMED_GROUP_X25519, NAMED_GROUP_X25519MLKEM768, X25519_MLKEM768_SERVER_KEY_SHARE_LEN,
+        X25519_PUBLIC_KEY_LEN,
+    };
+    use rust_xray::tls::{
+        parse_server_hello_key_share, TlsRecord, TlsRecordContentType, EXTENSION_KEY_SHARE,
+        EXTENSION_SUPPORTED_VERSIONS,
+    };
+
+    const TLS13_VERSION: [u8; 2] = [0x03, 0x04];
+
+    fn key_share_extension_body(group: u16, key_exchange: &[u8]) -> Vec<u8> {
+        let mut body = Vec::with_capacity(4 + key_exchange.len());
+        body.extend_from_slice(&group.to_be_bytes());
+        body.extend_from_slice(&(key_exchange.len() as u16).to_be_bytes());
+        body.extend_from_slice(key_exchange);
+        body
+    }
+
+    fn server_hello_message(key_share_body: &[u8]) -> Vec<u8> {
+        let cipher_suite = 0x1301u16;
+        let mut extension_bytes = Vec::new();
+        for (extension_type, data) in [
+            (EXTENSION_SUPPORTED_VERSIONS, TLS13_VERSION.as_slice()),
+            (EXTENSION_KEY_SHARE, key_share_body),
+        ] {
+            extension_bytes.extend_from_slice(&extension_type.to_be_bytes());
+            extension_bytes.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            extension_bytes.extend_from_slice(data);
+        }
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0x11; 32]);
+        body.push(0);
+        body.extend_from_slice(&cipher_suite.to_be_bytes());
+        body.push(0);
+        body.extend_from_slice(&(extension_bytes.len() as u16).to_be_bytes());
+        body.extend_from_slice(&extension_bytes);
+
+        let mut message = Vec::with_capacity(4 + body.len());
+        message.push(0x02);
+        message.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        message.extend_from_slice(&body);
+        message
+    }
+
+    fn dest_handshake(message: &[u8]) -> RealityDestHandshake {
+        let mut raw = Vec::with_capacity(5 + message.len());
+        raw.push(0x16);
+        raw.extend_from_slice(&[0x03, 0x03]);
+        raw.extend_from_slice(&(message.len() as u16).to_be_bytes());
+        raw.extend_from_slice(message);
+        RealityDestHandshake {
+            raw_server_bytes: raw.clone(),
+            records: vec![TlsRecord {
+                content_type: TlsRecordContentType::Handshake,
+                legacy_version: [0x03, 0x03],
+                payload: message.to_vec(),
+                raw,
+            }],
+        }
+    }
+
+    let x25519_body = key_share_extension_body(NAMED_GROUP_X25519, &[0xB1; X25519_PUBLIC_KEY_LEN]);
+    assert_eq!(&x25519_body[..2], &[0x00, 0x1d]);
+    assert_eq!(&x25519_body[2..4], &[0x00, 0x20]);
+    assert_eq!(x25519_body.len(), 4 + X25519_PUBLIC_KEY_LEN);
+
+    let x25519_observed =
+        extract_observed_server_hello(&dest_handshake(&server_hello_message(&x25519_body)))
+            .expect("target X25519 observation");
+    assert_eq!(x25519_observed.selected_key_share_group, NamedGroup::X25519);
+
+    let hybrid_body = key_share_extension_body(
+        NAMED_GROUP_X25519MLKEM768,
+        &vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN],
+    );
+    assert_eq!(&hybrid_body[..2], &[0x11, 0xec]);
+    assert_eq!(&hybrid_body[2..4], &[0x04, 0x60]);
+    assert_eq!(hybrid_body.len(), 4 + X25519_MLKEM768_SERVER_KEY_SHARE_LEN);
+
+    let hybrid_observed =
+        extract_observed_server_hello(&dest_handshake(&server_hello_message(&hybrid_body)))
+            .expect("target hybrid observation");
+    assert_eq!(
+        hybrid_observed.selected_key_share_group,
+        NamedGroup::X25519MLKEM768
+    );
+
+    let parsed = parse_server_hello_key_share(
+        hybrid_observed
+            .server_hello
+            .get_extension(EXTENSION_KEY_SHARE)
+            .expect("key_share"),
+    )
+    .expect("parse hybrid key_share");
+    assert_eq!(parsed.group, NAMED_GROUP_X25519MLKEM768);
+    assert_eq!(
+        parsed.key_exchange.len(),
+        X25519_MLKEM768_SERVER_KEY_SHARE_LEN
+    );
+}

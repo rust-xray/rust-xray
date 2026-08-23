@@ -37,9 +37,9 @@ pub use key_schedule::{
 };
 pub use key_share::{
     encode_key_share_extension_body, extract_client_x25519_key_share,
-    extract_client_x25519mlkem768_hybrid_key_share, generate_x25519_server_key_share,
-    generate_x25519mlkem768_server_key_share, Tls13ServerKeyShare, NAMED_GROUP_X25519,
-    X25519_KEY_LEN,
+    extract_client_x25519mlkem768_hybrid_key_share, generate_server_key_share_for_observed_group,
+    generate_x25519_server_key_share, generate_x25519mlkem768_server_key_share,
+    Tls13ServerKeyShare, NAMED_GROUP_X25519, X25519_KEY_LEN,
 };
 pub use messages::{
     build_encrypted_extensions_empty, build_finished, build_handshake_message,

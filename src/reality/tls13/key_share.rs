@@ -157,6 +157,43 @@ pub fn encode_key_share_extension_body(share: &Tls13ServerKeyShare) -> std::io::
     Ok(body)
 }
 
+/// Generates the REALITY server key share for the observed destination group.
+///
+/// TLS KEX group follows the target ServerHello only; client shares must match that
+/// group exactly (no cross-group fallback). REALITY pre-auth key-share selection is separate.
+pub fn generate_server_key_share_for_observed_group(
+    selected_group: NamedGroup,
+    client_hello: &ClientHelloPayload,
+) -> std::io::Result<Tls13ServerKeyShare> {
+    match selected_group {
+        NamedGroup::X25519 => {
+            let client_public_key = extract_client_x25519_key_share(client_hello)?.ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unsupported,
+                    "TLS 1.3 accepted ServerHello requires client X25519 key_share matching observed destination group",
+                )
+            })?;
+            generate_x25519_server_key_share(client_public_key)
+        }
+        NamedGroup::X25519MLKEM768 => {
+            let client_hybrid_share =
+                extract_client_x25519mlkem768_hybrid_key_share(client_hello)?.ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Unsupported,
+                        "TLS 1.3 accepted ServerHello requires client X25519MLKEM768 key_share matching observed destination group",
+                    )
+                })?;
+            generate_x25519mlkem768_server_key_share(&client_hybrid_share)
+        }
+        other => Err(Error::new(
+            ErrorKind::Unsupported,
+            format!(
+                "TLS 1.3 accepted ServerHello has unsupported observed destination key_share group: {other:?}"
+            ),
+        )),
+    }
+}
+
 /// Extracts the client X25519 public key from a TLS 1.3 ClientHello `key_share`.
 ///
 /// This is separate from REALITY auth key-share extraction in `reality/auth.rs`.

@@ -2,10 +2,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::debug;
 
+use crate::protocol::enums::NamedGroup;
+use crate::reality::key_share::{
+    NAMED_GROUP_X25519MLKEM768, X25519_MLKEM768_SERVER_KEY_SHARE_LEN, X25519_PUBLIC_KEY_LEN,
+};
 use crate::tls::{
     parse_complete_tls_records_prefix, parse_server_hello_key_share,
-    parse_tls_server_hello_handshake, TlsRecord, TlsRecordContentType, TlsServerHello,
-    EXTENSION_KEY_SHARE, EXTENSION_SUPPORTED_VERSIONS, NAMED_GROUP_X25519,
+    parse_tls_server_hello_handshake, ServerHelloKeyShare, TlsRecord, TlsRecordContentType,
+    TlsServerHello, EXTENSION_KEY_SHARE, EXTENSION_SUPPORTED_VERSIONS, NAMED_GROUP_X25519,
 };
 
 use super::decision::RealityAccepted;
@@ -17,7 +21,6 @@ const DEST_HANDSHAKE_READ_CHUNK: usize = 4 * 1024;
 
 const TLS_RECORD_LEGACY_VERSION: [u8; 2] = [0x03, 0x03];
 const TLS13_VERSION: [u8; 2] = [0x03, 0x04];
-const X25519_KEY_EXCHANGE_LEN: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealityDestHandshake {
@@ -29,6 +32,11 @@ pub struct RealityDestHandshake {
 pub struct RealityObservedServerHello {
     pub server_hello: TlsServerHello,
     pub raw_handshake_message: Vec<u8>,
+    /// Selected `key_share` group from the destination ServerHello (camouflage reference).
+    ///
+    /// Target `key_exchange` bytes are validated for shape only; rust REALITY generates its
+    /// own ephemeral server key material and must not reuse destination ciphertext/public keys.
+    pub selected_key_share_group: NamedGroup,
 }
 
 fn invalid_data(message: impl Into<String>) -> std::io::Error {
@@ -51,15 +59,16 @@ pub fn extract_observed_server_hello(
 
     let raw_handshake_message = handshake_record.payload.clone();
     let server_hello = parse_tls_server_hello_handshake(&raw_handshake_message)?;
-    validate_observed_server_hello(&server_hello)?;
+    let selected_key_share_group = validate_observed_server_hello(&server_hello)?;
 
     Ok(RealityObservedServerHello {
         server_hello,
         raw_handshake_message,
+        selected_key_share_group,
     })
 }
 
-fn validate_observed_server_hello(server_hello: &TlsServerHello) -> std::io::Result<()> {
+fn validate_observed_server_hello(server_hello: &TlsServerHello) -> std::io::Result<NamedGroup> {
     if server_hello.legacy_version != TLS_RECORD_LEGACY_VERSION {
         return Err(invalid_data(format!(
             "destination ServerHello legacy_version must be 0x0303, got 0x{:02x}{:02x}",
@@ -95,22 +104,41 @@ fn validate_observed_server_hello(server_hello: &TlsServerHello) -> std::io::Res
 
     let key_share = parse_server_hello_key_share(key_share_data)?;
 
-    if key_share.group != NAMED_GROUP_X25519 {
-        return Err(unsupported(format!(
-            "destination ServerHello key_share group 0x{:04x} is not supported yet (expected X25519)",
-            key_share.group
-        )));
-    }
+    validate_observed_key_share_group(&key_share)
+}
 
-    if key_share.key_exchange.len() != X25519_KEY_EXCHANGE_LEN {
-        return Err(invalid_data(format!(
-            "destination ServerHello X25519 key_exchange must be {} bytes, got {}",
-            X25519_KEY_EXCHANGE_LEN,
-            key_share.key_exchange.len()
-        )));
+/// REALITY destination observation: accept X25519 or X25519MLKEM768 with exact wire lengths.
+///
+/// Parses group/length from the target ServerHello but does not retain `key_exchange` bytes
+/// for rust TLS KEX — production ServerHello uses freshly generated local key shares.
+fn validate_observed_key_share_group(
+    key_share: &ServerHelloKeyShare,
+) -> std::io::Result<NamedGroup> {
+    match key_share.group {
+        NAMED_GROUP_X25519 => {
+            if key_share.key_exchange.len() != X25519_PUBLIC_KEY_LEN {
+                return Err(invalid_data(format!(
+                    "destination ServerHello X25519 key_exchange must be {} bytes, got {}",
+                    X25519_PUBLIC_KEY_LEN,
+                    key_share.key_exchange.len()
+                )));
+            }
+            Ok(NamedGroup::X25519)
+        }
+        NAMED_GROUP_X25519MLKEM768 => {
+            if key_share.key_exchange.len() != X25519_MLKEM768_SERVER_KEY_SHARE_LEN {
+                return Err(invalid_data(format!(
+                    "destination ServerHello X25519MLKEM768 key_exchange must be {} bytes, got {}",
+                    X25519_MLKEM768_SERVER_KEY_SHARE_LEN,
+                    key_share.key_exchange.len()
+                )));
+            }
+            Ok(NamedGroup::X25519MLKEM768)
+        }
+        other => Err(unsupported(format!(
+            "destination ServerHello key_share group 0x{other:04x} is not supported (expected X25519 or X25519MLKEM768)"
+        ))),
     }
-
-    Ok(())
 }
 
 fn contains_ccs_and_handshake(records: &[TlsRecord]) -> bool {
@@ -236,6 +264,7 @@ pub fn prepare_reality_tls13_state(
         client_version = ?state.accepted.client.client_version,
         observed_server_hello_message_len =
             state.observed_server_hello.raw_handshake_message.len(),
+        selected_key_share_group = ?state.observed_server_hello.selected_key_share_group,
         "REALITY TLS 1.3 server state created"
     );
 

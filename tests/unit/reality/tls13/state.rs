@@ -7,18 +7,27 @@ use crate::reality::auth::RealityAuthResult;
 use crate::reality::handshake::{
     extract_observed_server_hello, RealityDestHandshake, RealityObservedServerHello,
 };
-use crate::reality::key_share::build_x25519mlkem768_client_key_share;
+use crate::reality::key_share::{
+    build_x25519mlkem768_client_key_share, MLKEM768_CIPHERTEXT_LEN, MLKEM768_ENCAPSULATION_KEY_LEN,
+    NAMED_GROUP_X25519MLKEM768, X25519_MLKEM768_SERVER_KEY_SHARE_LEN,
+    X25519_MLKEM768_SHARED_SECRET_LEN,
+};
 use crate::reality::session::RealityClientAuth;
 use crate::reality::tls13::cipher_suite::{TLS_AES_128_CCM_SHA256, TLS_AES_128_GCM_SHA256};
 use crate::reality::tls13::hash_len;
-use crate::reality::tls13::key_share::NAMED_GROUP_X25519 as TLS13_NAMED_GROUP_X25519;
+use crate::reality::tls13::key_share::{
+    encode_key_share_extension_body, NAMED_GROUP_X25519 as TLS13_NAMED_GROUP_X25519,
+};
 use crate::reality::tls13::messages::build_encrypted_extensions_empty;
 use crate::reality::tls13::transcript::Tls13HashAlgorithm;
 use crate::tls::records::{parse_tls_records, TLS_RECORD_APPLICATION_DATA};
 use crate::tls::{
-    parse_tls_server_hello_handshake, TlsRecord, TlsRecordContentType, EXTENSION_KEY_SHARE,
-    EXTENSION_SUPPORTED_VERSIONS, NAMED_GROUP_X25519,
+    parse_server_hello_key_share, parse_tls_server_hello_handshake, TlsRecord,
+    TlsRecordContentType, EXTENSION_KEY_SHARE, EXTENSION_SUPPORTED_VERSIONS, NAMED_GROUP_X25519,
 };
+use ml_kem::ml_kem_768::MlKem768;
+use ml_kem::{Decapsulate, Kem, KeyExport};
+use x25519_dalek::{PublicKey, StaticSecret};
 
 const TLS_RECORD_LEGACY_VERSION: [u8; 2] = [0x03, 0x03];
 const TLS13_VERSION: [u8; 2] = [0x03, 0x04];
@@ -57,34 +66,105 @@ fn x25519_key_share_bytes(key_exchange: &[u8]) -> Vec<u8> {
     data
 }
 
-fn valid_observed_server_hello(cipher_suite: u16) -> RealityObservedServerHello {
-    let message = build_server_hello_handshake_message(
-        cipher_suite,
-        &[
-            (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
-            (
-                EXTENSION_KEY_SHARE,
-                &x25519_key_share_bytes(&[0x22; X25519_KEY_EXCHANGE_LEN]),
-            ),
-        ],
-    );
+fn x25519mlkem768_key_share_bytes(key_exchange: &[u8]) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&NAMED_GROUP_X25519MLKEM768.to_be_bytes());
+    data.extend_from_slice(&(key_exchange.len() as u16).to_be_bytes());
+    data.extend_from_slice(key_exchange);
+    data
+}
+
+fn dest_handshake_from_server_hello_message(message: &[u8]) -> RealityDestHandshake {
     let mut raw = Vec::with_capacity(5 + message.len());
     raw.push(0x16);
     raw.extend_from_slice(&TLS_RECORD_LEGACY_VERSION);
     raw.extend_from_slice(&(message.len() as u16).to_be_bytes());
-    raw.extend_from_slice(&message);
-
-    let dest_handshake = RealityDestHandshake {
+    raw.extend_from_slice(message);
+    RealityDestHandshake {
         raw_server_bytes: raw.clone(),
         records: vec![TlsRecord {
             content_type: TlsRecordContentType::Handshake,
             legacy_version: TLS_RECORD_LEGACY_VERSION,
-            payload: message.clone(),
+            payload: message.to_vec(),
             raw,
         }],
-    };
+    }
+}
 
-    extract_observed_server_hello(&dest_handshake).expect("valid observed ServerHello")
+fn valid_observed_server_hello(cipher_suite: u16) -> RealityObservedServerHello {
+    valid_observed_server_hello_with_target_key_share(
+        cipher_suite,
+        NamedGroup::X25519,
+        &x25519_key_share_bytes(&[0x22; X25519_KEY_EXCHANGE_LEN]),
+    )
+}
+
+fn valid_observed_server_hello_with_target_key_share(
+    cipher_suite: u16,
+    _group: NamedGroup,
+    key_share_extension: &[u8],
+) -> RealityObservedServerHello {
+    let message = build_server_hello_handshake_message(
+        cipher_suite,
+        &[
+            (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
+            (EXTENSION_KEY_SHARE, key_share_extension),
+        ],
+    );
+    extract_observed_server_hello(&dest_handshake_from_server_hello_message(&message))
+        .expect("valid observed ServerHello")
+}
+
+fn valid_observed_hybrid_server_hello(
+    cipher_suite: u16,
+    target_key_exchange: &[u8],
+) -> RealityObservedServerHello {
+    valid_observed_server_hello_with_target_key_share(
+        cipher_suite,
+        NamedGroup::X25519MLKEM768,
+        &x25519mlkem768_key_share_bytes(target_key_exchange),
+    )
+}
+
+fn build_valid_client_hybrid_share() -> (Vec<u8>, ml_kem::ml_kem_768::DecapsulationKey, StaticSecret)
+{
+    let client_x25519_secret = StaticSecret::random();
+    let client_x25519_public = *PublicKey::from(&client_x25519_secret).as_bytes();
+    let (dk, ek) = MlKem768::generate_keypair();
+    let mut client_hybrid = ek.to_bytes().to_vec();
+    client_hybrid.extend_from_slice(&client_x25519_public);
+    (client_hybrid, dk, client_x25519_secret)
+}
+
+fn client_hello_with_hybrid_keyshare(payload: Vec<u8>) -> ClientHelloPayload {
+    ClientHelloPayload {
+        client_version: ProtocolVersion::TLSv1_2,
+        random: Random([0x33; 32]),
+        session_id: SessionId::empty(),
+        cipher_suites: Vec::new(),
+        compression_methods: Vec::new(),
+        extensions: vec![ClientExtension::KeyShare(vec![KeyShareEntry::new(
+            NamedGroup::X25519MLKEM768,
+            payload,
+        )])],
+    }
+}
+
+fn client_hello_with_hybrid_and_standalone_keyshares(
+    hybrid_payload: Vec<u8>,
+    standalone: Vec<u8>,
+) -> ClientHelloPayload {
+    ClientHelloPayload {
+        client_version: ProtocolVersion::TLSv1_2,
+        random: Random([0x33; 32]),
+        session_id: SessionId::empty(),
+        cipher_suites: Vec::new(),
+        compression_methods: Vec::new(),
+        extensions: vec![ClientExtension::KeyShare(vec![
+            KeyShareEntry::new(NamedGroup::X25519MLKEM768, hybrid_payload),
+            KeyShareEntry::new(NamedGroup::X25519, standalone),
+        ])],
+    }
 }
 
 fn sample_accepted() -> RealityAccepted {
@@ -196,6 +276,116 @@ fn prepare_server_hello_builds_handshake_message_and_stores_state() {
 }
 
 #[test]
+fn prepare_server_hello_target_x25519_client_x25519_produces_x25519_server_share() {
+    let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+    let client_key: [u8; 32] = core::array::from_fn(|i| 0x44 + i as u8);
+    let client_hello = client_hello_with_x25519_keyshare(client_key.to_vec(), SessionId::empty());
+
+    state
+        .prepare_server_hello(&client_hello)
+        .expect("valid ServerHello plan");
+
+    let server_share = state.server_key_share.as_ref().expect("server key share");
+    assert_eq!(server_share.group, TLS13_NAMED_GROUP_X25519);
+    assert_eq!(server_share.key_exchange().len(), X25519_KEY_EXCHANGE_LEN);
+    assert_eq!(server_share.shared_secret().len(), X25519_KEY_EXCHANGE_LEN);
+}
+
+#[test]
+fn prepare_server_hello_target_hybrid_client_hybrid_produces_hybrid_server_share() {
+    let observed = valid_observed_hybrid_server_hello(
+        TLS_AES_128_GCM_SHA256,
+        &vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN],
+    );
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+    let (client_hybrid, _dk, _client_x25519_secret) = build_valid_client_hybrid_share();
+    let client_hello = client_hello_with_hybrid_keyshare(client_hybrid);
+
+    state
+        .prepare_server_hello(&client_hello)
+        .expect("valid hybrid ServerHello plan");
+
+    let server_share = state.server_key_share.as_ref().expect("server key share");
+    assert_eq!(server_share.group, NAMED_GROUP_X25519MLKEM768);
+    assert_eq!(
+        server_share.key_exchange().len(),
+        X25519_MLKEM768_SERVER_KEY_SHARE_LEN
+    );
+    assert_eq!(
+        server_share.shared_secret().len(),
+        X25519_MLKEM768_SHARED_SECRET_LEN
+    );
+}
+
+#[test]
+fn prepare_server_hello_target_hybrid_with_dual_client_keyshares_uses_hybrid_not_standalone() {
+    let observed = valid_observed_hybrid_server_hello(
+        TLS_AES_128_GCM_SHA256,
+        &vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN],
+    );
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+
+    let hybrid_tail: [u8; 32] = [0xAA; 32];
+    let standalone: [u8; 32] = core::array::from_fn(|i| 0x44 + i as u8);
+    assert_ne!(hybrid_tail, standalone);
+
+    let client_hello = client_hello_with_hybrid_and_standalone_keyshares(
+        build_x25519mlkem768_client_key_share(hybrid_tail),
+        standalone.to_vec(),
+    );
+
+    state
+        .prepare_server_hello(&client_hello)
+        .expect("target hybrid selects hybrid KEX despite standalone client entry");
+
+    let server_share = state.server_key_share.as_ref().expect("server key share");
+    assert_eq!(server_share.group, NAMED_GROUP_X25519MLKEM768);
+    assert_eq!(
+        server_share.key_exchange().len(),
+        X25519_MLKEM768_SERVER_KEY_SHARE_LEN
+    );
+}
+
+#[test]
+fn prepare_server_hello_target_x25519_with_dual_client_keyshares_uses_x25519() {
+    let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+
+    let hybrid_tail: [u8; 32] = [0xAA; 32];
+    let standalone: [u8; 32] = core::array::from_fn(|i| 0x44 + i as u8);
+    let client_hello = client_hello_with_hybrid_and_standalone_keyshares(
+        build_x25519mlkem768_client_key_share(hybrid_tail),
+        standalone.to_vec(),
+    );
+
+    state
+        .prepare_server_hello(&client_hello)
+        .expect("target X25519 selects standalone X25519 KEX");
+
+    let server_share = state.server_key_share.as_ref().expect("server key share");
+    assert_eq!(server_share.group, TLS13_NAMED_GROUP_X25519);
+    assert_eq!(server_share.key_exchange().len(), X25519_KEY_EXCHANGE_LEN);
+}
+
+#[test]
+fn prepare_server_hello_target_hybrid_client_standalone_only_errors() {
+    let observed = valid_observed_hybrid_server_hello(
+        TLS_AES_128_GCM_SHA256,
+        &vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN],
+    );
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+    let standalone: [u8; 32] = core::array::from_fn(|i| 0x44 + i as u8);
+    let client_hello = client_hello_with_x25519_keyshare(standalone.to_vec(), SessionId::empty());
+
+    let err = state.prepare_server_hello(&client_hello).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert!(err.to_string().contains("X25519MLKEM768"));
+    assert!(state.server_key_share.is_none());
+}
+
+#[test]
 fn prepare_server_hello_requires_client_x25519_key_share() {
     let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
     let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
@@ -206,67 +396,204 @@ fn prepare_server_hello_requires_client_x25519_key_share() {
 
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert!(err.to_string().contains("X25519 key_share"));
+    assert!(err.to_string().contains("X25519"));
     assert!(state.server_key_share.is_none());
     assert!(state.server_hello_message.is_none());
 }
 
 #[test]
-fn prepare_server_hello_with_hybrid_and_standalone_client_keyshares_stays_x25519_only() {
-    let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
-    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
-
-    let hybrid_tail: [u8; 32] = [0xAA; 32];
-    let standalone: [u8; 32] = core::array::from_fn(|i| 0x44 + i as u8);
-    assert_ne!(hybrid_tail, standalone);
-
-    let client_hello = ClientHelloPayload {
-        client_version: ProtocolVersion::TLSv1_2,
-        random: Random([0x33; 32]),
-        session_id: SessionId::empty(),
-        cipher_suites: Vec::new(),
-        compression_methods: Vec::new(),
-        extensions: vec![ClientExtension::KeyShare(vec![
-            KeyShareEntry::new(
-                NamedGroup::X25519MLKEM768,
-                build_x25519mlkem768_client_key_share(hybrid_tail),
-            ),
-            KeyShareEntry::new(NamedGroup::X25519, standalone.to_vec()),
-        ])],
-    };
-
-    state
-        .prepare_server_hello(&client_hello)
-        .expect("Stage 2 accepted TLS path still uses standalone X25519");
-
-    let server_share = state.server_key_share.as_ref().expect("server key share");
-    assert_eq!(server_share.group, TLS13_NAMED_GROUP_X25519);
-    assert_eq!(server_share.key_exchange().len(), X25519_KEY_EXCHANGE_LEN);
-    assert_eq!(server_share.shared_secret().len(), X25519_KEY_EXCHANGE_LEN);
-}
-
-#[test]
-fn prepare_server_hello_rejects_hybrid_only_client_key_share() {
+fn prepare_server_hello_target_x25519_rejects_hybrid_only_client_key_share() {
     let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
     let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
 
     let hybrid_tail: [u8; 32] = core::array::from_fn(|i| i as u8);
-    let client_hello = ClientHelloPayload {
-        client_version: ProtocolVersion::TLSv1_2,
-        random: Random([0x33; 32]),
-        session_id: SessionId::empty(),
-        cipher_suites: Vec::new(),
-        compression_methods: Vec::new(),
-        extensions: vec![ClientExtension::KeyShare(vec![KeyShareEntry::new(
-            NamedGroup::X25519MLKEM768,
-            build_x25519mlkem768_client_key_share(hybrid_tail),
-        )])],
-    };
+    let client_hello =
+        client_hello_with_hybrid_keyshare(build_x25519mlkem768_client_key_share(hybrid_tail));
 
     let err = state.prepare_server_hello(&client_hello).unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert!(err.to_string().contains("X25519 key_share"));
+    assert!(err.to_string().contains("X25519"));
     assert!(state.server_key_share.is_none());
+}
+
+#[test]
+fn prepare_server_hello_target_hybrid_rejects_malformed_client_hybrid_len_1215() {
+    let observed = valid_observed_hybrid_server_hello(
+        TLS_AES_128_GCM_SHA256,
+        &vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN],
+    );
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+    let mut client_hybrid = build_x25519mlkem768_client_key_share([0xBB; 32]);
+    client_hybrid.pop();
+    let client_hello = client_hello_with_hybrid_keyshare(client_hybrid);
+
+    let err = state.prepare_server_hello(&client_hello).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(err.to_string().contains("1216"));
+}
+
+#[test]
+fn prepare_server_hello_target_hybrid_rejects_invalid_mlkem_encapsulation_key() {
+    let observed = valid_observed_hybrid_server_hello(
+        TLS_AES_128_GCM_SHA256,
+        &vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN],
+    );
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+    let mut client_hybrid = build_x25519mlkem768_client_key_share([0xCC; 32]);
+    client_hybrid[..MLKEM768_ENCAPSULATION_KEY_LEN].fill(0xFF);
+    let client_hello = client_hello_with_hybrid_keyshare(client_hybrid);
+
+    let err = state.prepare_server_hello(&client_hello).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(err.to_string().contains("ML-KEM-768"));
+}
+
+#[test]
+fn prepare_server_hello_target_x25519_rejects_malformed_standalone_length() {
+    let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+    let client_hello = client_hello_with_x25519_keyshare(vec![0x44; 31], SessionId::empty());
+
+    let err = state.prepare_server_hello(&client_hello).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(err.to_string().contains("32 bytes"));
+}
+
+#[test]
+fn prepare_server_hello_target_hybrid_interop_crypto_matches_client() {
+    let observed = valid_observed_hybrid_server_hello(
+        TLS_AES_128_GCM_SHA256,
+        &vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN],
+    );
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+    let (client_hybrid, client_dk, client_x25519_secret) = build_valid_client_hybrid_share();
+    let client_hello = client_hello_with_hybrid_keyshare(client_hybrid);
+
+    state
+        .prepare_server_hello(&client_hello)
+        .expect("valid hybrid ServerHello plan");
+
+    let server_share = state.server_key_share.as_ref().expect("server key share");
+    let key_exchange = server_share.key_exchange();
+    let mlkem_ciphertext = &key_exchange[..MLKEM768_CIPHERTEXT_LEN];
+    let client_mlkem_shared = client_dk
+        .decapsulate_slice(mlkem_ciphertext)
+        .expect("valid ML-KEM ciphertext");
+    let server_x25519_public: [u8; 32] = key_exchange[MLKEM768_CIPHERTEXT_LEN..]
+        .try_into()
+        .expect("x25519 pub");
+    let client_x25519_shared = client_x25519_secret
+        .diffie_hellman(&PublicKey::from(server_x25519_public))
+        .as_bytes()
+        .to_vec();
+
+    let mut client_combined = vec![0u8; X25519_MLKEM768_SHARED_SECRET_LEN];
+    client_combined[..32].copy_from_slice(client_mlkem_shared.as_slice());
+    client_combined[32..].copy_from_slice(&client_x25519_shared);
+    assert_eq!(client_combined.as_slice(), server_share.shared_secret());
+}
+
+#[test]
+fn prepare_server_hello_target_hybrid_server_hello_wire_shape() {
+    let observed = valid_observed_hybrid_server_hello(
+        TLS_AES_128_GCM_SHA256,
+        &vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN],
+    );
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+    let (client_hybrid, _dk, _client_x25519_secret) = build_valid_client_hybrid_share();
+    let client_hello = client_hello_with_hybrid_keyshare(client_hybrid);
+
+    let message = state
+        .prepare_server_hello(&client_hello)
+        .expect("valid hybrid ServerHello plan")
+        .to_vec();
+
+    let parsed = parse_tls_server_hello_handshake(&message).expect("parsable ServerHello");
+    let key_share = parse_server_hello_key_share(
+        parsed
+            .get_extension(EXTENSION_KEY_SHARE)
+            .expect("key_share extension"),
+    )
+    .expect("valid key_share");
+    assert_eq!(key_share.group, NAMED_GROUP_X25519MLKEM768);
+    assert_eq!(
+        key_share.key_exchange.len(),
+        X25519_MLKEM768_SERVER_KEY_SHARE_LEN
+    );
+
+    let extension_body =
+        encode_key_share_extension_body(state.server_key_share.as_ref().expect("server key share"))
+            .expect("encoded key_share");
+    assert_eq!(&extension_body[..4], &[0x11, 0xec, 0x04, 0x60]);
+}
+
+#[test]
+fn prepare_server_hello_target_x25519_server_hello_wire_shape() {
+    let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+    let client_key: [u8; 32] = core::array::from_fn(|i| 0x44 + i as u8);
+    let client_hello = client_hello_with_x25519_keyshare(client_key.to_vec(), SessionId::empty());
+
+    state
+        .prepare_server_hello(&client_hello)
+        .expect("valid ServerHello plan");
+
+    let extension_body =
+        encode_key_share_extension_body(state.server_key_share.as_ref().expect("server key share"))
+            .expect("encoded key_share");
+    assert_eq!(&extension_body[..4], &[0x00, 0x1d, 0x00, 0x20]);
+}
+
+#[test]
+fn prepare_server_hello_does_not_reuse_target_hybrid_key_exchange_bytes() {
+    let target_payload = vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN];
+    let observed = valid_observed_hybrid_server_hello(TLS_AES_128_GCM_SHA256, &target_payload);
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+    let (client_hybrid, _dk, _client_x25519_secret) = build_valid_client_hybrid_share();
+    let client_hello = client_hello_with_hybrid_keyshare(client_hybrid);
+
+    state
+        .prepare_server_hello(&client_hello)
+        .expect("valid hybrid ServerHello plan");
+
+    let server_share = state.server_key_share.as_ref().expect("server key share");
+    assert_ne!(server_share.key_exchange(), target_payload.as_slice());
+}
+
+#[test]
+fn prepare_server_hello_target_hybrid_derives_64_byte_handshake_secret() {
+    let observed = valid_observed_hybrid_server_hello(
+        TLS_AES_128_GCM_SHA256,
+        &vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN],
+    );
+    let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
+    let (client_hybrid, _dk, _client_x25519_secret) = build_valid_client_hybrid_share();
+    let client_hello = client_hello_with_hybrid_keyshare(client_hybrid);
+
+    state
+        .prepare_server_hello(&client_hello)
+        .expect("valid hybrid ServerHello plan");
+    let transcript_hash = state
+        .update_transcript_client_server_hello(&sample_client_hello_handshake_message())
+        .expect("transcript hash");
+
+    state
+        .derive_handshake_secrets(&transcript_hash)
+        .expect("hybrid handshake secrets");
+
+    assert_eq!(
+        state
+            .server_key_share
+            .as_ref()
+            .expect("server key share")
+            .shared_secret()
+            .len(),
+        64
+    );
 }
 
 #[test]
