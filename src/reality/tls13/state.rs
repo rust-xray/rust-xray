@@ -14,8 +14,11 @@ use crate::reality::certificate::{
 use crate::reality::handshake::RealityObservedServerHello;
 use crate::reality::mldsa65::Mldsa65Seed;
 use crate::reality::stages::{self, stage_error, RealityAcceptedStage};
+use crate::reality::target_server_flight::{
+    ObservedEncryptedHandshakeSlot, ObservedTargetTls13ServerFlight,
+};
 use crate::reality::RealityAccepted;
-use crate::tls::records::build_handshake_record;
+use crate::tls::records::{build_change_cipher_spec_record, build_handshake_record};
 use crate::tls::{TlsRecord, TLS_RECORD_ALERT, TLS_RECORD_HANDSHAKE};
 
 use super::certificate::{
@@ -51,6 +54,7 @@ const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 0x01;
 pub struct RealityTls13ServerState {
     pub accepted: RealityAccepted,
     pub observed_server_hello: RealityObservedServerHello,
+    pub observed_server_flight: ObservedTargetTls13ServerFlight,
     pub suite: Tls13CipherSuite,
     pub transcript: TranscriptHash,
     pub server_key_share: Option<Tls13ServerKeyShare>,
@@ -60,6 +64,11 @@ pub struct RealityTls13ServerState {
     pub client_finished_verified: bool,
     pub application_secret_transcript_hash: Option<Vec<u8>>,
     pub application_secrets: Option<Tls13ApplicationSecrets>,
+    /// Initial TLS 1.3 server application-data write sequence after the handshake flight.
+    ///
+    /// Incremented when a position-6 camouflage record is sent under the server application
+    /// traffic secret (upstream REALITY switches write keys before this record).
+    pub server_application_write_sequence: u64,
 }
 
 struct ObservedServerHelloDebug<'a>(&'a RealityObservedServerHello);
@@ -130,6 +139,7 @@ impl RealityTls13ServerState {
     pub fn new(
         accepted: RealityAccepted,
         observed_server_hello: RealityObservedServerHello,
+        observed_server_flight: ObservedTargetTls13ServerFlight,
     ) -> std::io::Result<Self> {
         let suite = resolve_tls13_cipher_suite(observed_server_hello.server_hello.cipher_suite)?;
         let transcript = TranscriptHash::new(suite.hash);
@@ -137,6 +147,7 @@ impl RealityTls13ServerState {
         Ok(Self {
             accepted,
             observed_server_hello,
+            observed_server_flight,
             suite,
             transcript,
             server_key_share: None,
@@ -146,6 +157,7 @@ impl RealityTls13ServerState {
             client_finished_verified: false,
             application_secret_transcript_hash: None,
             application_secrets: None,
+            server_application_write_sequence: 0,
         })
     }
 
@@ -298,11 +310,26 @@ impl RealityTls13ServerState {
             compute_finished_verify_data(self.suite, &finished_key, &transcript_hash)?;
         let finished = build_finished(&verify_data)?;
 
-        let encrypted_extensions_record =
-            encryptor.encrypt_handshake_message(&encrypted_extensions)?;
-        let certificate_record = encryptor.encrypt_handshake_message(&certificate)?;
-        let certificate_verify_record = encryptor.encrypt_handshake_message(&certificate_verify)?;
-        let finished_record = encryptor.encrypt_handshake_message(&finished)?;
+        let encrypted_extensions_record = self.encrypt_observed_handshake_record(
+            &mut encryptor,
+            &encrypted_extensions,
+            ObservedEncryptedHandshakeSlot::EncryptedExtensions,
+        )?;
+        let certificate_record = self.encrypt_observed_handshake_record(
+            &mut encryptor,
+            &certificate,
+            ObservedEncryptedHandshakeSlot::Certificate,
+        )?;
+        let certificate_verify_record = self.encrypt_observed_handshake_record(
+            &mut encryptor,
+            &certificate_verify,
+            ObservedEncryptedHandshakeSlot::CertificateVerify,
+        )?;
+        let finished_record = self.encrypt_observed_handshake_record(
+            &mut encryptor,
+            &finished,
+            ObservedEncryptedHandshakeSlot::Finished,
+        )?;
 
         self.transcript.update(&finished);
         self.server_finished_message = Some(finished);
@@ -311,7 +338,58 @@ impl RealityTls13ServerState {
         records.extend_from_slice(&certificate_record);
         records.extend_from_slice(&certificate_verify_record);
         records.extend_from_slice(&finished_record);
+
+        if let Some(position6_record) = self.build_position6_camouflage_record()? {
+            records.extend_from_slice(&position6_record);
+        }
+
         Ok(records)
+    }
+
+    /// Builds optional positional record #6 camouflage encrypted under the server application
+    /// traffic secret (upstream REALITY `typeNewSessionTicket` writer trigger semantics).
+    fn build_position6_camouflage_record(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        let Some(desired_wire_len) = self
+            .observed_server_flight
+            .observed_position6_camouflage_wire_len()
+        else {
+            return Ok(None);
+        };
+
+        let handshake_secret = self
+            .handshake_secrets
+            .as_ref()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "TLS 1.3 position-6 camouflage record requires derived handshake secrets",
+                )
+            })?
+            .handshake_secret
+            .clone();
+        let transcript_hash = self.transcript.digest();
+        let server_application_traffic_secret =
+            derive_application_traffic_secrets(self.suite, &handshake_secret, &transcript_hash)?
+                .server_application_traffic_secret;
+        let traffic_keys = derive_traffic_key(self.suite, &server_application_traffic_secret)?;
+        let mut encryptor = Tls13RecordEncryptor::new(self.suite, traffic_keys)?;
+        let record = encryptor
+            .encrypt_camouflage_position6_record_with_desired_wire_len(desired_wire_len)?;
+        self.server_application_write_sequence = encryptor.sequence;
+        Ok(Some(record))
+    }
+
+    fn encrypt_observed_handshake_record(
+        &self,
+        encryptor: &mut Tls13RecordEncryptor,
+        handshake_message: &[u8],
+        slot: ObservedEncryptedHandshakeSlot,
+    ) -> std::io::Result<Vec<u8>> {
+        let desired_wire_len = self
+            .observed_server_flight
+            .observed_wire_len_for_encrypted_handshake_slot(slot);
+        encryptor
+            .encrypt_handshake_message_with_desired_wire_len(handshake_message, desired_wire_len)
     }
 
     pub fn build_server_finished_message(&mut self) -> std::io::Result<Vec<u8>> {
@@ -409,6 +487,23 @@ impl RealityTls13ServerState {
     }
 }
 
+/// Assembles the cleartext server handshake flight: ServerHello, dummy CCS, encrypted records.
+pub(crate) fn assemble_server_handshake_flight_out(
+    server_hello_record: &[u8],
+    encrypted_handshake_records: &[u8],
+) -> Vec<u8> {
+    let change_cipher_spec_record = build_change_cipher_spec_record();
+    let mut out = Vec::with_capacity(
+        server_hello_record.len()
+            + change_cipher_spec_record.len()
+            + encrypted_handshake_records.len(),
+    );
+    out.extend_from_slice(server_hello_record);
+    out.extend_from_slice(&change_cipher_spec_record);
+    out.extend_from_slice(encrypted_handshake_records);
+    out
+}
+
 /// Completes the REALITY accepted-path TLS 1.3 handshake and returns an application stream.
 ///
 /// Unsupported features return [`ErrorKind::Unsupported`] with a precise message. Accepted-path
@@ -490,10 +585,8 @@ where
         "built encrypted server handshake records"
     );
 
-    let mut server_handshake_out =
-        Vec::with_capacity(server_hello_record.len() + encrypted_handshake_records.len());
-    server_handshake_out.extend_from_slice(&server_hello_record);
-    server_handshake_out.extend_from_slice(&encrypted_handshake_records);
+    let server_handshake_out =
+        assemble_server_handshake_flight_out(&server_hello_record, &encrypted_handshake_records);
     stream
         .write_all(&server_handshake_out)
         .await
@@ -610,6 +703,8 @@ where
             .clone(),
     )
     .map_err(|err| stage_error(RealityAcceptedStage::ApplicationStream, err))?;
+    let mut write_encryptor = write_encryptor;
+    write_encryptor.sequence = state.server_application_write_sequence;
 
     info!(
         stage = stages::TLS13_APPLICATION_STREAM_READY,

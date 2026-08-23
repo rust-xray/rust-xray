@@ -8,7 +8,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Nonce as ChaChaNonce};
 
 use crate::tls::records::{
     build_tls_record, TlsRecordContentType, TLS_LEGACY_VERSION_1_2, TLS_RECORD_APPLICATION_DATA,
-    TLS_RECORD_HANDSHAKE,
+    TLS_RECORD_HANDSHAKE, TLS_RECORD_HEADER_LEN,
 };
 
 use super::cipher_suite::{Tls13AeadAlgorithm, Tls13CipherSuite};
@@ -16,7 +16,166 @@ use super::key_schedule::{derive_traffic_key, update_traffic_secret, Tls13Traffi
 use super::messages::{build_key_update_message, KEY_UPDATE_NOT_REQUESTED};
 
 const TLS13_IV_LEN: usize = 12;
-const GCM_TAG_LEN: usize = 16;
+
+/// Minimum on-wire TLS ApplicationData record length for an encrypted handshake message.
+pub fn minimum_tls13_encrypted_handshake_record_wire_len(
+    suite: Tls13CipherSuite,
+    handshake_message_len: usize,
+) -> std::io::Result<usize> {
+    let tag_len = suite.aead_tag_len();
+    let inner_plaintext_len = handshake_message_len.checked_add(1).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "TLS 1.3 encrypted handshake inner plaintext length overflow",
+        )
+    })?;
+    let ciphertext_payload_len = inner_plaintext_len.checked_add(tag_len).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "TLS 1.3 encrypted handshake ciphertext payload length overflow",
+        )
+    })?;
+    if ciphertext_payload_len > u16::MAX as usize {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "TLS 1.3 encrypted handshake record payload exceeds u16 maximum ({ciphertext_payload_len} bytes)"
+            ),
+        ));
+    }
+    Ok(TLS_RECORD_HEADER_LEN + ciphertext_payload_len)
+}
+
+fn padding_zeros_for_desired_handshake_record_wire_len(
+    suite: Tls13CipherSuite,
+    handshake_message_len: usize,
+    desired_total_wire_len: usize,
+) -> std::io::Result<usize> {
+    let min_wire = minimum_tls13_encrypted_handshake_record_wire_len(suite, handshake_message_len)?;
+    if desired_total_wire_len < min_wire {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "TLS 1.3 encrypted handshake record target wire length {desired_total_wire_len} \
+                 is smaller than minimum {min_wire} (handshake_message_len={handshake_message_len})"
+            ),
+        ));
+    }
+
+    let tag_len = suite.aead_tag_len();
+    let ciphertext_payload_len = desired_total_wire_len
+        .checked_sub(TLS_RECORD_HEADER_LEN)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "TLS 1.3 encrypted handshake target wire length {desired_total_wire_len} \
+                     is smaller than TLS record header"
+                ),
+            )
+        })?;
+    let inner_plaintext_len = ciphertext_payload_len.checked_sub(tag_len).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "TLS 1.3 encrypted handshake target wire length {desired_total_wire_len} \
+                 does not fit handshake message and AEAD tag"
+            ),
+        )
+    })?;
+    let min_inner_plaintext_len = handshake_message_len + 1;
+    inner_plaintext_len
+        .checked_sub(min_inner_plaintext_len)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "TLS 1.3 encrypted handshake target wire length {desired_total_wire_len} \
+                 is smaller than minimum {min_wire}"
+                ),
+            )
+        })
+}
+
+/// Minimum on-wire TLS ApplicationData record length for encrypted application plaintext.
+pub fn minimum_tls13_encrypted_application_record_wire_len(
+    suite: Tls13CipherSuite,
+    plaintext_len: usize,
+) -> std::io::Result<usize> {
+    let tag_len = suite.aead_tag_len();
+    let inner_plaintext_len = plaintext_len.checked_add(1).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "TLS 1.3 encrypted application inner plaintext length overflow",
+        )
+    })?;
+    let ciphertext_payload_len = inner_plaintext_len.checked_add(tag_len).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "TLS 1.3 encrypted application ciphertext payload length overflow",
+        )
+    })?;
+    if ciphertext_payload_len > u16::MAX as usize {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "TLS 1.3 encrypted application record payload exceeds u16 maximum ({ciphertext_payload_len} bytes)"
+            ),
+        ));
+    }
+    Ok(TLS_RECORD_HEADER_LEN + ciphertext_payload_len)
+}
+
+fn padding_zeros_for_desired_application_record_wire_len(
+    suite: Tls13CipherSuite,
+    plaintext_len: usize,
+    desired_total_wire_len: usize,
+) -> std::io::Result<usize> {
+    let min_wire = minimum_tls13_encrypted_application_record_wire_len(suite, plaintext_len)?;
+    if desired_total_wire_len < min_wire {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "TLS 1.3 encrypted application record target wire length {desired_total_wire_len} \
+                 is smaller than minimum {min_wire} (plaintext_len={plaintext_len})"
+            ),
+        ));
+    }
+
+    let tag_len = suite.aead_tag_len();
+    let ciphertext_payload_len = desired_total_wire_len
+        .checked_sub(TLS_RECORD_HEADER_LEN)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "TLS 1.3 encrypted application target wire length {desired_total_wire_len} \
+                     is smaller than TLS record header"
+                ),
+            )
+        })?;
+    let inner_plaintext_len = ciphertext_payload_len.checked_sub(tag_len).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "TLS 1.3 encrypted application target wire length {desired_total_wire_len} \
+                 does not fit plaintext and AEAD tag"
+            ),
+        )
+    })?;
+    let min_inner_plaintext_len = plaintext_len + 1;
+    inner_plaintext_len
+        .checked_sub(min_inner_plaintext_len)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "TLS 1.3 encrypted application target wire length {desired_total_wire_len} \
+                     is smaller than minimum {min_wire}"
+                ),
+            )
+        })
+}
 
 /// TLS 1.3 AEAD record encryptor for post-ServerHello handshake messages.
 #[derive(Debug)]
@@ -444,13 +603,58 @@ impl Tls13RecordEncryptor {
         &mut self,
         handshake_message: &[u8],
     ) -> std::io::Result<Vec<u8>> {
+        self.encrypt_handshake_message_with_desired_wire_len(handshake_message, None)
+    }
+
+    /// Encrypts a handshake message, optionally padding the TLS 1.3 inner plaintext so the
+    /// resulting on-wire record matches `desired_total_wire_len` (header + ciphertext).
+    pub fn encrypt_handshake_message_with_desired_wire_len(
+        &mut self,
+        handshake_message: &[u8],
+        desired_total_wire_len: Option<usize>,
+    ) -> std::io::Result<Vec<u8>> {
+        let padding_zeros = match desired_total_wire_len {
+            None => 0,
+            Some(desired) => padding_zeros_for_desired_handshake_record_wire_len(
+                self.suite,
+                handshake_message.len(),
+                desired,
+            )?,
+        };
+
+        self.encrypt_handshake_inner_plaintext(
+            handshake_message,
+            TLS_RECORD_HANDSHAKE,
+            padding_zeros,
+        )
+    }
+
+    fn encrypt_handshake_inner_plaintext(
+        &mut self,
+        handshake_message: &[u8],
+        inner_content_type: u8,
+        padding_zeros: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        let tag_len = self.suite.aead_tag_len();
         let nonce_bytes = tls13_record_nonce(&self.keys.iv, self.sequence)?;
 
-        let mut inner_plaintext = Vec::with_capacity(handshake_message.len() + 1 + GCM_TAG_LEN);
-        inner_plaintext.extend_from_slice(handshake_message);
-        inner_plaintext.push(TLS_RECORD_HANDSHAKE);
+        let inner_plaintext_len = handshake_message
+            .len()
+            .checked_add(1)
+            .and_then(|len| len.checked_add(padding_zeros))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "TLS 1.3 encrypted handshake inner plaintext length overflow",
+                )
+            })?;
 
-        let ciphertext_len = u16::try_from(inner_plaintext.len() + GCM_TAG_LEN).map_err(|_| {
+        let mut inner_plaintext = Vec::with_capacity(inner_plaintext_len);
+        inner_plaintext.extend_from_slice(handshake_message);
+        inner_plaintext.push(inner_content_type);
+        inner_plaintext.resize(inner_plaintext_len, 0);
+
+        let ciphertext_len = u16::try_from(inner_plaintext.len() + tag_len).map_err(|_| {
             Error::new(
                 ErrorKind::InvalidInput,
                 "TLS 1.3 encrypted handshake record exceeds u16 payload limit",
@@ -494,13 +698,69 @@ impl Tls13RecordEncryptor {
 
     /// Encrypts application data into a TLS ApplicationData record.
     pub fn encrypt_application_data(&mut self, plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
+        self.encrypt_application_data_with_desired_wire_len(plaintext, None)
+    }
+
+    /// Encrypts application data, optionally padding the TLS 1.3 inner plaintext so the
+    /// resulting on-wire record matches `desired_total_wire_len` (header + ciphertext).
+    pub fn encrypt_application_data_with_desired_wire_len(
+        &mut self,
+        plaintext: &[u8],
+        desired_total_wire_len: Option<usize>,
+    ) -> std::io::Result<Vec<u8>> {
+        let padding_zeros = match desired_total_wire_len {
+            None => 0,
+            Some(desired) => padding_zeros_for_desired_application_record_wire_len(
+                self.suite,
+                plaintext.len(),
+                desired,
+            )?,
+        };
+
+        self.encrypt_application_inner_plaintext(
+            plaintext,
+            TLS_RECORD_APPLICATION_DATA,
+            padding_zeros,
+        )
+    }
+
+    /// Encrypts an empty application-data inner plaintext for REALITY position-6 camouflage.
+    ///
+    /// Upstream REALITY triggers `typeNewSessionTicket` but the record writer emits padded
+    /// application-data semantics, not a real NewSessionTicket handshake message.
+    pub fn encrypt_camouflage_position6_record_with_desired_wire_len(
+        &mut self,
+        desired_total_wire_len: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        self.encrypt_application_data_with_desired_wire_len(&[], Some(desired_total_wire_len))
+    }
+
+    fn encrypt_application_inner_plaintext(
+        &mut self,
+        plaintext: &[u8],
+        inner_content_type: u8,
+        padding_zeros: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        let tag_len = self.suite.aead_tag_len();
         let nonce_bytes = tls13_record_nonce(&self.keys.iv, self.sequence)?;
 
-        let mut inner_plaintext = Vec::with_capacity(plaintext.len() + 1);
-        inner_plaintext.extend_from_slice(plaintext);
-        inner_plaintext.push(TLS_RECORD_APPLICATION_DATA);
+        let inner_plaintext_len = plaintext
+            .len()
+            .checked_add(1)
+            .and_then(|len| len.checked_add(padding_zeros))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "TLS 1.3 encrypted application inner plaintext length overflow",
+                )
+            })?;
 
-        let ciphertext_len = u16::try_from(inner_plaintext.len() + GCM_TAG_LEN).map_err(|_| {
+        let mut inner_plaintext = Vec::with_capacity(inner_plaintext_len);
+        inner_plaintext.extend_from_slice(plaintext);
+        inner_plaintext.push(inner_content_type);
+        inner_plaintext.resize(inner_plaintext_len, 0);
+
+        let ciphertext_len = u16::try_from(inner_plaintext.len() + tag_len).map_err(|_| {
             Error::new(
                 ErrorKind::InvalidInput,
                 "TLS 1.3 encrypted application data record exceeds u16 payload limit",
@@ -554,12 +814,13 @@ impl Tls13RecordEncryptor {
         inner_plaintext.extend_from_slice(body);
         inner_plaintext.push(inner_content_type);
 
-        let ciphertext_len = u16::try_from(inner_plaintext.len() + GCM_TAG_LEN).map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                "TLS 1.3 encrypted application data record exceeds u16 payload limit",
-            )
-        })?;
+        let ciphertext_len = u16::try_from(inner_plaintext.len() + self.suite.aead_tag_len())
+            .map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "TLS 1.3 encrypted application data record exceeds u16 payload limit",
+                )
+            })?;
         let aad = build_record_aad(TLS_LEGACY_VERSION_1_2, ciphertext_len);
 
         let ciphertext = match self.suite.aead {

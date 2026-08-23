@@ -1,6 +1,10 @@
 use std::io::{Error, ErrorKind};
 
-const RECORD_HEADER_LEN: usize = 5;
+pub const TLS_RECORD_HEADER_LEN: usize = 5;
+pub const TLS_MAX_RECORD_PAYLOAD_LEN: usize = u16::MAX as usize;
+pub const TLS_MAX_RECORD_WIRE_LEN: usize = TLS_RECORD_HEADER_LEN + TLS_MAX_RECORD_PAYLOAD_LEN;
+
+const RECORD_HEADER_LEN: usize = TLS_RECORD_HEADER_LEN;
 
 pub const TLS_RECORD_CHANGE_CIPHER_SPEC: u8 = 20;
 pub const TLS_RECORD_ALERT: u8 = 21;

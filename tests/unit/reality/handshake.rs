@@ -11,6 +11,7 @@ use crate::reality::key_share::{
 use crate::reality::session::RealityClientAuth;
 use crate::reality::tls13::{Tls13HashAlgorithm, TLS_AES_128_GCM_SHA256};
 use crate::tls::TlsRecordContentType;
+use crate::tls::{build_change_cipher_spec_record, TlsRecord, TLS_LEGACY_VERSION_1_2};
 use std::io::ErrorKind;
 
 const X25519_KEY_EXCHANGE_LEN: usize = X25519_PUBLIC_KEY_LEN;
@@ -85,9 +86,23 @@ fn valid_tls13_x25519mlkem768_server_hello_message() -> Vec<u8> {
 
 fn dest_handshake_from_server_hello_message(message: &[u8]) -> RealityDestHandshake {
     let record = handshake_record(message);
+    RealityDestHandshake::try_from_records(record.raw.clone(), vec![record])
+        .expect("valid single-record dest handshake")
+}
+
+/// Builds a dest handshake container without positional flight validation.
+///
+/// Used by negative ServerHello semantic tests that expect [`extract_observed_server_hello`]
+/// to reject malformed handshake messages.
+fn dest_handshake_from_server_hello_message_unvalidated(message: &[u8]) -> RealityDestHandshake {
+    let record = handshake_record(message);
     RealityDestHandshake {
         raw_server_bytes: record.raw.clone(),
-        records: vec![record],
+        records: vec![record.clone()],
+        server_flight: ObservedTargetTls13ServerFlight {
+            server_hello_wire_len: record.raw.len(),
+            ..ObservedTargetTls13ServerFlight::default()
+        },
     }
 }
 
@@ -154,20 +169,36 @@ fn contains_tls13_server_hello_false_for_application_data() {
 
 #[test]
 fn reality_dest_handshake_stores_records() {
-    let server_hello = handshake_record(&[0x02, 0x00, 0x00, 0x01]);
+    let sh_record = handshake_record(&valid_tls13_x25519_server_hello_message());
+    let ccs = build_change_cipher_spec_record();
     let app_data = application_data_record(&[0xaa, 0xbb]);
-    let mut raw_server_bytes = server_hello.raw.clone();
+    let mut raw_server_bytes = sh_record.raw.clone();
+    raw_server_bytes.extend_from_slice(&ccs);
     raw_server_bytes.extend_from_slice(&app_data.raw);
 
-    let dest_handshake = RealityDestHandshake {
-        raw_server_bytes: raw_server_bytes.clone(),
-        records: vec![server_hello.clone(), app_data.clone()],
-    };
+    let dest_handshake = RealityDestHandshake::try_from_records(
+        raw_server_bytes.clone(),
+        vec![
+            sh_record,
+            {
+                TlsRecord {
+                    content_type: TlsRecordContentType::ChangeCipherSpec,
+                    legacy_version: TLS_LEGACY_VERSION_1_2,
+                    payload: vec![0x01],
+                    raw: ccs,
+                }
+            },
+            app_data,
+        ],
+    )
+    .expect("valid dest handshake prefix");
 
     assert_eq!(dest_handshake.raw_server_bytes, raw_server_bytes);
-    assert_eq!(dest_handshake.records.len(), 2);
-    assert_eq!(dest_handshake.records[0], server_hello);
-    assert_eq!(dest_handshake.records[1], app_data);
+    assert_eq!(dest_handshake.records.len(), 3);
+    assert_eq!(
+        dest_handshake.server_flight.encrypted_extensions_wire_len,
+        Some(7)
+    );
 }
 
 #[test]
@@ -235,7 +266,7 @@ fn extract_observed_server_hello_rejects_missing_supported_versions() {
         EXTENSION_KEY_SHARE,
         &x25519_key_share_bytes(&[0x22; X25519_KEY_EXCHANGE_LEN]),
     )]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+    let dest_handshake = dest_handshake_from_server_hello_message_unvalidated(&message);
 
     let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidData);
@@ -251,7 +282,7 @@ fn extract_observed_server_hello_rejects_non_tls13_supported_versions() {
             &x25519_key_share_bytes(&[0x22; X25519_KEY_EXCHANGE_LEN]),
         ),
     ]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+    let dest_handshake = dest_handshake_from_server_hello_message_unvalidated(&message);
 
     let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidData);
@@ -262,7 +293,7 @@ fn extract_observed_server_hello_rejects_non_tls13_supported_versions() {
 fn extract_observed_server_hello_rejects_missing_key_share() {
     let message =
         build_server_hello_handshake_message(&[(EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION)]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+    let dest_handshake = dest_handshake_from_server_hello_message_unvalidated(&message);
 
     let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidData);
@@ -280,7 +311,7 @@ fn extract_observed_server_hello_rejects_non_x25519_key_share() {
         (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
         (EXTENSION_KEY_SHARE, &key_share),
     ]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+    let dest_handshake = dest_handshake_from_server_hello_message_unvalidated(&message);
 
     let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Unsupported);
@@ -293,7 +324,7 @@ fn extract_observed_server_hello_rejects_x25519_key_share_len_31() {
         (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
         (EXTENSION_KEY_SHARE, &x25519_key_share_bytes(&[0x22; 31])),
     ]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+    let dest_handshake = dest_handshake_from_server_hello_message_unvalidated(&message);
 
     let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidData);
@@ -306,7 +337,7 @@ fn extract_observed_server_hello_rejects_x25519_key_share_len_33() {
         (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
         (EXTENSION_KEY_SHARE, &x25519_key_share_bytes(&[0x22; 33])),
     ]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+    let dest_handshake = dest_handshake_from_server_hello_message_unvalidated(&message);
 
     let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidData);
@@ -322,7 +353,7 @@ fn extract_observed_server_hello_rejects_hybrid_key_share_len_1119() {
             &x25519mlkem768_key_share_bytes(&vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN - 1]),
         ),
     ]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+    let dest_handshake = dest_handshake_from_server_hello_message_unvalidated(&message);
 
     let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidData);
@@ -338,7 +369,7 @@ fn extract_observed_server_hello_rejects_hybrid_key_share_len_1121() {
             &x25519mlkem768_key_share_bytes(&vec![0xA5; X25519_MLKEM768_SERVER_KEY_SHARE_LEN + 1]),
         ),
     ]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+    let dest_handshake = dest_handshake_from_server_hello_message_unvalidated(&message);
 
     let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidData);
@@ -354,7 +385,7 @@ fn extract_observed_server_hello_rejects_truncated_key_share_extension() {
         (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
         (EXTENSION_KEY_SHARE, &key_share),
     ]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+    let dest_handshake = dest_handshake_from_server_hello_message_unvalidated(&message);
 
     let err = extract_observed_server_hello(&dest_handshake).unwrap_err();
     assert!(
@@ -402,7 +433,7 @@ fn prepare_reality_tls13_state_stores_hybrid_selected_key_share_group() {
 fn prepare_reality_tls13_state_rejects_invalid_server_hello() {
     let message =
         build_server_hello_handshake_message(&[(EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION)]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+    let dest_handshake = dest_handshake_from_server_hello_message_unvalidated(&message);
 
     let err = prepare_reality_tls13_state(dest_handshake, sample_accepted()).unwrap_err();
 
@@ -422,7 +453,7 @@ fn prepare_reality_tls13_state_rejects_unknown_cipher_suite() {
         ],
         0x1304,
     );
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
+    let dest_handshake = dest_handshake_from_server_hello_message_unvalidated(&message);
 
     let err = prepare_reality_tls13_state(dest_handshake, sample_accepted()).unwrap_err();
 

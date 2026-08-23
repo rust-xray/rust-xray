@@ -61,6 +61,16 @@ const CHACHA20_POLY1305_SHA256: Tls13CipherSuite = Tls13CipherSuite {
     iv_len: 12,
 };
 
+impl Tls13CipherSuite {
+    /// AEAD authentication tag length for TLS 1.3 record protection.
+    pub const fn aead_tag_len(self) -> usize {
+        match self.aead {
+            Tls13AeadAlgorithm::Aes128Gcm | Tls13AeadAlgorithm::Aes256Gcm => 16,
+            Tls13AeadAlgorithm::ChaCha20Poly1305 => 16,
+        }
+    }
+}
+
 pub fn is_tls13_ccm_cipher_suite(id: u16) -> bool {
     matches!(id, TLS_AES_128_CCM_SHA256 | TLS_AES_128_CCM_8_SHA256)
 }

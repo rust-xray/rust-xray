@@ -261,15 +261,16 @@ fn reality_target_server_hello_key_share_observation_vector() {
         raw.extend_from_slice(&[0x03, 0x03]);
         raw.extend_from_slice(&(message.len() as u16).to_be_bytes());
         raw.extend_from_slice(message);
-        RealityDestHandshake {
-            raw_server_bytes: raw.clone(),
-            records: vec![TlsRecord {
+        RealityDestHandshake::try_from_records(
+            raw.clone(),
+            vec![TlsRecord {
                 content_type: TlsRecordContentType::Handshake,
                 legacy_version: [0x03, 0x03],
                 payload: message.to_vec(),
                 raw,
             }],
-        }
+        )
+        .expect("valid single-record dest handshake")
     }
 
     let x25519_body = key_share_extension_body(NAMED_GROUP_X25519, &[0xB1; X25519_PUBLIC_KEY_LEN]);

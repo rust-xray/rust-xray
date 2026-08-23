@@ -121,7 +121,7 @@ fn encrypt_handshake_message_record_length_matches_ciphertext() {
     assert_eq!(payload_len, record.len() - 5);
     assert_eq!(
         payload_len,
-        sample_handshake_message().len() + 1 + GCM_TAG_LEN
+        sample_handshake_message().len() + 1 + suite.aead_tag_len()
     );
 }
 
@@ -139,7 +139,7 @@ fn encrypt_handshake_message_aes128_works() {
         records[0].content_type,
         TlsRecordContentType::ApplicationData
     );
-    assert!(records[0].payload.len() > GCM_TAG_LEN);
+    assert!(records[0].payload.len() > suite.aead_tag_len());
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn encrypt_handshake_message_aes256_works() {
         records[0].content_type,
         TlsRecordContentType::ApplicationData
     );
-    assert!(records[0].payload.len() > GCM_TAG_LEN);
+    assert!(records[0].payload.len() > suite.aead_tag_len());
 }
 
 fn chacha20_keys() -> Tls13TrafficKeys {
@@ -180,7 +180,7 @@ fn encrypt_handshake_message_chacha20_works() {
         records[0].content_type,
         TlsRecordContentType::ApplicationData
     );
-    assert!(records[0].payload.len() > GCM_TAG_LEN);
+    assert!(records[0].payload.len() > suite.aead_tag_len());
 }
 
 #[test]
@@ -412,8 +412,8 @@ fn decrypt_application_data_strips_zero_padding() {
     inner_plaintext.extend_from_slice(&[0, 0, 0, 0]);
 
     let nonce_bytes = tls13_record_nonce(&keys.iv, 0).expect("valid nonce");
-    let ciphertext_len =
-        u16::try_from(inner_plaintext.len() + GCM_TAG_LEN).expect("valid ciphertext length");
+    let ciphertext_len = u16::try_from(inner_plaintext.len() + suite.aead_tag_len())
+        .expect("valid ciphertext length");
     let aad = build_record_aad(TLS_LEGACY_VERSION_1_2, ciphertext_len);
     let ciphertext =
         encrypt_aes128_gcm(&keys.key, &nonce_bytes, &inner_plaintext, &aad).expect("encrypt");
@@ -443,8 +443,8 @@ fn decrypt_application_data_rejects_handshake_inner_content_type() {
     inner_plaintext.push(TLS_RECORD_HANDSHAKE);
 
     let nonce_bytes = tls13_record_nonce(&keys.iv, 0).expect("valid nonce");
-    let ciphertext_len =
-        u16::try_from(inner_plaintext.len() + GCM_TAG_LEN).expect("valid ciphertext length");
+    let ciphertext_len = u16::try_from(inner_plaintext.len() + suite.aead_tag_len())
+        .expect("valid ciphertext length");
     let aad = build_record_aad(TLS_LEGACY_VERSION_1_2, ciphertext_len);
     let ciphertext =
         encrypt_aes128_gcm(&keys.key, &nonce_bytes, &inner_plaintext, &aad).expect("encrypt");
@@ -503,8 +503,8 @@ fn decrypt_handshake_record_rejects_encrypted_alert_inner_content() {
     inner_plaintext.push(TLS_RECORD_ALERT);
 
     let nonce_bytes = tls13_record_nonce(&keys.iv, 0).expect("valid nonce");
-    let ciphertext_len =
-        u16::try_from(inner_plaintext.len() + GCM_TAG_LEN).expect("valid ciphertext length");
+    let ciphertext_len = u16::try_from(inner_plaintext.len() + suite.aead_tag_len())
+        .expect("valid ciphertext length");
     let aad = build_record_aad(TLS_LEGACY_VERSION_1_2, ciphertext_len);
     let ciphertext =
         encrypt_aes128_gcm(&keys.key, &nonce_bytes, &inner_plaintext, &aad).expect("encrypt");

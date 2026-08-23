@@ -48,7 +48,11 @@ pub use messages::{
     HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS, HANDSHAKE_TYPE_FINISHED, HANDSHAKE_TYPE_SERVER_HELLO,
     TLS_VERSION_1_2_LEGACY, TLS_VERSION_1_3,
 };
-pub use record_crypto::{tls13_record_nonce, Tls13RecordDecryptor, Tls13RecordEncryptor};
+pub use record_crypto::{
+    minimum_tls13_encrypted_application_record_wire_len,
+    minimum_tls13_encrypted_handshake_record_wire_len, tls13_record_nonce, Tls13RecordDecryptor,
+    Tls13RecordEncryptor,
+};
 pub use state::{complete_reality_tls13_handshake, RealityTls13ServerState};
 pub use stream::{
     ApplicationStreamDirectRelay, RealityTls13ApplicationStream, RealityTls13ClientReader,

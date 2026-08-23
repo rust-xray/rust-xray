@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tracing::debug;
 
 use crate::protocol::enums::NamedGroup;
@@ -14,18 +17,42 @@ use crate::tls::{
 
 use super::decision::RealityAccepted;
 use super::stages;
+use super::target_server_flight::{
+    build_observed_target_tls13_server_flight, target_server_flight_observation_satisfied,
+    DEST_SERVER_FLIGHT_READ_CAP,
+};
 use super::tls13::RealityTls13ServerState;
 
-const DEST_HANDSHAKE_READ_CAP: usize = 64 * 1024;
-const DEST_HANDSHAKE_READ_CHUNK: usize = 4 * 1024;
+pub use super::target_server_flight::{
+    ObservedChangeCipherSpec, ObservedEncryptedHandshakeSlot, ObservedTargetTls13ServerFlight,
+    TargetServerFlightFeedOutcome, TargetServerFlightFeedStatus, TargetServerFlightObserver,
+};
 
-const TLS_RECORD_LEGACY_VERSION: [u8; 2] = [0x03, 0x03];
-const TLS13_VERSION: [u8; 2] = [0x03, 0x04];
+const DEST_HANDSHAKE_READ_CHUNK: usize = 4 * 1024;
+const DEST_HANDSHAKE_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub(crate) const TLS_RECORD_LEGACY_VERSION: [u8; 2] = [0x03, 0x03];
+pub(crate) const TLS13_VERSION: [u8; 2] = [0x03, 0x04];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealityDestHandshake {
     pub raw_server_bytes: Vec<u8>,
     pub records: Vec<TlsRecord>,
+    pub server_flight: ObservedTargetTls13ServerFlight,
+}
+
+impl RealityDestHandshake {
+    pub fn try_from_records(
+        raw_server_bytes: Vec<u8>,
+        records: Vec<TlsRecord>,
+    ) -> std::io::Result<Self> {
+        let server_flight = build_observed_target_tls13_server_flight(&records)?;
+        Ok(Self {
+            raw_server_bytes,
+            records,
+            server_flight,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +95,9 @@ pub fn extract_observed_server_hello(
     })
 }
 
-fn validate_observed_server_hello(server_hello: &TlsServerHello) -> std::io::Result<NamedGroup> {
+pub(crate) fn validate_observed_server_hello(
+    server_hello: &TlsServerHello,
+) -> std::io::Result<NamedGroup> {
     if server_hello.legacy_version != TLS_RECORD_LEGACY_VERSION {
         return Err(invalid_data(format!(
             "destination ServerHello legacy_version must be 0x0303, got 0x{:02x}{:02x}",
@@ -141,42 +170,7 @@ fn validate_observed_key_share_group(
     }
 }
 
-fn contains_ccs_and_handshake(records: &[TlsRecord]) -> bool {
-    let has_ccs = records
-        .iter()
-        .any(|r| r.content_type == TlsRecordContentType::ChangeCipherSpec);
-    let has_handshake = records
-        .iter()
-        .any(|r| r.content_type == TlsRecordContentType::Handshake);
-    has_ccs && has_handshake
-}
-
-fn contains_application_data_after_server_hello(records: &[TlsRecord]) -> bool {
-    let mut seen_server_hello = false;
-    for record in records {
-        if contains_tls13_server_hello(std::slice::from_ref(record)) {
-            seen_server_hello = true;
-        }
-        if seen_server_hello && record.content_type == TlsRecordContentType::ApplicationData {
-            return true;
-        }
-    }
-    false
-}
-
-fn should_stop_fetching(records: &[TlsRecord]) -> bool {
-    if contains_application_data_after_server_hello(records) {
-        return true;
-    }
-    if contains_ccs_and_handshake(records) {
-        return true;
-    }
-    if contains_tls13_server_hello(records) {
-        return true;
-    }
-    false
-}
-
+#[cfg(test)]
 pub(crate) fn contains_tls13_server_hello(records: &[TlsRecord]) -> bool {
     records.iter().any(|record| {
         record.content_type == TlsRecordContentType::Handshake
@@ -184,65 +178,131 @@ pub(crate) fn contains_tls13_server_hello(records: &[TlsRecord]) -> bool {
     })
 }
 
-/// Forwards the client ClientHello record to `dest` and reads TLS records until a
-/// handshake observation stop condition is met.
+/// Forwards the client ClientHello record to `dest` and reads the target TLS 1.3
+/// server-flight record shape incrementally until observation is satisfied.
 pub async fn fetch_dest_handshake(
     dest: &mut TcpStream,
     client_hello_record: &[u8],
 ) -> std::io::Result<RealityDestHandshake> {
     dest.write_all(client_hello_record).await?;
 
-    let mut raw_server_bytes = Vec::new();
-    let mut hit_read_cap = false;
+    let mut observer = TargetServerFlightObserver::new();
 
     loop {
-        let (records, consumed) = parse_complete_tls_records_prefix(&raw_server_bytes)?;
+        let outcome = observer.evaluate_buffered()?;
 
-        if should_stop_fetching(&records) {
-            raw_server_bytes.truncate(consumed);
-            return Ok(RealityDestHandshake {
-                records,
-                raw_server_bytes,
-            });
+        if target_server_flight_observation_satisfied(&outcome) {
+            match outcome.status {
+                TargetServerFlightFeedStatus::Complete => break,
+                TargetServerFlightFeedStatus::Progress => {
+                    if try_idle_dest_read(dest, &mut observer).await? {
+                        continue;
+                    }
+                    break;
+                }
+                TargetServerFlightFeedStatus::NeedMoreData => {}
+            }
         }
 
-        if raw_server_bytes.len() >= DEST_HANDSHAKE_READ_CAP {
-            hit_read_cap = true;
-            raw_server_bytes.truncate(consumed);
-            break;
-        }
-
-        let remaining = DEST_HANDSHAKE_READ_CAP - raw_server_bytes.len();
-        let chunk_len = remaining.min(DEST_HANDSHAKE_READ_CHUNK);
-        let mut chunk = vec![0u8; chunk_len];
-        let read_len = dest.read(&mut chunk).await?;
-        if read_len == 0 {
-            if records.is_empty() {
+        if observer.buffered_len() >= DEST_SERVER_FLIGHT_READ_CAP {
+            if outcome.complete_record_count == 0 {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "destination closed connection before sending handshake response",
+                    std::io::ErrorKind::InvalidData,
+                    "destination server flight read cap reached without ServerHello",
                 ));
             }
-            raw_server_bytes.truncate(consumed);
             break;
         }
-        raw_server_bytes.extend_from_slice(&chunk[..read_len]);
+
+        let remaining = DEST_SERVER_FLIGHT_READ_CAP - observer.buffered_len();
+        let chunk_len = remaining.min(DEST_HANDSHAKE_READ_CHUNK);
+        let mut chunk = vec![0u8; chunk_len];
+
+        let read_result =
+            if outcome.complete_record_count > 0 && !outcome.has_incomplete_trailing_record {
+                timeout(DEST_HANDSHAKE_READ_IDLE_TIMEOUT, dest.read(&mut chunk)).await
+            } else {
+                Ok(dest.read(&mut chunk).await)
+            };
+
+        let read_len = match read_result {
+            Ok(Ok(0)) => {
+                if outcome.complete_record_count == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "destination closed connection before sending handshake response",
+                    ));
+                }
+                break;
+            }
+            Ok(Ok(n)) => n,
+            Ok(Err(err)) => return Err(err),
+            Err(_) => break,
+        };
+
+        observer.feed(&chunk[..read_len])?;
     }
 
-    let (records, consumed) = parse_complete_tls_records_prefix(&raw_server_bytes)?;
-    raw_server_bytes.truncate(consumed);
+    let outcome = observer.evaluate_buffered()?;
 
-    if hit_read_cap && !contains_tls13_server_hello(&records) {
+    if outcome.complete_record_count == 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "destination handshake read limit reached without ServerHello",
+            "destination server flight observation has no complete TLS records",
         ));
     }
+
+    let (records, consumed) = parse_complete_tls_records_prefix(observer.buffer_as_slice())?;
+    let raw_server_bytes = observer.buffer_as_slice()[..consumed].to_vec();
+
+    let server_flight = build_observed_target_tls13_server_flight(&records)?;
+
+    debug!(
+        stage = stages::DEST_SERVER_HELLO_OBSERVED,
+        dest_record_count = records.len(),
+        observed_server_bytes_len = raw_server_bytes.len(),
+        server_hello_wire_len = server_flight.server_hello_wire_len,
+        change_cipher_spec_wire_len = ?server_flight
+            .change_cipher_spec
+            .map(|ccs| ccs.wire_len),
+        encrypted_extensions_wire_len = ?server_flight.encrypted_extensions_wire_len,
+        certificate_wire_len = ?server_flight.certificate_wire_len,
+        certificate_verify_wire_len = ?server_flight.certificate_verify_wire_len,
+        finished_wire_len = ?server_flight.finished_wire_len,
+        next_encrypted_record_wire_len = ?server_flight.next_encrypted_record_wire_len,
+        observation_status = ?outcome.status,
+        "destination TLS 1.3 server flight observed"
+    );
 
     Ok(RealityDestHandshake {
         raw_server_bytes,
         records,
+        server_flight,
     })
+}
+
+async fn try_idle_dest_read(
+    dest: &mut TcpStream,
+    observer: &mut TargetServerFlightObserver,
+) -> std::io::Result<bool> {
+    if observer.buffered_len() >= DEST_SERVER_FLIGHT_READ_CAP {
+        return Ok(false);
+    }
+
+    let remaining = DEST_SERVER_FLIGHT_READ_CAP - observer.buffered_len();
+    let chunk_len = remaining.min(DEST_HANDSHAKE_READ_CHUNK);
+    let mut chunk = vec![0u8; chunk_len];
+
+    match timeout(DEST_HANDSHAKE_READ_IDLE_TIMEOUT, dest.read(&mut chunk)).await {
+        Ok(Ok(0)) => Ok(false),
+        Ok(Ok(n)) if n > 0 => {
+            observer.feed(&chunk[..n])?;
+            Ok(true)
+        }
+        Ok(Ok(_)) => Ok(false),
+        Ok(Err(err)) => Err(err),
+        Err(_) => Ok(false),
+    }
 }
 
 /// Creates TLS 1.3 server handshake state from observed destination ServerHello.
@@ -254,7 +314,7 @@ pub fn prepare_reality_tls13_state(
     accepted: RealityAccepted,
 ) -> std::io::Result<RealityTls13ServerState> {
     let observed = extract_observed_server_hello(&dest_handshake)?;
-    let state = RealityTls13ServerState::new(accepted, observed)?;
+    let state = RealityTls13ServerState::new(accepted, observed, dest_handshake.server_flight)?;
 
     debug!(
         stage = stages::TLS13_STATE_CREATED,

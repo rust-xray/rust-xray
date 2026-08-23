@@ -12,6 +12,7 @@ mod session;
 mod short_id;
 mod sni;
 pub(crate) mod stages;
+mod target_server_flight;
 pub mod tls13;
 mod version;
 
@@ -33,7 +34,9 @@ pub use fixture::{
 };
 pub use handshake::{
     extract_observed_server_hello, fetch_dest_handshake, prepare_reality_tls13_state,
-    RealityDestHandshake, RealityObservedServerHello,
+    ObservedChangeCipherSpec, ObservedEncryptedHandshakeSlot, ObservedTargetTls13ServerFlight,
+    RealityDestHandshake, RealityObservedServerHello, TargetServerFlightFeedOutcome,
+    TargetServerFlightFeedStatus, TargetServerFlightObserver,
 };
 pub use key_share::{
     build_x25519mlkem768_client_key_share, find_reality_auth_x25519_public_key,
