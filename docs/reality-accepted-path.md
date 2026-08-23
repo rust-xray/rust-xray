@@ -13,7 +13,7 @@ It is **not** an implementation spec. It is a guardrail for future work so we do
 not ship a broken camouflage handshake.
 
 **This project is not a drop-in Xray-core replacement and is not production-ready.**
-Some sections below describe historical scaffolding states; trust
+Some sections below describe historical design constraints; trust
 [compatibility-status.md](./compatibility-status.md) for current end-to-end behavior.
 
 ## Upstream REALITY accepted path (Xray / XTLS)
@@ -29,7 +29,10 @@ Rough sequence:
    to the target (transparent relay phase for unauthenticated traffic).
 3. **Read ClientHello** from the client connection.
 4. **REALITY AEAD / session validation** — decrypt and validate `session_id`,
-   policy fields (`shortId`, client version, time window, etc.).
+   policy fields (`shortId`, client version, time window, etc.). Server-side
+   `minClientVer` follows Xray-core af7eb68: omitted or `""` → effective
+   `26.3.27`; explicit values (including `"0.0.0"`) override. See
+   [README](../README.md#reality-server-minclientver-xray-core-compatibility).
 5. **If validation failed** → continue **transparent fallback relay** to `dest`
    (client sees the real site; no REALITY server semantics).
 6. **If validation ok** → connection **switches** to the accepted REALITY server
@@ -50,19 +53,19 @@ REALITY camouflage influences *what* is sent and *when*, but the bytes still mus
 
 ## Upstream ↔ Rust mapping (TLS 1.3 server core)
 
-When porting block A, use this correspondence as a guide (names from upstream
-Go/XTLS REALITY server handshake code):
+When comparing with upstream Go/XTLS REALITY server handshake code:
 
 | Upstream (Go / XTLS) | rust-xray | Status |
 |----------------------|-----------|--------|
-| `serverHandshakeStateTLS13` | `RealityTls13ServerState` (`src/reality/tls13/state.rs`) | **Container wired** — holds `RealityAccepted`, observed dest ServerHello, selected suite, `TranscriptHash` |
-| `hs.handshake()` | Future `RealityTls13ServerState` handshake driver | **Not implemented** |
-| Transcript hash updates | `TranscriptHash` (`src/reality/tls13/transcript.rs`) | **Scaffold** — buffer + on-demand SHA-256/384 digest |
-| Key schedule / traffic secret derivation | `key_schedule.rs` | **Primitives** — HKDF-Expand-Label, `derive_traffic_key`, `derive_finished_key`; no live schedule state |
-| Cipher suite selection | `cipher_suite.rs` | **Done** — lookup for AES-128-GCM-SHA256, AES-256-GCM-SHA384, ChaCha20-Poly1305-SHA256 |
-| ServerHello / EE / Certificate / Finished builders | `messages.rs` | **Partial** — handshake framing, empty EE, Finished body; Certificate/CertificateVerify placeholders |
-| TLS record framing | `src/tls/records.rs` | **Builders + parser** — no encryption layer yet |
-| Dest observation → state setup | `prepare_reality_tls13_state` (`handshake.rs`) | **Wired** — called from `handle_accepted_reality_client`; then `Unsupported` |
+| `serverHandshakeStateTLS13` | `RealityTls13ServerState` (`src/reality/tls13/state.rs`) | **Working** — holds accepted client, observed dest ServerHello, suite, transcript, secrets |
+| `hs.handshake()` | `complete_reality_tls13_handshake` (`state.rs`) | **Working** — production driver from `handle_accepted_reality_client` |
+| Transcript hash updates | `TranscriptHash` (`src/reality/tls13/transcript.rs`) | **Working** |
+| Key schedule / traffic secret derivation | `key_schedule.rs` free functions | **Working** — HKDF-Expand-Label, handshake/application secrets |
+| Cipher suite selection | `cipher_suite.rs` | **Working** — AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305 (CCM rejected) |
+| ServerHello / EE / Certificate / Finished builders | `messages.rs`, `certificate.rs` | **Working** on accepted path |
+| TLS record framing + encryption | `src/tls/records.rs`, `tls13/record_crypto.rs` | **Working** |
+| Dest observation → state setup | `fetch_dest_handshake`, `prepare_reality_tls13_state` (`handshake.rs`) | **Working** |
+| Application stream handoff | `RealityTls13ApplicationStream` → `run_inbound_transport` | **Working** |
 
 ## Deterministic Rust vectors (non-smoke)
 
@@ -82,7 +85,7 @@ Live matrix remains `scripts/live_reality_smoke/run-live-smoke.sh` unchanged.
 |------|----------|--------|
 | REALITY ClientHello auth | `src/reality/auth.rs` | Done |
 | AEAD `session_id` decrypt | `src/reality/session.rs` | Done |
-| Policy validation (SNI, shortId, time, version) | `session.rs`, `decision.rs`, `sni.rs`, `version.rs` | Done |
+| Policy validation (SNI, shortId, time, version) | `session.rs`, `decision.rs`, `sni.rs`, `version.rs` | Done (`minClientVer` default `26.3.27` at config parse) |
 | Fallback relay to `dest` | `src/proxy/fallback.rs` | Done |
 | Xray-compatible REALITY config | `src/config/xray.rs` | Done |
 | TLS ClientHello record read | `src/tls/record.rs` | First record only |
@@ -90,40 +93,23 @@ Live matrix remains `scripts/live_reality_smoke/run-live-smoke.sh` unchanged.
 | Dest ServerHello observation | `fetch_dest_handshake`, `extract_observed_server_hello` | Done |
 | Minimal TLS 1.3 ServerHello parser | `src/tls/server_hello.rs` | Done |
 | TLS record parser + builders | `src/tls/records.rs` | Done |
-| TLS 1.3 transcript hash scaffold | `src/reality/tls13/transcript.rs` | Done |
-| TLS 1.3 HKDF / key schedule primitives | `src/reality/tls13/key_schedule.rs` | Done |
+| TLS 1.3 transcript hash | `src/reality/tls13/transcript.rs` | Done |
+| TLS 1.3 HKDF / key schedule | `src/reality/tls13/key_schedule.rs` | Done |
 | TLS 1.3 cipher suite model | `src/reality/tls13/cipher_suite.rs` | Done |
-| Handshake message builders (skeleton) | `src/reality/tls13/messages.rs` | Partial |
-| TLS 1.3 state container | `RealityTls13ServerState` | Wired after observation |
-| Accepted entry + state setup | `handle_accepted_reality_client` in `server.rs` | Returns `Unsupported` after state build |
-| VLESS config users | `build_vless_clients`, `VlessClientObject` | Done, loaded at startup |
-| VLESS request parser / auth | `src/vless/protocol.rs`, `inbound.rs` | Unit-tested |
-| Freedom TCP outbound skeleton | `src/outbound/freedom.rs` | Not wired to REALITY |
+| Handshake message builders | `src/reality/tls13/messages.rs`, `certificate.rs` | Done on accepted path |
+| TLS 1.3 handshake driver | `complete_reality_tls13_handshake` | Done (live smoke) |
+| Accepted entry | `handle_accepted_reality_client` in `server.rs` | Done |
+| VLESS + transport handoff | `run_inbound_transport` after TLS app stream | Done |
+| VLESS config users | `build_vless_clients`, `VlessClientObject` | Done |
+| Freedom TCP outbound | `src/outbound/freedom.rs` | Wired from VLESS inbound |
 
-### Not implemented
+### Partial / not yet implemented
 
-- **Full REALITY TLS 1.3 server handshake** — no handshake driver runs.
-- **ServerHello generation** — no client-facing ServerHello.
-- **Handshake encryption** — no encrypted handshake records to the client.
-- **EncryptedExtensions encryption** — builder skeleton only.
-- **Certificate generation / signing** — placeholder.
-- **CertificateVerify** — placeholder.
-- **Finished generation** — verify_data builder exists; not wired to keys / transcript.
-- **Client Finished verification** — `readClientFinished` equivalent.
-- **Encrypted application-data stream** — post-handshake record wrapper.
-- **Real VLESS handoff after TLS handshake** — `handle_vless_tcp_inbound` unreachable.
-- **Vision** — DIRECT MVP implemented (live smoke); splice/zero-copy not implemented.
-- **`mldsa65Seed`** — experimental runtime baseline when configured ([baseline doc](./reality-mldsa65-runtime-baseline.md)); **ML-KEM not implemented**.
-- **Fallback limits** — `limitFallbackUpload` / `limitFallbackDownload`.
-
-### Explicitly not connected yet
-
-- **VLESS parser / freedom outbound** are **not** reachable from a real REALITY
-  accepted TCP stream. `handle_accepted_reality_client` does not call
-  `handle_vless_tcp_inbound`.
-- **`patch_reality_server_hello`** is a thin wrapper over
-  `prepare_reality_tls13_state` that still returns `Unsupported`; it must not be
-  treated as the handshake implementation.
+- **MirrorConn-style concurrent mirror** during pre-auth ClientHello phase (upstream timing/shape sampling beyond dest ServerHello observation)
+- **Vision splice / zero-copy** beyond DIRECT MVP
+- **`mldsa65Seed`** — experimental runtime baseline when configured ([baseline doc](./reality-mldsa65-runtime-baseline.md)); **ML-KEM not implemented**
+- **Fallback limits** — `limitFallbackUpload` / `limitFallbackDownload`
+- **TLS 1.3 CCM cipher suites** (0x1304, 0x1305) — rejected on accepted path
 
 ### Current decision flow (simplified)
 
@@ -135,13 +121,13 @@ TCP accept
        └─ Accepted → handle_accepted_reality_client
             → connect dest, forward ClientHello record
             → fetch_dest_handshake
-            → prepare_reality_tls13_state (RealityTls13ServerState)
-            → Unsupported (no bytes to client; no fallback)
+            → prepare_reality_tls13_state
+            → complete_reality_tls13_handshake
+            → run_inbound_transport (VLESS / XHTTP)
 ```
 
-Valid REALITY clients are **not** sent to fallback (intentional). They reach
-state setup, then the connection ends with `Unsupported` until the full server
-handshake exists.
+Valid REALITY clients **do not** fall back after accept. Handshake or VLESS errors
+close the connection.
 
 ## Why “simple ServerHello patch” is wrong
 
@@ -176,42 +162,25 @@ XTLS/REALITY behavior — not a one-record edit.
 
 ## Next implementation checklist
 
-Ordered roughly by dependency:
+Remaining work (roughly by dependency):
 
-1. **ServerHello generation** — client-facing ServerHello from REALITY state.
-2. **ECDH shared secret** — derive shared key for the accepted TLS session.
-3. **TLS 1.3 handshake traffic secrets** — early / handshake secret derivation.
-4. **Encrypted handshake records** — EncryptedExtensions, Certificate,
-   CertificateVerify, Finished under handshake keys.
-5. **Certificate + CertificateVerify** — ephemeral / camouflage certificate
-   chain and signature.
-6. **Finished** — server Finished from transcript + finished key.
-7. **Verify client Finished** — read and validate client handshake completion.
-8. **Application traffic secrets** — post-handshake key schedule.
-9. **Encrypted stream adapter** — decrypt/encrypt application TLS records.
-10. **VLESS handoff** — pass decrypted stream to `handle_vless_tcp_inbound`.
+1. **MirrorConn / camouflage timing** — upstream-style concurrent mirror during pre-auth.
+2. **Dest handshake shape sampling** — record timing/length behavior beyond ServerHello observation.
+3. **Vision splice / zero-copy** — beyond DIRECT MVP padding relay.
+4. **ML-KEM** — not started (separate from ML-DSA-65 baseline).
+5. **Fallback rate limits** — `limitFallbackUpload` / `limitFallbackDownload`.
 
 ## Required implementation blocks
 
-### A. TLS 1.3 server handshake core
+### A. TLS 1.3 server handshake core — **implemented**
 
-Minimum server-side responsibilities:
+Production path: `prepare_reality_tls13_state` → `complete_reality_tls13_handshake`.
 
-- ServerHello generation (version, random, session id, cipher suite, key share)
-- Key schedule (shared secret → handshake secrets → application secrets)
-- Transcript hash maintenance across all handshake messages
-- EncryptedExtensions
-- Certificate (often ephemeral / camouflage-oriented)
-- CertificateVerify
-- Finished (server)
-- Read and validate **client Finished**
+ServerHello generation, key schedule, transcript maintenance, encrypted EE/Cert/CertVerify/Finished, client Finished verification, application traffic secrets, and encrypted application stream are implemented and covered by live smoke.
 
-Without A, there is no decrypted application stream for VLESS.
+Remaining gaps inside block A are upstream parity refinements (for example exact random/camouflage behavior — see TODOs in `state.rs`), not absence of a handshake driver.
 
-**Today:** primitives and state container exist; block A handshake driver does
-not run.
-
-### B. REALITY camouflage timing / shape
+### B. REALITY camouflage timing / shape — **partial**
 
 REALITY tries to look like a handshake to the real `dest`:
 
@@ -227,18 +196,11 @@ but crypto still comes from the local TLS 1.3 state machine.
 **Today:** dest ServerHello observation and validation are implemented; timing /
 MirrorConn are not.
 
-### C. VLESS handoff
+### C. VLESS handoff — **implemented**
 
-After TLS handshake completes on the accepted path:
-
-- Application data read/write uses post-handshake keys
-- Pass the **decrypted stream** (or equivalent `AsyncRead`/`AsyncWrite` wrapper)
-  to `handle_vless_tcp_inbound` with configured `VlessClient` list
-- Preserve any bytes already read after the handshake boundary as
-  `initial_payload` if they belong to VLESS
-
-Today: VLESS pipeline exists in isolation; REALITY accepted path does not reach
-it.
+After TLS handshake completes, `RealityTls13ApplicationStream` is passed to
+`run_inbound_transport` (raw TCP or XHTTP). VLESS auth and freedom relay run on
+the decrypted application stream.
 
 ### D. Fallback (unchanged semantics)
 
@@ -256,17 +218,17 @@ Use this as a checklist. Items are ordered roughly by dependency.
 | T1 | B | Dial `dest` from accepted handler | **Done** | `handle_accepted_reality_client` |
 | T2 | B | MirrorConn-style concurrent client→dest write during ClientHello phase | Not implemented | Upstream mirror before accept decision |
 | T3 | B | Parse / store **dest ServerHello record shape** (lengths, timing samples) | **Partial** | Records + validation; timing not sampled |
-| T4 | A | TLS 1.3 **handshake state machine** (server role) | **Scaffold only** | State container + primitives; no driver |
-| T5 | A | ServerHello generation + key schedule | Not implemented | Checklist items 1–3 |
-| T6 | A | Encrypted handshake records (EE, Cert, CertVerify, Finished) | Not implemented | Checklist item 4 |
-| T7 | A | **Fake / ephemeral certificate** generation for camouflage | Placeholder | Checklist item 5 |
-| T8 | A | **Client Finished** read + validation | Not implemented | Checklist item 7 |
-| T9 | A | Application data **encrypt/decrypt** stream wrapper | Not implemented | Checklist items 8–9 |
-| T10 | C | Wire accepted `Conn` → `handle_vless_tcp_inbound` | Not connected | Checklist item 10 |
-| T11 | C | VLESS response header exact semantics | TODO in code | Before/along relay |
-| T12 | D | Ensure failed REALITY after mirror → transparent fallback | Partial | Policy fail before accept uses fallback; post-mirror fail TBD |
-| T13 | — | Vision (`xtls-rprx-vision`) behavior | Not implemented | After C stable |
-| T14 | — | Replace `patch_reality_server_hello` stub with real handshake driver | Stub wrapper | Do not extend into “fake” patch |
+| T4 | A | TLS 1.3 **handshake state machine** (server role) | **Done** | `complete_reality_tls13_handshake` |
+| T5 | A | ServerHello generation + key schedule | **Done** | Live smoke |
+| T6 | A | Encrypted handshake records (EE, Cert, CertVerify, Finished) | **Done** | Live smoke |
+| T7 | A | Ephemeral certificate + REALITY HMAC patch | **Done** | ML-DSA-65 baseline when configured |
+| T8 | A | **Client Finished** read + validation | **Done** | Live smoke |
+| T9 | A | Application data **encrypt/decrypt** stream wrapper | **Done** | `RealityTls13ApplicationStream` |
+| T10 | C | Wire accepted stream → VLESS / transport | **Done** | `run_inbound_transport` |
+| T11 | C | VLESS response header exact semantics | Mostly done | Vision DIRECT MVP |
+| T12 | D | Ensure failed REALITY after mirror → transparent fallback | Partial | Policy fail before accept uses fallback |
+| T13 | — | Vision splice / zero-copy | Not implemented | DIRECT MVP only |
+| T14 | — | ML-KEM hybrid KEM | Not implemented | Out of scope |
 
 ## Anti-patterns (do not implement)
 
@@ -276,25 +238,29 @@ Use this as a checklist. Items are ordered roughly by dependency.
 - **Calling VLESS on raw TCP** immediately after AEAD ClientHello validation —
   client has not completed TLS handshake; VLESS bytes are not yet application
   data.
-- **Treating `fetch_dest_handshake` + state setup** as a complete handshake —
-  they mark the seam before the TLS 1.3 server driver.
+- **Treating `fetch_dest_handshake` + state setup** as a complete handshake by
+  itself — they are prerequisites; `complete_reality_tls13_handshake` must run.
 
 ## Related code map
 
 ```
 src/reality/decision.rs   — inspect_reality_client_hello → Accepted | Fallback
-src/reality/server.rs     — handle_accepted_reality_client (observation + state → Unsupported)
+src/reality/server.rs     — handle_accepted_reality_client (observation + full handshake)
 src/reality/handshake.rs  — fetch_dest_handshake, extract_observed_server_hello, prepare_reality_tls13_state
 src/reality/tls13/
+  state.rs                — RealityTls13ServerState, complete_reality_tls13_handshake
+  stream.rs               — RealityTls13ApplicationStream
   transcript.rs           — TranscriptHash (SHA-256/384)
   key_schedule.rs         — HKDF primitives, derive_traffic_key, derive_finished_key
   cipher_suite.rs         — Tls13CipherSuite lookup
-  messages.rs             — handshake message builders (skeleton)
-  state.rs                — RealityTls13ServerState
+  messages.rs             — handshake message builders
+  certificate.rs          — ephemeral cert + CertificateVerify
+  record_crypto.rs        — TLS 1.3 record encrypt/decrypt
 src/tls/records.rs        — TLS record parse + build
 src/tls/server_hello.rs   — dest ServerHello parser
 src/proxy/fallback.rs     — transparent relay (fallback)
-src/vless/inbound.rs      — VLESS pipeline (not connected to accepted path)
+src/transport/            — run_inbound_transport (VLESS / XHTTP)
+src/vless/                — VLESS auth + relay
 src/outbound/freedom.rs   — TCP connect + relay (freedom outbound)
 ```
 
@@ -308,9 +274,8 @@ upstream code here; read upstream when starting block A/B.
 
 ---
 
-**Summary:** rust-xray can **detect** valid REALITY ClientHello clients, **observe**
-dest ServerHello shape, and **build** a TLS 1.3 state container with crypto
-primitives in place. Serving them still requires the **full TLS 1.3 server
-handshake + REALITY camouflage layer**, then VLESS on the decrypted stream.
-Valid clients stopping at `Unsupported` after state setup is **expected**. Anything
-less than a complete handshake is a protocol break.
+**Summary:** rust-xray **detects** valid REALITY ClientHello clients, **observes**
+dest ServerHello shape, runs the **full TLS 1.3 server handshake**, and hands
+the decrypted application stream to VLESS/transport. Remaining work is upstream
+camouflage parity (MirrorConn timing), Vision splice, ML-KEM, and fallback rate
+limits — not basic handshake completion.

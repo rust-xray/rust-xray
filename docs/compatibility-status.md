@@ -26,6 +26,7 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 |------|--------|-------|
 | REALITY TCP/raw inbound | Working | `streamSettings.network`: `raw` or legacy `tcp` |
 | REALITY pre-auth | Working | ClientHello parse, SNI allowlist, TLS 1.3 `supported_versions`, X25519 keyshare, `shortId` / `session_id` AEAD + policy |
+| REALITY `minClientVer` default | Working | Xray-core af7eb68 semantics: omitted or `""` → effective `26.3.27`; explicit value (including `"0.0.0"`) overrides. Does **not** imply every third-party REALITY client is accepted — see [README policy matrix](../README.md#reality-server-minclientver-xray-core-compatibility). Regression: `tests/upstream_compat_vectors.rs`. |
 | REALITY accepted path | Working | TLS 1.3 server handshake + application stream (live smoke) |
 | TLS 1.3 accepted path | Working | AES128-GCM, AES256-GCM, CHACHA20-Poly1305 (CCM suites rejected) |
 | VLESS TCP inbound | Working | UUID auth, `decryption: "none"` |

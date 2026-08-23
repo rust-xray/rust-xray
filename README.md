@@ -133,9 +133,26 @@ Live smoke forces each supported suite via local mock TLS 1.3 dest targets
 | `shortId` prefix match | After AEAD | Continue | `Fallback` |
 | `minClientVer` | After AEAD | Continue | `Fallback` |
 | `maxClientVer` | After AEAD | Continue | `Fallback` |
-| Invalid version string | After AEAD | — | `Err(InvalidInput)` |
+| Invalid version string (explicit config) | Config load | — | `Err(InvalidInput)` at startup |
+| Invalid version string (runtime inspect) | After AEAD | — | `Err(InvalidInput)` |
 | `maxTimeDiff` window | After AEAD | `Accepted` | `Fallback` |
 | All checks pass | After AEAD | `Accepted` | — |
+
+### REALITY server `minClientVer` (Xray-core compatibility)
+
+rust-xray follows [Xray-core af7eb68](https://github.com/XTLS/Xray-core/commit/af7eb68028732a8ee3c0e5d6ab2b8a657bb2e770) server-side default behavior:
+
+| Config value | Effective runtime `minClientVer` |
+|--------------|----------------------------------|
+| field omitted | `26.3.27` |
+| `"minClientVer": ""` | `26.3.27` |
+| explicit non-empty string (e.g. `"1.8.0"`, `"0.0.0"`) | used as-is |
+
+`maxClientVer` has **no** server default: omitted or `""` means no upper bound; explicit values are preserved. Explicit non-empty `minClientVer` / `maxClientVer` strings are validated at config startup via `parse_reality_client_version`.
+
+This matches Xray-core config normalization; it does **not** guarantee compatibility with every third-party REALITY client. Clients advertising a version below the effective minimum receive REALITY **fallback** (same as other pre-auth policy failures).
+
+Constants and normalization: `DEFAULT_REALITY_MIN_CLIENT_VER` and `effective_reality_min_client_ver()` in `src/config/xray/reality.rs`. Regression: `tests/upstream_compat_vectors.rs`.
 
 Secrets (`privateKey`, `auth_key`, ECDHE shared secrets, traffic secrets, plaintext
 `session_id`, private signing keys) are **not logged** in production paths. Debug
@@ -219,7 +236,6 @@ Minimal example:
           "privateKey": "REPLACE_WITH_BASE64URL_REALITY_PRIVATE_KEY",
           "shortIds": ["", "0123456789abcdef"],
           "maxTimeDiff": 60000,
-          "minClientVer": "1.8.0",
           "maxClientVer": "24.9.30"
         }
       }
@@ -232,6 +248,11 @@ Minimal example:
   ]
 }
 ```
+
+Omit `minClientVer` to use the Xray-core server default (`26.3.27`); an empty
+string (`""`) is treated the same way. Set an explicit value (including
+`"0.0.0"`) to override the default. This mirrors Xray-core config behavior and
+does not imply compatibility with every third-party REALITY client.
 
 ## Running
 

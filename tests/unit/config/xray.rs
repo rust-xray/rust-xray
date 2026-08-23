@@ -276,6 +276,147 @@ fn builds_first_reality_inbound_runtime_with_policy_fields() {
     assert!(runtime.show);
 }
 
+fn minimal_reality_runtime_json(
+    min_client_ver_field: Option<&str>,
+    max_client_ver_field: Option<&str>,
+) -> String {
+    let min_client_ver = match min_client_ver_field {
+        Some(value) => format!(r#""minClientVer": "{value}","#),
+        None => String::new(),
+    };
+    let max_client_ver = match max_client_ver_field {
+        Some(value) => format!(r#""maxClientVer": "{value}","#),
+        None => String::new(),
+    };
+    format!(
+        r#"{{
+            "inbounds": [{{
+                "tag": "reality-in",
+                "listen": "127.0.0.1",
+                "port": 443,
+                "protocol": "vless",
+                "settings": {{
+                    "clients": [{{"id": "00000000-0000-0000-0000-000000000001"}}],
+                    "decryption": "none"
+                }},
+                "streamSettings": {{
+                    "security": "reality",
+                    "realitySettings": {{
+                        "dest": "www.example.com:443",
+                        "serverNames": ["www.example.com"],
+                        "privateKey": "{TEST_REALITY_PRIVATE_KEY}",
+                        {min_client_ver}
+                        {max_client_ver}
+                        "shortIds": [""]
+                    }}
+                }}
+            }}]
+        }}"#
+    )
+}
+
+#[test]
+fn effective_reality_min_client_ver_applies_xray_default() {
+    assert_eq!(
+        effective_reality_min_client_ver(None),
+        DEFAULT_REALITY_MIN_CLIENT_VER
+    );
+    assert_eq!(
+        effective_reality_min_client_ver(Some(String::new())),
+        DEFAULT_REALITY_MIN_CLIENT_VER
+    );
+    assert_eq!(
+        effective_reality_min_client_ver(Some("1.8.0".to_string())),
+        "1.8.0"
+    );
+    assert_eq!(
+        effective_reality_min_client_ver(Some("0.0.0".to_string())),
+        "0.0.0"
+    );
+}
+
+#[test]
+fn effective_reality_max_client_ver_empty_means_unbounded() {
+    assert_eq!(effective_reality_max_client_ver(None), None);
+    assert_eq!(effective_reality_max_client_ver(Some(String::new())), None);
+    assert_eq!(
+        effective_reality_max_client_ver(Some("24.9.30".to_string())),
+        Some("24.9.30".to_string())
+    );
+}
+
+#[test]
+fn reality_runtime_applies_default_min_client_ver_when_field_missing() {
+    let config: XrayConfig =
+        serde_json::from_str(&minimal_reality_runtime_json(None, None)).unwrap();
+    let runtime = first_reality_inbound_runtime(&config).unwrap();
+    assert_eq!(
+        runtime.min_client_ver.as_deref(),
+        Some(DEFAULT_REALITY_MIN_CLIENT_VER)
+    );
+}
+
+#[test]
+fn reality_runtime_applies_default_min_client_ver_when_field_empty() {
+    let config: XrayConfig =
+        serde_json::from_str(&minimal_reality_runtime_json(Some(""), None)).unwrap();
+    let runtime = first_reality_inbound_runtime(&config).unwrap();
+    assert_eq!(
+        runtime.min_client_ver.as_deref(),
+        Some(DEFAULT_REALITY_MIN_CLIENT_VER)
+    );
+}
+
+#[test]
+fn reality_runtime_preserves_explicit_min_client_ver() {
+    let config: XrayConfig =
+        serde_json::from_str(&minimal_reality_runtime_json(Some("1.8.0"), None)).unwrap();
+    let runtime = first_reality_inbound_runtime(&config).unwrap();
+    assert_eq!(runtime.min_client_ver.as_deref(), Some("1.8.0"));
+}
+
+#[test]
+fn reality_runtime_preserves_explicit_zero_min_client_ver() {
+    let config: XrayConfig =
+        serde_json::from_str(&minimal_reality_runtime_json(Some("0.0.0"), None)).unwrap();
+    let runtime = first_reality_inbound_runtime(&config).unwrap();
+    assert_eq!(runtime.min_client_ver.as_deref(), Some("0.0.0"));
+}
+
+#[test]
+fn reality_runtime_rejects_malformed_min_client_ver_at_startup() {
+    let config: XrayConfig =
+        serde_json::from_str(&minimal_reality_runtime_json(Some("26.bad.27"), None)).unwrap();
+    let err = first_reality_inbound_runtime(&config).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("minClientVer"));
+}
+
+#[test]
+fn reality_runtime_rejects_malformed_max_client_ver_at_startup() {
+    let config: XrayConfig =
+        serde_json::from_str(&minimal_reality_runtime_json(None, Some("26.bad.27"))).unwrap();
+    let err = first_reality_inbound_runtime(&config).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("maxClientVer"));
+}
+
+#[test]
+fn reality_runtime_empty_max_client_ver_is_unbounded() {
+    let config: XrayConfig =
+        serde_json::from_str(&minimal_reality_runtime_json(None, Some(""))).unwrap();
+    let runtime = first_reality_inbound_runtime(&config).unwrap();
+    assert_eq!(runtime.max_client_ver, None);
+}
+
+#[test]
+fn reality_runtime_preserves_explicit_max_client_ver() {
+    let config: XrayConfig =
+        serde_json::from_str(&minimal_reality_runtime_json(None, Some("24.9.30"))).unwrap();
+    let runtime = first_reality_inbound_runtime(&config).unwrap();
+    assert_eq!(runtime.max_client_ver.as_deref(), Some("24.9.30"));
+}
+
 #[test]
 fn parse_reality_settings_supports_target_alias() {
     let json = r#"{

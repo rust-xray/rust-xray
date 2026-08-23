@@ -131,7 +131,9 @@ Raw/TCP network aliases, VLESS `flow=""` / `xtls-rprx-vision`, fallback matrix, 
 | `serverNames` | Allowed SNI list | `Vec<String>` | REALITY policy + cert generation | **supported** (no `*`) | `rejects_wildcard_server_names`, `rejects_empty_server_names_with_clear_error` |
 | `privateKey` | Server X25519 private (base64url) | `Option<String>` | Required; validated; redacted in Debug | **supported** | `reality_private_key`, `reality_inbound_runtime_debug_does_not_expose_secrets` |
 | `shortIds` | Client shortId prefixes (hex) | `Vec<String>` | `reality_short_ids` → policy | **supported** | `parse_short_ids_empty_and_hex`, shortId error tests |
-| `minClientVer` / `maxClientVer` | Client version window | `Option<String>` | `validate_reality_client_auth` | **supported** | `builds_first_reality_inbound_runtime_with_policy_fields`, `src/reality/session.rs` policy tests |
+| `minClientVer` / `maxClientVer` | Client version window | `Option<String>` | `validate_reality_client_auth`; `minClientVer` normalized at parse; explicit strings validated at startup | **supported** | `effective_reality_min_client_ver_applies_xray_default`, `reality_runtime_applies_default_min_client_ver_*`, `reality_runtime_rejects_malformed_*_at_startup`, `validate_default_min_client_ver_*`, `tests/upstream_compat_vectors.rs` |
+
+**`minClientVer` server default (Xray-core af7eb68):** field omitted or `""` → effective `26.3.27`; explicit non-empty string (e.g. `"1.8.0"`, `"0.0.0"`) is preserved. **`maxClientVer`:** omitted or `""` → no upper bound (`None`); no new default introduced. Explicit non-empty version strings are validated at startup via `parse_reality_client_version`. This mirrors Xray-core config normalization, not universal third-party client compatibility.
 | `maxTimeDiff` | Max \|now − auth time\| (ms); `0` disables | `u64` | Policy validation (`0` = off) | **supported** | session tests, runtime policy test |
 | `mldsa65Seed` | ML-DSA-65 seed (32 bytes b64url) | `Option<String>` | `Mldsa65Seed` on runtime; cert patch mode | **supported** | `accepts_valid_mldsa65_seed_*`, `tests/reality_mldsa65_baseline_regression.rs` |
 

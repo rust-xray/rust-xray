@@ -1,4 +1,8 @@
 use super::*;
+use crate::protocol::enums::{NamedGroup, ProtocolVersion};
+use crate::protocol::structs::{
+    ClientExtension, ClientHelloPayload, KeyShareEntry, Random, SessionId,
+};
 use crate::reality::auth::RealityAuthResult;
 use crate::reality::decision::RealityAccepted;
 use crate::reality::session::RealityClientAuth;
@@ -291,54 +295,7 @@ fn prepare_reality_tls13_state_rejects_unknown_cipher_suite() {
     assert!(err.to_string().contains("0x1304"));
 }
 
-#[test]
-fn patch_reality_server_hello_returns_unsupported_for_valid_observed_server_hello() {
-    let dest_handshake =
-        dest_handshake_from_server_hello_message(&valid_tls13_x25519_server_hello_message());
-
-    let err = patch_reality_server_hello(dest_handshake, sample_accepted()).unwrap_err();
-
-    assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert!(err.to_string().contains("TLS 1.3 server handshake"));
-    assert_eq!(err.to_string(), TLS13_SERVER_HANDSHAKE_NOT_IMPLEMENTED_MSG);
-}
-
-#[test]
-fn patch_reality_server_hello_returns_validation_error_before_unsupported() {
-    let message =
-        build_server_hello_handshake_message(&[(EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION)]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
-
-    let err = patch_reality_server_hello(dest_handshake, sample_accepted()).unwrap_err();
-
-    assert_eq!(err.kind(), ErrorKind::InvalidData);
-    assert!(err.to_string().contains("key_share"));
-}
-
-#[test]
-fn patch_reality_server_hello_returns_unsupported_for_non_x25519_before_final_message() {
-    let mut key_share = Vec::new();
-    key_share.extend_from_slice(&0x0017u16.to_be_bytes());
-    key_share.extend_from_slice(&65u16.to_be_bytes());
-    key_share.extend_from_slice(&[0x33; 65]);
-
-    let message = build_server_hello_handshake_message(&[
-        (EXTENSION_SUPPORTED_VERSIONS, &TLS13_VERSION),
-        (EXTENSION_KEY_SHARE, &key_share),
-    ]);
-    let dest_handshake = dest_handshake_from_server_hello_message(&message);
-
-    let err = patch_reality_server_hello(dest_handshake, sample_accepted()).unwrap_err();
-
-    assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert!(err.to_string().contains("X25519"));
-    assert_ne!(err.to_string(), TLS13_SERVER_HANDSHAKE_NOT_IMPLEMENTED_MSG);
-}
-
 fn client_hello_with_x25519_keyshare() -> ClientHelloPayload {
-    use crate::protocol::enums::{NamedGroup, ProtocolVersion};
-    use crate::protocol::structs::{ClientExtension, KeyShareEntry, Random, SessionId};
-
     ClientHelloPayload {
         client_version: ProtocolVersion::TLSv1_2,
         random: Random([0x33; 32]),
@@ -357,23 +314,42 @@ fn sample_client_handshake_message() -> Vec<u8> {
 }
 
 #[test]
-fn generate_partial_tls13_handshake_returns_non_empty_records() {
+fn prepare_reality_tls13_state_produces_server_handshake_records() {
+    use crate::reality::RealityCertificatePatchMode;
+    use crate::tls::records::build_handshake_record;
+
     let dest_handshake =
         dest_handshake_from_server_hello_message(&valid_tls13_x25519_server_hello_message());
     let mut state = prepare_reality_tls13_state(dest_handshake, sample_accepted())
         .expect("valid TLS 1.3 state");
+    let client_hello = client_hello_with_x25519_keyshare();
+    let client_handshake_message = sample_client_handshake_message();
 
-    let partial = generate_partial_tls13_handshake(
-        &mut state,
-        &client_hello_with_x25519_keyshare(),
-        &sample_client_handshake_message(),
+    state
+        .prepare_server_hello(&client_hello)
+        .expect("ServerHello message");
+    let server_hello_record = build_handshake_record(
+        state
+            .server_hello_message
+            .as_ref()
+            .expect("ServerHello message"),
     )
-    .expect("valid partial TLS 1.3 handshake");
+    .expect("ServerHello record");
+    let transcript_hash = state
+        .update_transcript_client_server_hello(&client_handshake_message)
+        .expect("transcript hash");
+    state
+        .derive_handshake_secrets(&transcript_hash)
+        .expect("handshake secrets");
+    let encrypted_handshake_records = state
+        .build_encrypted_server_handshake_records(RealityCertificatePatchMode::HmacOnly)
+        .expect("encrypted server handshake records");
 
-    assert!(!partial.server_hello_record.is_empty());
-    assert!(!partial.encrypted_handshake_records.is_empty());
-    assert_eq!(partial.server_hello_record[0], 0x16);
-    assert_eq!(partial.encrypted_handshake_records[0], 0x17);
-    assert!(partial.total_len() > partial.server_hello_record.len());
-    assert_eq!(partial.concat().len(), partial.total_len());
+    assert!(!server_hello_record.is_empty());
+    assert_eq!(server_hello_record[0], 0x16);
+    assert!(!encrypted_handshake_records.is_empty());
+    assert_eq!(encrypted_handshake_records[0], 0x17);
+    assert!(
+        server_hello_record.len() + encrypted_handshake_records.len() > server_hello_record.len()
+    );
 }

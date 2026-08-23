@@ -45,9 +45,6 @@ use super::transcript::TranscriptHash;
 
 const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 0x01;
 
-const HANDSHAKE_NOT_IMPLEMENTED_MSG: &str =
-    "REALITY TLS 1.3 server state machine is not implemented yet";
-
 /// REALITY accepted-path TLS 1.3 server handshake state container.
 ///
 /// Upstream equivalent: Go `serverHandshakeStateTLS13` in XTLS/REALITY.
@@ -414,10 +411,6 @@ impl RealityTls13ServerState {
             derive_application_traffic_secrets(self.suite, &handshake_secret, transcript_hash)?;
         self.application_secrets = Some(secrets);
         Ok(())
-    }
-
-    pub fn handshake_not_implemented(&self) -> Error {
-        Error::new(ErrorKind::Unsupported, HANDSHAKE_NOT_IMPLEMENTED_MSG)
     }
 }
 

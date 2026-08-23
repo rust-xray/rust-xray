@@ -58,6 +58,48 @@ fn raw_tcp_reality_normalizes() {
 }
 
 #[test]
+fn normalized_reality_applies_default_min_client_ver() {
+    let config: XrayConfig = serde_json::from_str(&vless_reality_json("raw", false)).unwrap();
+    let normalized = normalize_config(&config).unwrap();
+    let NormalizedInbound::VlessReality(inbound) = &normalized.inbounds[0] else {
+        panic!("expected VlessReality inbound");
+    };
+    assert_eq!(
+        inbound.reality.min_client_ver.as_deref(),
+        Some(crate::config::xray::DEFAULT_REALITY_MIN_CLIENT_VER)
+    );
+    assert_eq!(inbound.reality.max_client_ver, None);
+
+    let runtime = first_reality_inbound_runtime(&config).unwrap();
+    assert!(vless_reality_matches_runtime(inbound, &runtime));
+    assert_eq!(
+        runtime.min_client_ver.as_deref(),
+        Some(crate::config::xray::DEFAULT_REALITY_MIN_CLIENT_VER)
+    );
+    assert_eq!(runtime.max_client_ver, None);
+}
+
+#[test]
+fn normalized_reality_empty_max_client_ver_is_unbounded() {
+    let mut json = vless_reality_json("raw", false);
+    json = json.replace(
+        r#""shortIds": [""]"#,
+        r#""maxClientVer": "", "shortIds": [""]"#,
+    );
+    let config: XrayConfig = serde_json::from_str(&json).unwrap();
+    validate_xray_panel_config(&config).unwrap();
+    let normalized = normalize_config(&config).unwrap();
+    let NormalizedInbound::VlessReality(inbound) = &normalized.inbounds[0] else {
+        panic!("expected VlessReality inbound");
+    };
+    assert_eq!(inbound.reality.max_client_ver, None);
+
+    let runtime = first_reality_inbound_runtime(&config).unwrap();
+    assert_eq!(runtime.max_client_ver, None);
+    assert!(vless_reality_matches_runtime(inbound, &runtime));
+}
+
+#[test]
 fn xhttp_reality_normalizes() {
     let config: XrayConfig = serde_json::from_str(&vless_reality_json("xhttp", true)).unwrap();
     validate_xray_panel_config(&config).unwrap();

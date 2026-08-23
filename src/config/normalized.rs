@@ -2,12 +2,13 @@
 
 use crate::config::xray::validate::{eq_ignore_ascii_case, validate_vless_reality_inbound_stream};
 use crate::config::xray::{
-    api_dokodemo_inbound_tag, extract_api_inbound_tls_material, get_inbound_reality_settings,
-    inbound_listen_addr, inbound_vless_settings, is_vless_reality_inbound, reality_dest_addr,
-    reality_mldsa65_seed, reality_private_key, reality_server_names, reality_short_ids,
-    resolve_api_listen, validate_reality_inbound_config_policy, ApiListenSource, ApiTlsMaterial,
-    InboundObject, OutboundObject, RealityInboundRuntime, RoutingRuleObject, TransportNetwork,
-    XHttpSettings, XrayConfig,
+    api_dokodemo_inbound_tag, effective_reality_max_client_ver, effective_reality_min_client_ver,
+    extract_api_inbound_tls_material, get_inbound_reality_settings, inbound_listen_addr,
+    inbound_vless_settings, is_vless_reality_inbound, reality_dest_addr, reality_mldsa65_seed,
+    reality_private_key, reality_server_names, reality_short_ids, resolve_api_listen,
+    validate_reality_inbound_config_policy, ApiListenSource, ApiTlsMaterial, InboundObject,
+    OutboundObject, RealityInboundRuntime, RoutingRuleObject, TransportNetwork, XHttpSettings,
+    XrayConfig,
 };
 use crate::dns::{DnsConfig, DnsServerConfig, QueryStrategy};
 use crate::reality::MLDSA65_SEED_LEN;
@@ -325,8 +326,10 @@ pub fn normalize_vless_reality_inbound(
             server_names: reality_server_names(settings)?,
             short_ids: reality_short_ids(settings)?,
             max_time_diff: settings.max_time_diff,
-            min_client_ver: settings.min_client_ver.clone(),
-            max_client_ver: settings.max_client_ver.clone(),
+            min_client_ver: Some(effective_reality_min_client_ver(
+                settings.min_client_ver.clone(),
+            )),
+            max_client_ver: effective_reality_max_client_ver(settings.max_client_ver.clone()),
             show: settings.show,
             mldsa65_seed: mldsa65_seed.map(|seed| *seed.as_bytes()),
             decryption,

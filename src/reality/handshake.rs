@@ -2,8 +2,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::debug;
 
-use crate::protocol::structs::ClientHelloPayload;
-use crate::tls::records::build_handshake_record;
 use crate::tls::{
     parse_complete_tls_records_prefix, parse_server_hello_key_share,
     parse_tls_server_hello_handshake, TlsRecord, TlsRecordContentType, TlsServerHello,
@@ -21,9 +19,6 @@ const TLS_RECORD_LEGACY_VERSION: [u8; 2] = [0x03, 0x03];
 const TLS13_VERSION: [u8; 2] = [0x03, 0x04];
 const X25519_KEY_EXCHANGE_LEN: usize = 32;
 
-const TLS13_SERVER_HANDSHAKE_NOT_IMPLEMENTED_MSG: &str =
-    "REALITY TLS 1.3 server handshake is not implemented yet; observed dest ServerHello is valid";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealityDestHandshake {
     pub raw_server_bytes: Vec<u8>,
@@ -34,35 +29,6 @@ pub struct RealityDestHandshake {
 pub struct RealityObservedServerHello {
     pub server_hello: TlsServerHello,
     pub raw_handshake_message: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PatchedRealityHandshake {
-    pub raw_client_bytes: Vec<u8>,
-}
-
-/// Generated partial TLS 1.3 server handshake bytes (ServerHello + encrypted EE/Finished).
-///
-/// This is **not** a complete or interoperable REALITY/TLS handshake: Certificate,
-/// CertificateVerify, client Finished verification, and application-data keys are
-/// missing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PartialTls13Handshake {
-    pub server_hello_record: Vec<u8>,
-    pub encrypted_handshake_records: Vec<u8>,
-}
-
-impl PartialTls13Handshake {
-    pub fn total_len(&self) -> usize {
-        self.server_hello_record.len() + self.encrypted_handshake_records.len()
-    }
-
-    pub fn concat(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.total_len());
-        bytes.extend_from_slice(&self.server_hello_record);
-        bytes.extend_from_slice(&self.encrypted_handshake_records);
-        bytes
-    }
 }
 
 fn invalid_data(message: impl Into<String>) -> std::io::Error {
@@ -251,8 +217,10 @@ pub async fn fetch_dest_handshake(
     })
 }
 
-/// - Read client Finished
-/// - Hand off decrypted stream to VLESS
+/// Creates TLS 1.3 server handshake state from observed destination ServerHello.
+///
+/// Called from the accepted path after [`fetch_dest_handshake`]. The returned state
+/// is consumed by [`super::tls13::complete_reality_tls13_handshake`].
 pub fn prepare_reality_tls13_state(
     dest_handshake: RealityDestHandshake,
     accepted: RealityAccepted,
@@ -272,60 +240,6 @@ pub fn prepare_reality_tls13_state(
     );
 
     Ok(state)
-}
-
-/// Builds partial TLS 1.3 server handshake records after dest ServerHello observation.
-///
-/// Updates transcript with plaintext handshake messages. Does not send bytes to the
-/// client and does not complete the REALITY/TLS protocol.
-pub fn generate_partial_tls13_handshake(
-    state: &mut RealityTls13ServerState,
-    client_hello_payload: &ClientHelloPayload,
-    client_handshake_message: &[u8],
-) -> std::io::Result<PartialTls13Handshake> {
-    state.prepare_server_hello(client_hello_payload)?;
-    let server_hello_message = state
-        .server_hello_message
-        .as_ref()
-        .ok_or_else(|| invalid_data("TLS 1.3 ServerHello message missing after prepare"))?
-        .clone();
-    let server_hello_record = build_handshake_record(&server_hello_message)?;
-
-    let transcript_hash = state.update_transcript_client_server_hello(client_handshake_message)?;
-    state.derive_handshake_secrets(&transcript_hash)?;
-    let encrypted_handshake_records = state.build_encrypted_server_handshake_records(
-        crate::reality::RealityCertificatePatchMode::HmacOnly,
-    )?;
-
-    Ok(PartialTls13Handshake {
-        server_hello_record,
-        encrypted_handshake_records,
-    })
-}
-
-/// Validates the observed destination ServerHello for REALITY camouflage input.
-///
-/// This does **not** patch or relay destination bytes to the client. A full REALITY
-/// accepted path requires a TLS 1.3 server handshake state machine, not a single-buffer
-/// ServerHello patch.
-///
-/// # TODO: REALITY accepted path — TLS 1.3 server handshake
-///
-/// - Port or implement TLS 1.3 server handshake state machine
-/// - Generate ServerHello
-/// - Derive handshake secrets
-/// - Send EncryptedExtensions
-/// - Send ephemeral certificate
-/// - CertificateVerify
-/// - Finished
-/// - Read client Finished
-/// - Hand off decrypted stream to VLESS
-pub fn patch_reality_server_hello(
-    dest_handshake: RealityDestHandshake,
-    accepted: RealityAccepted,
-) -> std::io::Result<PatchedRealityHandshake> {
-    let _state = prepare_reality_tls13_state(dest_handshake, accepted)?;
-    Err(unsupported(TLS13_SERVER_HANDSHAKE_NOT_IMPLEMENTED_MSG))
 }
 
 #[cfg(test)]

@@ -3,7 +3,10 @@
 //! Live matrix coverage remains in `scripts/live_reality_smoke/run-live-smoke.sh`.
 //! These tests lock parser/selection/policy contracts in Rust only.
 
-use rust_xray::config::{first_reality_inbound_runtime, validate_reality_transport_network};
+use rust_xray::config::{
+    effective_reality_min_client_ver, first_reality_inbound_runtime,
+    validate_reality_transport_network, XrayConfig, DEFAULT_REALITY_MIN_CLIENT_VER,
+};
 use rust_xray::reality::{select_reality_certificate_patch_mode, RealityCertificatePatchMode};
 
 const TEST_REALITY_PRIVATE_KEY: &str = "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4";
@@ -37,6 +40,35 @@ fn vless_reality_config_json(network: &str, mldsa65_seed: Option<&str>) -> Strin
             }}]
         }}"#
     )
+}
+
+#[test]
+fn reality_min_client_ver_default_matches_xray_core_af7eb68() {
+    assert_eq!(DEFAULT_REALITY_MIN_CLIENT_VER, "26.3.27");
+    assert_eq!(effective_reality_min_client_ver(None), "26.3.27");
+    assert_eq!(
+        effective_reality_min_client_ver(Some(String::new())),
+        "26.3.27"
+    );
+    assert_eq!(
+        effective_reality_min_client_ver(Some("1.8.0".to_string())),
+        "1.8.0"
+    );
+    assert_eq!(
+        effective_reality_min_client_ver(Some("0.0.0".to_string())),
+        "0.0.0"
+    );
+}
+
+#[test]
+fn reality_runtime_without_min_client_ver_applies_xray_default() {
+    let config: XrayConfig =
+        serde_json::from_str(&vless_reality_config_json("tcp", None)).expect("parse");
+    let runtime = first_reality_inbound_runtime(&config).expect("runtime");
+    assert_eq!(
+        runtime.min_client_ver.as_deref(),
+        Some(DEFAULT_REALITY_MIN_CLIENT_VER)
+    );
 }
 
 #[test]

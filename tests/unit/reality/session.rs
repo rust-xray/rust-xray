@@ -373,3 +373,82 @@ fn validate_client_version_invalid_max_returns_invalid_input() {
     let err = validate_reality_client_auth(&auth, cfg, 0).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 }
+
+#[test]
+fn validate_default_min_client_ver_rejects_below_26_3_27() {
+    let short_ids = vec![vec![0x01]];
+    let cfg = validation_cfg_with_versions(
+        &short_ids,
+        0,
+        Some(crate::config::xray::DEFAULT_REALITY_MIN_CLIENT_VER),
+        None,
+    );
+    let auth = auth_with_version([26, 3, 26, 0]);
+
+    assert!(!validate_reality_client_auth(&auth, cfg, 0).unwrap());
+}
+
+#[test]
+fn validate_default_min_client_ver_accepts_26_3_27() {
+    let short_ids = vec![vec![0x01]];
+    let cfg = validation_cfg_with_versions(
+        &short_ids,
+        0,
+        Some(crate::config::xray::DEFAULT_REALITY_MIN_CLIENT_VER),
+        None,
+    );
+    let auth = auth_with_version([26, 3, 27, 0]);
+
+    assert!(validate_reality_client_auth(&auth, cfg, 0).unwrap());
+}
+
+#[test]
+fn validate_default_min_client_ver_accepts_above_26_3_27() {
+    let short_ids = vec![vec![0x01]];
+    let cfg = validation_cfg_with_versions(
+        &short_ids,
+        0,
+        Some(crate::config::xray::DEFAULT_REALITY_MIN_CLIENT_VER),
+        None,
+    );
+    let auth = auth_with_version([26, 3, 28, 0]);
+
+    assert!(validate_reality_client_auth(&auth, cfg, 0).unwrap());
+}
+
+#[test]
+fn validate_default_min_client_ver_accepts_26_4_0() {
+    let short_ids = vec![vec![0x01]];
+    let cfg = validation_cfg_with_versions(
+        &short_ids,
+        0,
+        Some(crate::config::xray::DEFAULT_REALITY_MIN_CLIENT_VER),
+        None,
+    );
+    let auth = auth_with_version([26, 4, 0, 0]);
+
+    assert!(validate_reality_client_auth(&auth, cfg, 0).unwrap());
+}
+
+#[test]
+fn validate_default_min_client_ver_accepts_27_0_0() {
+    let short_ids = vec![vec![0x01]];
+    let cfg = validation_cfg_with_versions(
+        &short_ids,
+        0,
+        Some(crate::config::xray::DEFAULT_REALITY_MIN_CLIENT_VER),
+        None,
+    );
+    let auth = auth_with_version([27, 0, 0, 0]);
+
+    assert!(validate_reality_client_auth(&auth, cfg, 0).unwrap());
+}
+
+#[test]
+fn validate_explicit_zero_min_client_ver_accepts_legacy_client() {
+    let short_ids = vec![vec![0x01]];
+    let cfg = validation_cfg_with_versions(&short_ids, 0, Some("0.0.0"), None);
+    let auth = auth_with_version([1, 8, 0, 0]);
+
+    assert!(validate_reality_client_auth(&auth, cfg, 0).unwrap());
+}

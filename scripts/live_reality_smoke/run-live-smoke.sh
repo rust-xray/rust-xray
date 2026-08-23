@@ -958,7 +958,7 @@ main() {
 
   echo "Live smoke workspace: ${SMOKE_WORK_DIR}"
 
-  run_phase "regression flow=\"\"" phase_regression_empty_flow
+  run_phase "regression flow=\"\" (default minClientVer)" phase_regression_empty_flow
   run_phase "regression custom string VLESS id" phase_regression_custom_string_id
   run_phase "regression flow=xtls-rprx-vision" phase_regression_vision_flow
   run_phase "regression 10MB download" phase_regression_10mb_download

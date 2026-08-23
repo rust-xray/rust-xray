@@ -26,8 +26,8 @@ The private key is intentionally public for deterministic CI/fixture testing.
 
 | File | Purpose |
 |------|---------|
-| `rust-xray-server.fixture.json` | REALITY + plain VLESS inbound (empty flow) on `127.0.0.1:24443` |
-| `xray-compatible-server.fixture.json` | Xray-style server config with log/routing/outbounds/sniffing/sockopt |
+| `rust-xray-server.fixture.json` | REALITY + plain VLESS inbound (empty flow) on `127.0.0.1:24443`; **no `minClientVer`** (runtime default `26.3.27`) |
+| `xray-compatible-server.fixture.json` | Xray-style server config with log/routing/outbounds/sniffing/sockopt; `"minClientVer": ""` (same effective default) |
 | `xray-compatible-server-vision.fixture.json` | Xray-compatible config with `xtls-rprx-vision` |
 | `rust-xray-server.vision.fixture.json` | rust-xray server config with `xtls-rprx-vision` |
 | `xray-client.template.json` | Xray client template with `__TEST_PUBLIC_KEY__` placeholder |
@@ -67,6 +67,23 @@ DIRECT command counts, Happ mux baseline log grep counts, AES-GCM decrypt failur
 and curl status summary.
 
 Pass/fail expectations vs upstream: [docs/compatibility-status.md](../../docs/compatibility-status.md).
+
+## REALITY `minClientVer` (default smoke behavior)
+
+rust-xray applies the Xray-core server default when `minClientVer` is omitted or
+`""`: effective minimum **`26.3.27`**. Explicit values (including `"0.0.0"`) override.
+
+| Fixture | `minClientVer` in JSON | Effective runtime |
+|---------|------------------------|-------------------|
+| `rust-xray-server.fixture.json` | omitted | `26.3.27` |
+| `xray-compatible-server*.fixture.json` | `""` | `26.3.27` |
+
+The automated suite’s first regression phase (`regression flow=""`) uses
+`rust-xray-server.fixture.json` with official **Xray-core 26.3.27+** and therefore
+exercises default `minClientVer` behavior without an extra harness case.
+
+This matches Xray-core config normalization; it does **not** claim compatibility
+with every third-party REALITY client.
 
 **XHTTP transport smoke** (separate runner, does not replace this REALITY suite):
 

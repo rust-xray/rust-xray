@@ -540,6 +540,29 @@ fn client_hello_policy_matrix_fallback_vs_inspect_error() {
 }
 
 #[test]
+fn inspect_reality_client_hello_fallbacks_when_default_min_client_ver_fails() {
+    let server_names = vec!["example.com".to_string()];
+    let short_ids = vec![vec![0xAB, 0xCD]];
+    let (hello, handshake_message) = build_valid_reality_client(1_700_000_000, &[0xAB, 0xCD]);
+
+    let result = inspect_reality_client_hello(
+        &hello,
+        &handshake_message,
+        inspect_cfg_with_versions(
+            &server_names,
+            &short_ids,
+            0,
+            Some(crate::config::xray::DEFAULT_REALITY_MIN_CLIENT_VER),
+            None,
+            None,
+        ),
+    )
+    .unwrap();
+
+    assert!(matches!(result, RealityDecision::Fallback));
+}
+
+#[test]
 fn inspect_reality_client_hello_invalid_min_client_ver_returns_invalid_input() {
     let server_names = vec!["example.com".to_string()];
     let short_ids = vec![vec![0xAB, 0xCD]];

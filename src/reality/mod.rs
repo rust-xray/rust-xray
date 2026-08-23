@@ -30,9 +30,8 @@ pub use fixture::{
     RealityFixtureSessionResult,
 };
 pub use handshake::{
-    extract_observed_server_hello, fetch_dest_handshake, generate_partial_tls13_handshake,
-    patch_reality_server_hello, prepare_reality_tls13_state, PartialTls13Handshake,
-    PatchedRealityHandshake, RealityDestHandshake, RealityObservedServerHello,
+    extract_observed_server_hello, fetch_dest_handshake, prepare_reality_tls13_state,
+    RealityDestHandshake, RealityObservedServerHello,
 };
 pub use mldsa65::{
     build_reality_mldsa65_message, decode_mldsa65_seed, decode_mldsa65_verify_key,

@@ -26,36 +26,6 @@ pub struct Tls13ServerHelloParams {
     pub key_share_extension_body: Vec<u8>,
 }
 
-/// Placeholder plan for generating the server-facing ServerHello message.
-///
-/// Upstream equivalent: ServerHello construction inside Go `hs.handshake()`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RealityServerHelloPlan {
-    // TODO: legacy_version
-    // TODO: random
-    // TODO: cipher_suite
-    // TODO: key_share
-}
-
-/// Placeholder plan for EncryptedExtensions.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RealityEncryptedExtensionsPlan {
-    // TODO: ALPN
-    // TODO: other extensions required by REALITY camouflage
-}
-
-/// Placeholder plan for the server Certificate message.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RealityCertificatePlan {
-    // TODO: ephemeral / camouflage certificate chain
-}
-
-/// Placeholder plan for the server Finished message.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RealityFinishedPlan {
-    // TODO: verify_data derived from transcript + key schedule
-}
-
 pub fn build_handshake_message(handshake_type: u8, body: &[u8]) -> Result<Vec<u8>> {
     if body.len() > MAX_HANDSHAKE_BODY_LEN {
         return Err(Error::new(
@@ -202,20 +172,6 @@ pub fn build_encrypted_extensions_empty() -> Result<Vec<u8>> {
 
 pub fn build_finished(verify_data: &[u8]) -> Result<Vec<u8>> {
     build_handshake_message(HANDSHAKE_TYPE_FINISHED, verify_data)
-}
-
-pub fn build_certificate_placeholder() -> Result<Vec<u8>> {
-    Err(Error::new(
-        ErrorKind::Unsupported,
-        "REALITY TLS 1.3 Certificate message builder is not implemented yet",
-    ))
-}
-
-pub fn build_certificate_verify_placeholder() -> Result<Vec<u8>> {
-    Err(Error::new(
-        ErrorKind::Unsupported,
-        "REALITY TLS 1.3 CertificateVerify message builder is not implemented yet",
-    ))
 }
 
 #[cfg(test)]

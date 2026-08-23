@@ -114,15 +114,3 @@ fn build_finished_wraps_verify_data() {
         vec![0x14, 0x00, 0x00, 0x04, 0xaa, 0xbb, 0xcc, 0xdd]
     );
 }
-
-#[test]
-fn build_certificate_placeholder_returns_unsupported() {
-    let err = build_certificate_placeholder().unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Unsupported);
-}
-
-#[test]
-fn build_certificate_verify_placeholder_returns_unsupported() {
-    let err = build_certificate_verify_placeholder().unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Unsupported);
-}

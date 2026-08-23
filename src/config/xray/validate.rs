@@ -2,6 +2,7 @@ use tracing::warn;
 
 use super::raw::{InboundObject, InboundPortValue, RealitySettingsObject, StreamSettingsObject};
 use super::transport::{validate_reality_transport_network, TransportNetwork};
+use crate::reality::parse_reality_client_version;
 
 pub(crate) fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
@@ -117,6 +118,40 @@ pub fn validate_reality_inbound_config_policy(
                 crate::transport::xhttp::configured_xhttp_mode(settings.mode.as_deref())?;
             }
         }
+    }
+
+    validate_reality_client_version_settings(settings)?;
+
+    Ok(())
+}
+
+fn validate_reality_client_version_settings(
+    settings: &RealitySettingsObject,
+) -> std::io::Result<()> {
+    if let Some(min) = settings
+        .min_client_ver
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        parse_reality_client_version(min).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("realitySettings.minClientVer is invalid: {err}"),
+            )
+        })?;
+    }
+
+    if let Some(max) = settings
+        .max_client_ver
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        parse_reality_client_version(max).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("realitySettings.maxClientVer is invalid: {err}"),
+            )
+        })?;
     }
 
     Ok(())

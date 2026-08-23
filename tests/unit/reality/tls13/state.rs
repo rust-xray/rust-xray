@@ -174,16 +174,6 @@ fn debug_does_not_include_auth_key_or_raw_handshake_bytes() {
 }
 
 #[test]
-fn handshake_not_implemented_returns_unsupported() {
-    let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
-    let state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();
-    let err = state.handshake_not_implemented();
-
-    assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert_eq!(err.to_string(), HANDSHAKE_NOT_IMPLEMENTED_MSG);
-}
-
-#[test]
 fn prepare_server_hello_builds_handshake_message_and_stores_state() {
     let observed = valid_observed_server_hello(TLS_AES_128_GCM_SHA256);
     let mut state = RealityTls13ServerState::new(sample_accepted(), observed).unwrap();

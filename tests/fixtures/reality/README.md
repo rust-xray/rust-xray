@@ -216,6 +216,13 @@ The test sets `max_time_diff_ms: 0` and does not pass `now_unix_ms`, so fixture
 **time drift does not matter** as long as `expected_unix_time.txt` matches the
 decrypted value from the capture.
 
+**`minClientVer` in fixture tests:** `tests/reality_fixture.rs` passes
+`min_client_ver: None` into `RealityInspectConfig` so the captured Xray client
+version (`expected_client_version.txt`, e.g. `1.8.0.0`) is validated without
+applying the production default (`26.3.27`). Production configs always normalize
+omitted/`""` to `26.3.27` at parse time; this fixture intentionally tests legacy
+ciphertext/metadata only, not the default policy window.
+
 ---
 
 ## Running fixture tests (summary)

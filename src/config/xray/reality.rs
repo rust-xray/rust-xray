@@ -18,6 +18,25 @@ use super::validate::{
 
 const REALITY_DEFAULT_DEST_PORT: u16 = 443;
 
+/// Xray-core REALITY server default since [af7eb68](https://github.com/XTLS/Xray-core/commit/af7eb68028732a8ee3c0e5d6ab2b8a657bb2e770).
+pub const DEFAULT_REALITY_MIN_CLIENT_VER: &str = "26.3.27";
+
+/// Resolves Xray-compatible REALITY `minClientVer` for runtime policy.
+///
+/// Absent or empty JSON values use [`DEFAULT_REALITY_MIN_CLIENT_VER`]; explicit
+/// non-empty strings are preserved verbatim (including `"0.0.0"`).
+pub fn effective_reality_min_client_ver(raw: Option<String>) -> String {
+    match raw {
+        Some(value) if !value.is_empty() => value,
+        _ => DEFAULT_REALITY_MIN_CLIENT_VER.to_string(),
+    }
+}
+
+/// Resolves optional REALITY `maxClientVer`. Absent or empty means no upper bound.
+pub fn effective_reality_max_client_ver(raw: Option<String>) -> Option<String> {
+    raw.filter(|value| !value.is_empty())
+}
+
 #[derive(Clone)]
 pub struct RealityInboundRuntime {
     pub tag: Option<String>,
@@ -358,8 +377,10 @@ fn parse_reality_inbound_for_merge(
             dest_addr: reality_dest_addr(settings)?,
             vless_decryption: vless_decryption.clone(),
             max_time_diff: settings.max_time_diff,
-            min_client_ver: settings.min_client_ver.clone(),
-            max_client_ver: settings.max_client_ver.clone(),
+            min_client_ver: Some(effective_reality_min_client_ver(
+                settings.min_client_ver.clone(),
+            )),
+            max_client_ver: effective_reality_max_client_ver(settings.max_client_ver.clone()),
             show: settings.show,
             mldsa65_present: mldsa65_seed.is_some(),
             transport,
