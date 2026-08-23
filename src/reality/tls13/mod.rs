@@ -13,6 +13,7 @@ mod record_crypto;
 mod state;
 mod stream;
 mod transcript;
+mod useless_records;
 
 pub use certificate::{
     build_tls13_certificate_message, build_tls13_certificate_verify_ed25519,

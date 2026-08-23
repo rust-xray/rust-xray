@@ -108,9 +108,8 @@ async fn execute_post_handshake_probe_with_client_config(
         )
     })??;
 
-    // rustls does not emit TLS 1.2-style CCS on the client path. Upstream uTLS probes may use
-    // CCS as a capture boundary; here we start raw capture immediately after the rustls client
-    // handshake completes (all subsequent wire bytes are post-handshake TLS records).
+    // Stage 5B captures post-handshake records after the full rustls client handshake. Stage 5C
+    // CCS tolerance probing uses a separate connection (see `ccs_probe_exec`).
     let captured = timeout(
         POST_HANDSHAKE_PROBE_CAPTURE_TIMEOUT,
         capture_post_handshake_wire_bytes(&mut stream),

@@ -38,10 +38,13 @@ use super::record_crypto::{
     tls13_inner_plaintext_metadata, tls13_inner_plaintext_parts, tls13_record_aad_bytes,
     tls13_record_nonce_hex, Tls13RecordDecryptor, Tls13RecordEncryptor,
 };
+use super::useless_records::{
+    classify_record_before_client_finished, classify_record_on_application_stream,
+    UselessRecordCounter,
+};
+use crate::reality::post_handshake::UselessRecordTolerance;
 
 const TLS_RECORD_HEADER_LEN: usize = 5;
-const MAX_DUMMY_CHANGE_CIPHER_SPEC_BEFORE_CLIENT_FINISHED: usize = 4;
-const TLS13_DUMMY_CHANGE_CIPHER_SPEC_PAYLOAD: [u8; 1] = [0x01];
 const MAX_DEBUG_VLESS_PLAINTEXT_BYTES: usize = 64;
 const MAX_DEBUG_TLS_RECORD_PREFIX_BYTES: usize = 32;
 const TLS13_AEAD_TAG_LEN: usize = 16;
@@ -567,16 +570,19 @@ fn client_finished_read_error(kind: ErrorKind, message: impl Into<String>) -> Er
     )
 }
 
-/// Reads the encrypted client Finished record, skipping TLS 1.3 dummy ChangeCipherSpec records.
+/// Reads the encrypted client Finished record, skipping permitted non-advancing TLS 1.3 records.
 ///
-/// Dummy CCS records are not part of the TLS 1.3 transcript and must not affect handshake secrets.
+/// Dummy compatibility CCS records are not part of the TLS 1.3 transcript and must not affect
+/// handshake secrets. The number of tolerated ignored records comes from target CCS probing
+/// ([`UselessRecordTolerance`]); default `Finite(32)` when cache is absent or detecting.
 pub(crate) async fn read_client_finished_tls_record_from_stream<S>(
     stream: &mut S,
+    tolerance: UselessRecordTolerance,
 ) -> io::Result<TlsRecord>
 where
     S: AsyncRead + Unpin,
 {
-    let mut skipped_ccs = 0usize;
+    let mut counter = UselessRecordCounter::new(tolerance);
 
     loop {
         let record = read_tls_record_from_stream(stream).await.map_err(|err| {
@@ -590,63 +596,52 @@ where
             }
         })?;
 
-        match record.content_type {
-            TlsRecordContentType::ChangeCipherSpec => {
-                if record.payload != TLS13_DUMMY_CHANGE_CIPHER_SPEC_PAYLOAD {
-                    return Err(client_finished_read_error(
-                        ErrorKind::InvalidData,
-                        "invalid ChangeCipherSpec payload before client Finished",
-                    ));
-                }
+        match classify_record_before_client_finished(&record) {
+            Ok(true) => {
+                counter
+                    .observe_useless()
+                    .map_err(|err| client_finished_read_error(err.kind(), err.to_string()))?;
 
-                skipped_ccs += 1;
-                if skipped_ccs > MAX_DUMMY_CHANGE_CIPHER_SPEC_BEFORE_CLIENT_FINISHED {
-                    return Err(client_finished_read_error(
-                        ErrorKind::InvalidData,
-                        "too many ChangeCipherSpec records before client Finished",
-                    ));
+                if record.content_type == TlsRecordContentType::ChangeCipherSpec {
+                    debug!(
+                        stage = stages::TLS13_CLIENT_FINISHED_READ,
+                        ignored_record_count = counter.consecutive(),
+                        record_len = record.raw.len(),
+                        effective_limit = ?tolerance.effective_limit(),
+                        "skipping TLS 1.3 dummy ChangeCipherSpec"
+                    );
+                } else {
+                    debug!(
+                        stage = stages::TLS13_CLIENT_FINISHED_READ,
+                        ignored_record_count = counter.consecutive(),
+                        record_content_type = %tls_record_content_type_name(record.content_type),
+                        record_len = record.raw.len(),
+                        effective_limit = ?tolerance.effective_limit(),
+                        "skipping non-advancing TLS record before client Finished"
+                    );
                 }
-
-                debug!(
-                    stage = stages::TLS13_CLIENT_FINISHED_READ,
-                    skipped_ccs_count = skipped_ccs,
-                    record_len = record.raw.len(),
-                    "skipping TLS 1.3 dummy ChangeCipherSpec"
-                );
             }
-            TlsRecordContentType::ApplicationData => {
+            Ok(false) => {
+                counter.observe_advancing();
                 debug!(
                     stage = stages::TLS13_CLIENT_FINISHED_READ,
-                    skipped_ccs_count = skipped_ccs,
+                    ignored_record_count = counter.consecutive(),
                     encrypted_record_len = record.raw.len(),
                     "read encrypted client Finished TLS record"
                 );
                 return Ok(record);
             }
-            TlsRecordContentType::Alert => {
-                warn!(
-                    stage = stages::TLS13_CLIENT_FINISHED_READ,
-                    skipped_ccs_count = skipped_ccs,
-                    alert_record_len = record.raw.len(),
-                    alert_bytes_hex = hex_encode(&record.payload),
-                    "client sent TLS alert before Finished"
-                );
-                return Err(client_finished_read_error(
-                    ErrorKind::InvalidData,
-                    format!(
-                        "client sent TLS alert before Finished: {}",
-                        hex_encode(&record.payload)
-                    ),
-                ));
-            }
-            other => {
-                return Err(client_finished_read_error(
-                    ErrorKind::InvalidData,
-                    format!(
-                        "unexpected TLS record before client Finished: {}",
-                        tls_record_content_type_name(other)
-                    ),
-                ));
+            Err(err) => {
+                if record.content_type == TlsRecordContentType::Alert {
+                    warn!(
+                        stage = stages::TLS13_CLIENT_FINISHED_READ,
+                        ignored_record_count = counter.consecutive(),
+                        alert_record_len = record.raw.len(),
+                        alert_bytes_hex = hex_encode(&record.payload),
+                        "client sent TLS alert before Finished"
+                    );
+                }
+                return Err(client_finished_read_error(err.kind(), err.to_string()));
             }
         }
     }
@@ -741,12 +736,14 @@ struct Tls13ClientReadState {
     ciphertext_read_buf: BytesMut,
     read_eof: bool,
     server_key_update_requested: Arc<AtomicBool>,
+    useless_counter: UselessRecordCounter,
 }
 
 impl Tls13ClientReadState {
     fn new(
         read_decryptor: Tls13RecordDecryptor,
         server_key_update_requested: Arc<AtomicBool>,
+        useless_tolerance: UselessRecordTolerance,
     ) -> Self {
         Self {
             read_decryptor,
@@ -754,6 +751,7 @@ impl Tls13ClientReadState {
             ciphertext_read_buf: BytesMut::new(),
             read_eof: false,
             server_key_update_requested,
+            useless_counter: UselessRecordCounter::new(useless_tolerance),
         }
     }
 
@@ -805,16 +803,42 @@ impl Tls13ClientReadState {
                     Poll::Ready(record) => record,
                 };
 
+            match classify_record_on_application_stream(&record) {
+                Ok(true) => {
+                    if let Err(err) = self.useless_counter.observe_useless() {
+                        return Poll::Ready(Err(Error::new(err.kind(), err.to_string())));
+                    }
+                    debug!(
+                        stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
+                        direction = TLS13_APPLICATION_STREAM_DIRECTION,
+                        ignored_record_count = self.useless_counter.consecutive(),
+                        record_content_type = %tls_record_content_type_name(record.content_type),
+                        record_len = record.raw.len(),
+                        effective_limit = ?self.useless_counter.tolerance().effective_limit(),
+                        "skipping non-advancing TLS record on application stream"
+                    );
+                    continue;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    return Poll::Ready(Err(Error::new(err.kind(), err.to_string())));
+                }
+            }
+
             match self.decrypt_application_stream_record(&record)? {
                 ApplicationStreamRecord::Plaintext(plaintext) => {
+                    self.useless_counter.observe_advancing();
                     self.plaintext_read_buf.extend_from_slice(&plaintext);
                     return Poll::Ready(Ok(()));
                 }
                 ApplicationStreamRecord::PeerClosed => {
+                    self.useless_counter.observe_advancing();
                     self.read_eof = true;
                     return Poll::Ready(Ok(()));
                 }
-                ApplicationStreamRecord::PostHandshakeConsumed => {}
+                ApplicationStreamRecord::PostHandshakeConsumed => {
+                    self.useless_counter.observe_advancing();
+                }
             }
         }
     }
@@ -1271,12 +1295,27 @@ impl<S> RealityTls13ApplicationStream<S> {
         read_decryptor: Tls13RecordDecryptor,
         write_encryptor: Tls13RecordEncryptor,
     ) -> Self {
+        Self::new_with_tolerance(
+            inner,
+            read_decryptor,
+            write_encryptor,
+            UselessRecordTolerance::DEFAULT,
+        )
+    }
+
+    pub fn new_with_tolerance(
+        inner: S,
+        read_decryptor: Tls13RecordDecryptor,
+        write_encryptor: Tls13RecordEncryptor,
+        useless_tolerance: UselessRecordTolerance,
+    ) -> Self {
         let server_key_update_requested = Arc::new(AtomicBool::new(false));
         Self {
             inner,
             read: Tls13ClientReadState::new(
                 read_decryptor,
                 Arc::clone(&server_key_update_requested),
+                useless_tolerance,
             ),
             write: Tls13ClientWriteState::new(write_encryptor, server_key_update_requested),
             relay_split_guard: ApplicationStreamRelaySplitGuard::new(),

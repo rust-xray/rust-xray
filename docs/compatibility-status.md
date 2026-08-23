@@ -29,6 +29,7 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | REALITY `minClientVer` default | Working | Xray-core af7eb68 semantics: omitted or `""` → effective `26.3.27`; explicit value (including `"0.0.0"`) overrides. Does **not** imply every third-party REALITY client is accepted — see [README policy matrix](../README.md#reality-server-minclientver-xray-core-compatibility). Regression: `tests/upstream_compat_vectors.rs`. |
 | REALITY accepted path | Working | TLS 1.3 server handshake + application stream (live smoke) |
 | REALITY post-handshake record detection (Stage 5B) | Working | Proactive `dest × serverName × ALPN` probes; typed cache; post-client-Finished camouflage emission |
+| REALITY post-handshake CCS tolerance (Stage 5C) | Working | Proactive `dest × serverName × ALPN` CCS tolerance probes; typed cache; accepted-path `readClientFinished` + application-stream useless-record policy (`Finite(1/16/32)` / `Unlimited`; default `Finite(32)`) |
 | TLS 1.3 accepted path | Working | AES128-GCM, AES256-GCM, CHACHA20-Poly1305 (CCM suites rejected) |
 | VLESS TCP inbound | Working | UUID auth, `decryption: "none"` |
 | Custom string VLESS ID | Working | UUIDv5 mapping (Xray-compatible) |
@@ -107,8 +108,8 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | DoH through outbound | Not implemented |
 | DNS-over-TCP through VLESS outbound / routing | Not implemented (see [dns-future.md](./dns-future.md)) |
 | Vision splice / zero-copy beyond DIRECT MVP | Not implemented |
-| REALITY post-handshake CCS tolerance / `MaxUselessRecords` probing (Stage 5C) | Not implemented |
-| REALITY probe uTLS ClientHello fingerprint parity (`HelloGolang` / `HelloChrome`) | Not implemented — probes use rustls default ClientHello (**partial** fingerprint parity) |
+| REALITY probe uTLS ClientHello fingerprint parity (`HelloGolang` / `HelloChrome`) | Not implemented — probes use rustls default ClientHello (**partial** parity for Stage 5B record-length and Stage 5C extra-CCS tolerance probing) |
+| REALITY post-handshake `GlobalMaxCSSMsgCount` / alert-driven CCS probe paths (Stage 5C extras) | Not implemented |
 | REALITY session resumption on accepted path | Not implemented |
 | ML-KEM / hybrid KEM on REALITY **accepted TLS handshake** | Not implemented | Stage 2 adds **pre-auth only**: parse `X25519MLKEM768` ClientHello `key_share` (1216 B) and extract trailing X25519 for REALITY auth. **Not yet:** ML-KEM-768 encaps/decaps, hybrid ServerHello, 64-byte TLS shared secret, dest `key_share` mirroring. See [design doc](./reality-mlkem-design.md). |
 | Full Xray-core drop-in compatibility | Not implemented |

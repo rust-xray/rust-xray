@@ -60,11 +60,16 @@ pub use mldsa65::{
     MLDSA65_VERIFY_KEY_LEN,
 };
 pub use post_handshake::{
-    parse_post_handshake_application_record_lengths, post_handshake_parse_error,
-    PostHandshakeParseError, PostHandshakeProbeCache, PostHandshakeProbeKey,
-    PostHandshakeProbeState, RealityAlpnProfile,
+    build_extra_ccs_probe_payload, extra_ccs_count_for_stage,
+    parse_post_handshake_application_record_lengths, post_handshake_parse_error, CcsProbeStage,
+    CcsProbeStep, CcsToleranceProbe, CcsToleranceProbeCache, CcsToleranceProbeCompletionGuard,
+    CcsToleranceProbeState, PostHandshakeParseError, PostHandshakeProbeCache,
+    PostHandshakeProbeKey, PostHandshakeProbeState, RealityAlpnProfile, UselessRecordTolerance,
+    CCS_PROBE_CUMULATIVE_SENT, CCS_PROBE_INCREMENTAL_BATCHES, CCS_PROBE_RESULTS_ON_ALERT,
 };
-pub use post_handshake_probe::{post_handshake_probe_cache, start_reality_post_handshake_probes};
+pub use post_handshake_probe::{
+    ccs_tolerance_probe_cache, post_handshake_probe_cache, start_reality_post_handshake_probes,
+};
 pub use server::{handle_accepted_reality_client, handle_accepted_reality_client_traced};
 pub use session::{
     short_id_prefix_len, validate_reality_client_auth, RealityClientAuth, RealityValidationConfig,

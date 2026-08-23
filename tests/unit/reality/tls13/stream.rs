@@ -12,6 +12,7 @@ use crate::tls::records::{
 };
 
 use crate::reality::stages;
+use crate::reality::UselessRecordTolerance;
 
 use super::*;
 
@@ -602,9 +603,12 @@ fn read_client_finished_tls_record_skips_one_change_cipher_spec() {
         let total_len = input.len();
         let mut cursor = std::io::Cursor::new(input);
 
-        let record = read_client_finished_tls_record_from_stream(&mut cursor)
-            .await
-            .expect("client Finished record");
+        let record = read_client_finished_tls_record_from_stream(
+            &mut cursor,
+            UselessRecordTolerance::DEFAULT,
+        )
+        .await
+        .expect("client Finished record");
 
         assert_eq!(record.content_type, TlsRecordContentType::ApplicationData);
         assert_eq!(record.payload, b"client-finished");
@@ -622,9 +626,12 @@ fn read_client_finished_tls_record_skips_two_change_cipher_spec_records() {
         input.extend_from_slice(&app_data);
         let mut cursor = std::io::Cursor::new(input);
 
-        let record = read_client_finished_tls_record_from_stream(&mut cursor)
-            .await
-            .expect("client Finished record");
+        let record = read_client_finished_tls_record_from_stream(
+            &mut cursor,
+            UselessRecordTolerance::DEFAULT,
+        )
+        .await
+        .expect("client Finished record");
 
         assert_eq!(record.content_type, TlsRecordContentType::ApplicationData);
         assert_eq!(record.payload, b"client-finished");
@@ -635,19 +642,21 @@ fn read_client_finished_tls_record_skips_two_change_cipher_spec_records() {
 fn read_client_finished_tls_record_rejects_too_many_change_cipher_spec_records() {
     block_on(async {
         let mut input = Vec::new();
-        for _ in 0..MAX_DUMMY_CHANGE_CIPHER_SPEC_BEFORE_CLIENT_FINISHED + 1 {
+        for _ in 0..33 {
             input.extend_from_slice(&build_change_cipher_spec_record());
         }
         let mut cursor = std::io::Cursor::new(input);
 
-        let err = read_client_finished_tls_record_from_stream(&mut cursor)
-            .await
-            .unwrap_err();
+        let err = read_client_finished_tls_record_from_stream(
+            &mut cursor,
+            UselessRecordTolerance::DEFAULT,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidData);
-        assert!(err
-            .to_string()
-            .contains("too many ChangeCipherSpec records before client Finished"));
+        assert!(err.to_string().contains("too many ignored records"));
+        assert!(err.to_string().contains("limit=32"));
     });
 }
 
@@ -658,9 +667,12 @@ fn read_client_finished_tls_record_rejects_alert_before_finished() {
             .expect("valid alert record");
         let mut cursor = std::io::Cursor::new(alert);
 
-        let err = read_client_finished_tls_record_from_stream(&mut cursor)
-            .await
-            .unwrap_err();
+        let err = read_client_finished_tls_record_from_stream(
+            &mut cursor,
+            UselessRecordTolerance::DEFAULT,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         assert!(err
@@ -676,9 +688,12 @@ fn read_client_finished_tls_record_eof_includes_stage_phrase() {
     block_on(async {
         let mut cursor = std::io::Cursor::new(Vec::new());
 
-        let err = read_client_finished_tls_record_from_stream(&mut cursor)
-            .await
-            .unwrap_err();
+        let err = read_client_finished_tls_record_from_stream(
+            &mut cursor,
+            UselessRecordTolerance::DEFAULT,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
         assert!(err.to_string().contains(stages::TLS13_CLIENT_FINISHED_READ));
@@ -695,9 +710,12 @@ fn read_client_finished_tls_record_errors_do_not_include_secret_field_names() {
             .expect("valid alert record");
         let mut cursor = std::io::Cursor::new(alert);
 
-        let err = read_client_finished_tls_record_from_stream(&mut cursor)
-            .await
-            .unwrap_err();
+        let err = read_client_finished_tls_record_from_stream(
+            &mut cursor,
+            UselessRecordTolerance::DEFAULT,
+        )
+        .await
+        .unwrap_err();
         let message = err.to_string().to_ascii_lowercase();
 
         assert!(!message.contains("privatekey"));
@@ -718,9 +736,12 @@ fn read_client_finished_tls_record_rejects_invalid_change_cipher_spec_payload() 
         .expect("valid CCS record framing");
         let mut cursor = std::io::Cursor::new(invalid_ccs);
 
-        let err = read_client_finished_tls_record_from_stream(&mut cursor)
-            .await
-            .unwrap_err();
+        let err = read_client_finished_tls_record_from_stream(
+            &mut cursor,
+            UselessRecordTolerance::DEFAULT,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         assert!(err
@@ -736,9 +757,12 @@ fn read_client_finished_tls_record_rejects_unexpected_handshake_record() {
             .expect("valid handshake record");
         let mut cursor = std::io::Cursor::new(handshake);
 
-        let err = read_client_finished_tls_record_from_stream(&mut cursor)
-            .await
-            .unwrap_err();
+        let err = read_client_finished_tls_record_from_stream(
+            &mut cursor,
+            UselessRecordTolerance::DEFAULT,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         assert!(err

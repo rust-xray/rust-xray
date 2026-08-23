@@ -43,7 +43,9 @@ Rough sequence:
    EncryptedExtensions, Certificate, CertificateVerify, Finished using REALITY
    key schedule and transcript state (not a single-record patch).
 9. **Read client Finished** — `readClientFinished`; validate client handshake
-   completion.
+   completion. Permitted non-advancing records (compatibility CCS, warning alerts,
+   empty ApplicationData) are ignored up to a **target-probed tolerance**
+   (Stage 5C; default `Finite(32)`).
 10. **Emit post-handshake camouflage records (Stage 5B)** — after verified client
     Finished, emit cached dummy TLS ApplicationData records observed from proactive
     `dest` probes (separate from optional Stage 5A position-6 record).
@@ -70,6 +72,7 @@ When comparing with upstream Go/XTLS REALITY server handshake code:
 | Dest observation → state setup | `fetch_dest_handshake`, `prepare_reality_tls13_state` (`handshake.rs`) | **Working** |
 | Application stream handoff | `RealityTls13ApplicationStream` → `run_inbound_transport` | **Working** |
 | Post-handshake probe cache + emission (Stage 5B) | `post_handshake/`, `post_handshake_probe.rs` | **Working** |
+| Extra-CCS tolerance probe cache + runtime policy (Stage 5C) | `post_handshake/ccs_*`, `tls13/useless_records.rs` | **Working** |
 | Position-6 camouflage record (Stage 5A) | `build_position6_camouflage_record` | **Working** |
 
 ## Stage 5: post-handshake record mirroring
@@ -106,18 +109,51 @@ into two independent mechanisms:
   position-6, seq 1 if position-6 was sent)
 - **Does not** update transcript or re-derive application secrets
 
+### Stage 5C — extra-CCS tolerance probing + dynamic ignored-record limit
+
+**Supported (runtime):**
+
+- Background probes at startup share the **same cache key** as Stage 5B:
+  `PostHandshakeProbeKey { dest_addr, server_name, alpn_profile }` via
+  `post_handshake_probe_key()` / `RealityAlpnProfile::classify_client_hello()`.
+- **One TCP connection per probe.** On the first outgoing rustls compatibility
+  CCS (`14 03 03 00 01 01`), inject cumulative extra CCS batches **before**
+  forwarding the original client CCS:
+  - incremental batches: `2`, `15`, `16`
+  - cumulative sent: `2`, `17`, `33`
+  - alert after cumulative `2` → `Finite(1)`; after `17` → `Finite(16)`; after
+    `33` → `Finite(32)`; no alert through all tiers → `Unlimited`
+- Probe failure / timeout / cache miss / still `Detecting` → runtime default
+  **`Finite(32)`** (never `Unlimited`).
+- Accepted path: bounded wait (5s) on cache immediately **before**
+  `readClientFinished` (upstream loads probed limit after verified Finished when
+  possible — wire-visible difference only when probe completes early with a
+  non-default tier).
+- Runtime policy: consecutive non-advancing records (exact compatibility CCS,
+  warning alerts, TLS 1.3 `user_canceled`, empty ApplicationData before Finished)
+  increment a counter; `counter > effective_limit` closes the TLS connection
+  (**no fallback** after REALITY accept). Malformed CCS is an immediate error and
+  does not consume tolerance budget. The same tolerance applies to outer useless
+  records on the post-handshake application stream reader.
+- Outgoing rustls coalesced writes and inbound alert observation use record-boundary
+  framing (`OutgoingTlsRecordBuffer`, `InboundAlertObserver`) — no bare
+  `buf[0] == 0x15` scans.
+
+**Not yet (Stage 5C extras):**
+
+- `GlobalMaxCSSMsgCount` useless-record probing
+- Alert-driven probe completion paths beyond the cumulative CCS tier probe
+
 ### Fingerprint parity
 
 **PARTIAL.** Upstream proactive detection uses uTLS (`HelloGolang` /
 `HelloChrome`-class ClientHello). rust-xray probes use the project's **rustls**
-stack with profile-appropriate ALPN only. Post-handshake **record-length**
-detection is the goal; ClientHello fingerprint is not matched to uTLS.
+stack with profile-appropriate ALPN only. Post-handshake **record-length** and
+**extra-CCS tolerance** detection are supported; ClientHello fingerprint is not
+matched to uTLS. Do **not** claim full camouflage parity.
 
-### Not yet (Stage 5C+)
+### Not yet (Stage 5D+)
 
-- Target extra-CCS tolerance probing / `MaxUselessRecords`
-- `GlobalMaxCSSMsgCount` useless-record probing
-- Alert-driven probe completion paths
 - Real TLS session resumption on the accepted path
 
 ## Deterministic Rust vectors (non-smoke)
@@ -152,6 +188,7 @@ Live matrix remains `scripts/live_reality_smoke/run-live-smoke.sh` unchanged.
 | Handshake message builders | `src/reality/tls13/messages.rs`, `certificate.rs` | Done on accepted path |
 | TLS 1.3 handshake driver | `complete_reality_tls13_handshake` | Done (live smoke) |
 | Post-handshake probe cache + Stage 5B emission | `src/reality/post_handshake/`, `post_handshake_probe.rs` | Done (unit + integration tests) |
+| CCS tolerance probe cache + Stage 5C runtime policy | `src/reality/post_handshake/ccs_*`, `tls13/useless_records.rs` | Done (unit + mock-target integration tests) |
 | Position-6 Stage 5A camouflage record | `RealityTls13ServerState::build_position6_camouflage_record` | Done |
 | Accepted entry | `handle_accepted_reality_client` in `server.rs` | Done |
 | VLESS + transport handoff | `run_inbound_transport` after TLS app stream | Done |

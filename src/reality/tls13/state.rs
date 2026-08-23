@@ -14,7 +14,7 @@ use crate::reality::certificate::{
 use crate::reality::handshake::RealityObservedServerHello;
 use crate::reality::mldsa65::Mldsa65Seed;
 use crate::reality::post_handshake::{
-    emit_post_handshake_camouflage_records, post_handshake_probe_key,
+    emit_post_handshake_camouflage_records, post_handshake_probe_key, resolve_ccs_tolerance,
     resolve_post_handshake_wire_lengths,
 };
 use crate::reality::stages::{self, stage_error, RealityAcceptedStage};
@@ -609,9 +609,16 @@ where
         "sent encrypted server handshake records"
     );
 
-    let client_finished_record = read_client_finished_tls_record_from_stream(&mut stream)
-        .await
-        .map_err(|err| stage_error(RealityAcceptedStage::ClientFinishedRead, err))?;
+    let probe_key = post_handshake_probe_key(
+        state.post_handshake_dest_addr.as_str(),
+        state.accepted.sni.as_deref().unwrap_or(""),
+        client_hello_payload,
+    );
+    let useless_tolerance = resolve_ccs_tolerance(&probe_key).await;
+    let client_finished_record =
+        read_client_finished_tls_record_from_stream(&mut stream, useless_tolerance)
+            .await
+            .map_err(|err| stage_error(RealityAcceptedStage::ClientFinishedRead, err))?;
 
     let client_handshake_traffic_secret = state
         .handshake_secrets
@@ -736,10 +743,11 @@ where
         "application stream ready"
     );
 
-    Ok(RealityTls13ApplicationStream::new(
+    Ok(RealityTls13ApplicationStream::new_with_tolerance(
         stream,
         read_decryptor,
         write_encryptor,
+        useless_tolerance,
     ))
 }
 

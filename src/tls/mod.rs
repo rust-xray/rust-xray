@@ -9,9 +9,10 @@ pub use record::{parse_client_hello_record_bytes, read_client_hello_record, TlsC
 pub use records::{
     build_application_data_record, build_change_cipher_spec_record, build_handshake_record,
     build_tls_record, parse_complete_tls_records_prefix, parse_tls_records, TlsRecord,
-    TlsRecordContentType, TLS_LEGACY_VERSION_1_2, TLS_MAX_RECORD_PAYLOAD_LEN,
-    TLS_MAX_RECORD_WIRE_LEN, TLS_RECORD_ALERT, TLS_RECORD_APPLICATION_DATA,
-    TLS_RECORD_CHANGE_CIPHER_SPEC, TLS_RECORD_HANDSHAKE, TLS_RECORD_HEADER_LEN,
+    TlsRecordContentType, TLS13_COMPATIBILITY_CCS_RECORD, TLS_LEGACY_VERSION_1_2,
+    TLS_MAX_RECORD_PAYLOAD_LEN, TLS_MAX_RECORD_WIRE_LEN, TLS_RECORD_ALERT,
+    TLS_RECORD_APPLICATION_DATA, TLS_RECORD_CHANGE_CIPHER_SPEC, TLS_RECORD_HANDSHAKE,
+    TLS_RECORD_HEADER_LEN,
 };
 pub use server_hello::{
     parse_server_hello_key_share, parse_tls_server_hello_handshake, ServerHelloKeyShare,

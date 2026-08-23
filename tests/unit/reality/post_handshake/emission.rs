@@ -5,7 +5,7 @@ use crate::reality::post_handshake::alpn::RealityAlpnProfile;
 use crate::reality::post_handshake::cache::{PostHandshakeProbeCache, PostHandshakeProbeKey};
 use crate::reality::post_handshake::emission::{
     emit_post_handshake_camouflage_records, post_handshake_probe_key,
-    resolve_post_handshake_wire_lengths_from_cache,
+    resolve_ccs_tolerance_from_cache, resolve_post_handshake_wire_lengths_from_cache,
 };
 use crate::reality::post_handshake::sanitize_post_handshake_wire_lengths;
 use crate::reality::target_server_flight::ObservedTargetTls13ServerFlight;
@@ -16,7 +16,7 @@ use crate::reality::tls13::record_crypto::{
 };
 use crate::reality::tls13::state::{assemble_server_handshake_flight_out, RealityTls13ServerState};
 use crate::reality::tls13::{derive_traffic_key, TLS_AES_128_GCM_SHA256};
-use crate::reality::RealityCertificatePatchMode;
+use crate::reality::{CcsToleranceProbeCache, RealityCertificatePatchMode, UselessRecordTolerance};
 use crate::tls::records::{
     build_handshake_record, parse_tls_records, TlsRecordContentType, TLS_RECORD_APPLICATION_DATA,
     TLS_RECORD_CHANGE_CIPHER_SPEC, TLS_RECORD_HANDSHAKE,
@@ -609,4 +609,58 @@ async fn accepted_path_emission_order_server_flight_then_stage5b_then_applicatio
     assert!(server_records[2..=6]
         .iter()
         .all(|record| record.raw[0] == TLS_RECORD_APPLICATION_DATA));
+}
+
+#[tokio::test]
+async fn ccs_cache_ready_tiers_resolve_for_connection() {
+    let key = PostHandshakeProbeKey {
+        dest_addr: "example.com:443".to_string(),
+        server_name: "example.com".to_string(),
+        alpn_profile: RealityAlpnProfile::Http11,
+    };
+
+    for tolerance in [
+        UselessRecordTolerance::Finite(1),
+        UselessRecordTolerance::Finite(16),
+        UselessRecordTolerance::Finite(32),
+        UselessRecordTolerance::Unlimited,
+    ] {
+        let cache = CcsToleranceProbeCache::new();
+        assert!(cache.try_begin_detection(key.clone()));
+        cache.complete_detection(&key, tolerance);
+        assert_eq!(
+            resolve_ccs_tolerance_from_cache(&cache, &key).await,
+            tolerance
+        );
+    }
+}
+
+#[tokio::test]
+async fn ccs_cache_detecting_missing_and_failed_default_to_thirty_two() {
+    let key = PostHandshakeProbeKey {
+        dest_addr: "127.0.0.1:443".to_string(),
+        server_name: "example.com".to_string(),
+        alpn_profile: RealityAlpnProfile::None,
+    };
+
+    let missing = CcsToleranceProbeCache::new();
+    assert_eq!(
+        resolve_ccs_tolerance_from_cache(&missing, &key).await,
+        UselessRecordTolerance::DEFAULT
+    );
+
+    let detecting = CcsToleranceProbeCache::new();
+    assert!(detecting.try_begin_detection(key.clone()));
+    assert_eq!(
+        resolve_ccs_tolerance_from_cache(&detecting, &key).await,
+        UselessRecordTolerance::DEFAULT
+    );
+
+    let failed = CcsToleranceProbeCache::new();
+    assert!(failed.try_begin_detection(key.clone()));
+    failed.complete_detection_failed(&key);
+    assert_eq!(
+        resolve_ccs_tolerance_from_cache(&failed, &key).await,
+        UselessRecordTolerance::DEFAULT
+    );
 }

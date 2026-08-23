@@ -14,7 +14,9 @@ use super::alpn::RealityAlpnProfile;
 #[cfg(test)]
 use super::cache::PostHandshakeProbeCache;
 use super::cache::PostHandshakeProbeKey;
+use super::tolerance::UselessRecordTolerance;
 use super::validation::is_valid_post_handshake_wire_length;
+use crate::reality::post_handshake_probe::ccs_tolerance_probe_cache;
 
 /// Bounded wait for proactive detector results (upstream polling ~5s).
 pub const POST_HANDSHAKE_CACHE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -30,6 +32,19 @@ pub fn post_handshake_probe_key(
         server_name: server_name.to_string(),
         alpn_profile: RealityAlpnProfile::classify_client_hello(client_hello),
     }
+}
+
+/// Waits for cached CCS tolerance, returning [`UselessRecordTolerance::DEFAULT`] on timeout/absence.
+///
+/// **Upstream timing note:** Xray REALITY loads probed `MaxUselessRecords` after verified client
+/// Finished (post-handshake camouflage polling). Rust resolves tolerance with the same bounded wait
+/// immediately before reading client Finished so detected target parity applies during
+/// `readClientFinished` when the cache is ready — wire-visible behavior differs only when probe
+/// completes before the client flight and returns a non-default tier.
+pub async fn resolve_ccs_tolerance(key: &PostHandshakeProbeKey) -> UselessRecordTolerance {
+    ccs_tolerance_probe_cache()
+        .wait_for_ready_tolerance(key, POST_HANDSHAKE_CACHE_WAIT_TIMEOUT)
+        .await
 }
 
 /// Waits for cached post-handshake wire lengths, returning an empty list on timeout or absence.
@@ -105,5 +120,15 @@ pub(crate) async fn resolve_post_handshake_wire_lengths_from_cache(
 ) -> Vec<usize> {
     cache
         .wait_for_ready_wire_lengths(key, POST_HANDSHAKE_CACHE_WAIT_TIMEOUT)
+        .await
+}
+
+#[cfg(test)]
+pub(crate) async fn resolve_ccs_tolerance_from_cache(
+    cache: &super::ccs_cache::CcsToleranceProbeCache,
+    key: &PostHandshakeProbeKey,
+) -> UselessRecordTolerance {
+    cache
+        .wait_for_ready_tolerance(key, POST_HANDSHAKE_CACHE_WAIT_TIMEOUT)
         .await
 }

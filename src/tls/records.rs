@@ -143,13 +143,11 @@ pub fn build_application_data_record(payload: &[u8]) -> std::io::Result<Vec<u8>>
     build_tls_record(TLS_RECORD_APPLICATION_DATA, TLS_LEGACY_VERSION_1_2, payload)
 }
 
+/// TLS 1.3 middlebox-compatibility ChangeCipherSpec wire record (`14 03 03 00 01 01`).
+pub const TLS13_COMPATIBILITY_CCS_RECORD: [u8; 6] = [0x14, 0x03, 0x03, 0x00, 0x01, 0x01];
+
 pub fn build_change_cipher_spec_record() -> Vec<u8> {
-    build_tls_record(
-        TLS_RECORD_CHANGE_CIPHER_SPEC,
-        TLS_LEGACY_VERSION_1_2,
-        &[0x01],
-    )
-    .expect("CCS payload fits in u16 record limit")
+    TLS13_COMPATIBILITY_CCS_RECORD.to_vec()
 }
 
 #[cfg(test)]
