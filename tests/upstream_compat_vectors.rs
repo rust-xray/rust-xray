@@ -119,6 +119,74 @@ fn no_seed_config_stays_hmac_only_patch_mode() {
 }
 
 #[test]
+fn reality_x25519mlkem768_pre_auth_upstream_layout_vector() {
+    use rust_xray::protocol::enums::NamedGroup;
+    use rust_xray::protocol::structs::KeyShareEntry;
+    use rust_xray::reality::{
+        build_x25519mlkem768_client_key_share, find_reality_auth_x25519_public_key,
+        MLKEM768_ENCAPSULATION_KEY_LEN, NAMED_GROUP_X25519MLKEM768,
+        X25519_MLKEM768_CLIENT_KEY_SHARE_LEN, X25519_PUBLIC_KEY_LEN,
+    };
+
+    const IANA_GROUP: u16 = 4588;
+
+    assert_eq!(IANA_GROUP, 0x11ec);
+    assert_eq!(u16::from(NamedGroup::X25519MLKEM768), IANA_GROUP);
+    assert_eq!(NamedGroup::from(0x11ec_u16), NamedGroup::X25519MLKEM768);
+    assert_eq!(NamedGroup::from(4588_u16), NamedGroup::X25519MLKEM768);
+    assert_eq!(IANA_GROUP.to_be_bytes(), [0x11, 0xec]);
+
+    assert_eq!(NAMED_GROUP_X25519MLKEM768, IANA_GROUP);
+    assert_eq!(X25519_PUBLIC_KEY_LEN, 32);
+    assert_eq!(MLKEM768_ENCAPSULATION_KEY_LEN, 1184);
+    assert_eq!(X25519_MLKEM768_CLIENT_KEY_SHARE_LEN, 1216);
+    assert_eq!(
+        X25519_MLKEM768_CLIENT_KEY_SHARE_LEN,
+        MLKEM768_ENCAPSULATION_KEY_LEN + X25519_PUBLIC_KEY_LEN
+    );
+
+    let trailing_x25519: [u8; 32] = core::array::from_fn(|i| 0xD0 + i as u8);
+    let hybrid_payload = build_x25519mlkem768_client_key_share(trailing_x25519);
+    assert_eq!(hybrid_payload.len(), X25519_MLKEM768_CLIENT_KEY_SHARE_LEN);
+    assert_eq!(
+        &hybrid_payload[..MLKEM768_ENCAPSULATION_KEY_LEN],
+        &vec![0u8; MLKEM768_ENCAPSULATION_KEY_LEN][..]
+    );
+    assert_eq!(
+        &hybrid_payload[MLKEM768_ENCAPSULATION_KEY_LEN..],
+        trailing_x25519.as_slice()
+    );
+
+    let entry = KeyShareEntry::new(NamedGroup::X25519MLKEM768, hybrid_payload.clone());
+    assert_eq!(u16::from(entry.group()), IANA_GROUP);
+
+    let extracted = find_reality_auth_x25519_public_key(std::slice::from_ref(&entry))
+        .expect("valid hybrid REALITY auth carrier");
+    assert_eq!(extracted.len(), X25519_PUBLIC_KEY_LEN);
+    assert_eq!(extracted, trailing_x25519);
+    assert_eq!(
+        &hybrid_payload[MLKEM768_ENCAPSULATION_KEY_LEN..],
+        extracted.as_slice()
+    );
+
+    // Upstream REALITY pre-auth: standalone X25519 pass runs before hybrid pass.
+    let standalone: [u8; 32] = [0x5A; 32];
+    let hybrid_tail: [u8; 32] = [0xA5; 32];
+    assert_ne!(standalone, hybrid_tail);
+    let shares = vec![
+        KeyShareEntry::new(
+            NamedGroup::X25519MLKEM768,
+            build_x25519mlkem768_client_key_share(hybrid_tail),
+        ),
+        KeyShareEntry::new(NamedGroup::X25519, standalone.to_vec()),
+    ];
+    assert_eq!(
+        find_reality_auth_x25519_public_key(&shares),
+        Some(standalone)
+    );
+}
+
+#[test]
 fn proxy_v2_fixture_matches_vless_builder() {
     use rust_xray::vless::build_proxy_protocol_v2;
 

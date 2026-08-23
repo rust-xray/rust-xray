@@ -3,6 +3,7 @@ mod certificate;
 mod decision;
 mod fixture;
 pub mod handshake;
+pub mod key_share;
 mod mldsa65;
 pub mod mldsa65_crypto;
 mod server;
@@ -32,6 +33,11 @@ pub use fixture::{
 pub use handshake::{
     extract_observed_server_hello, fetch_dest_handshake, prepare_reality_tls13_state,
     RealityDestHandshake, RealityObservedServerHello,
+};
+pub use key_share::{
+    build_x25519mlkem768_client_key_share, find_reality_auth_x25519_public_key,
+    is_x25519mlkem768_group, MLKEM768_ENCAPSULATION_KEY_LEN, NAMED_GROUP_X25519MLKEM768,
+    X25519_MLKEM768_CLIENT_KEY_SHARE_LEN, X25519_PUBLIC_KEY_LEN,
 };
 pub use mldsa65::{
     build_reality_mldsa65_message, decode_mldsa65_seed, decode_mldsa65_verify_key,

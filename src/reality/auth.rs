@@ -5,8 +5,10 @@ use tracing::debug;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
-use crate::protocol::enums::{NamedGroup, ProtocolVersion};
-use crate::protocol::structs::{ClientHelloPayload, KeyShareEntry};
+use crate::protocol::enums::ProtocolVersion;
+use crate::protocol::structs::ClientHelloPayload;
+
+use super::key_share::find_reality_auth_x25519_public_key;
 
 pub struct RealityAuthResult {
     pub(crate) auth_key: [u8; 32],
@@ -48,23 +50,9 @@ fn decode_reality_private_key(value: &str) -> std::io::Result<[u8; 32]> {
     })
 }
 
-fn find_x25519_public_key(keyshares: &[KeyShareEntry]) -> Option<[u8; 32]> {
-    for keyshare in keyshares {
-        if keyshare.group != NamedGroup::X25519 {
-            continue;
-        }
-
-        if let Ok(key) = keyshare.payload.bytes().try_into() {
-            return Some(key);
-        }
-    }
-
-    None
-}
-
 pub(crate) fn extract_x25519_keyshare(hello: &ClientHelloPayload) -> Option<[u8; 32]> {
     let keyshares = hello.keyshare_extension()?;
-    find_x25519_public_key(keyshares)
+    find_reality_auth_x25519_public_key(keyshares)
 }
 
 pub fn validate_reality_private_key_b64(value: &str) -> std::io::Result<()> {
@@ -88,7 +76,10 @@ pub(crate) fn derive_reality_auth_key(
 
     let client_public_key = match extract_x25519_keyshare(hello) {
         Some(key) => key,
-        None => return Ok(None),
+        None => {
+            debug!("REALITY auth key share missing or unusable");
+            return Ok(None);
+        }
     };
 
     let client_public = PublicKey::from(client_public_key);

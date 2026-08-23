@@ -3,6 +3,7 @@ use crate::protocol::enums::ProtocolVersion;
 use crate::protocol::structs::{
     ClientExtension, ClientHelloPayload, KeyShareEntry, Random, SessionId,
 };
+use crate::reality::key_share::build_x25519mlkem768_client_key_share;
 
 fn hello_with_keyshares(keyshares: Vec<KeyShareEntry>) -> ClientHelloPayload {
     ClientHelloPayload {
@@ -126,4 +127,52 @@ fn extract_client_x25519_key_share_prefers_x25519_among_multiple_groups() {
         .expect("X25519 key share present");
 
     assert_eq!(extracted, raw);
+}
+
+#[test]
+fn extract_client_x25519_key_share_ignores_x25519mlkem768_hybrid_entry() {
+    let hybrid_tail: [u8; 32] = core::array::from_fn(|i| 0xC0 + i as u8);
+    let hello = hello_with_keyshares(vec![KeyShareEntry::new(
+        NamedGroup::X25519MLKEM768,
+        build_x25519mlkem768_client_key_share(hybrid_tail),
+    )]);
+
+    let extracted = extract_client_x25519_key_share(&hello).expect("valid extraction");
+
+    assert_eq!(extracted, None);
+}
+
+#[test]
+fn extract_client_x25519_key_share_uses_standalone_not_hybrid_when_both_present() {
+    let hybrid_tail: [u8; 32] = [0xAA; 32];
+    let standalone: [u8; 32] = core::array::from_fn(|i| 0x44 + i as u8);
+    assert_ne!(hybrid_tail, standalone);
+
+    let hello = hello_with_keyshares(vec![
+        KeyShareEntry::new(
+            NamedGroup::X25519MLKEM768,
+            build_x25519mlkem768_client_key_share(hybrid_tail),
+        ),
+        KeyShareEntry::new(NamedGroup::X25519, standalone.to_vec()),
+    ]);
+
+    let extracted = extract_client_x25519_key_share(&hello)
+        .expect("valid extraction")
+        .expect("standalone X25519 key share present");
+
+    assert_eq!(extracted, standalone);
+}
+
+#[test]
+fn encode_key_share_extension_body_rejects_x25519mlkem768_group() {
+    let share = Tls13ServerKeyShare {
+        group: 0x11ec,
+        public_key: [0x33; X25519_KEY_LEN],
+        shared_secret: [0x44; X25519_KEY_LEN],
+    };
+
+    let err = encode_key_share_extension_body(&share).unwrap_err();
+
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("X25519"));
 }

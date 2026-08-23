@@ -151,6 +151,43 @@ fn inspect_cfg_with_versions<'a>(
 }
 
 #[test]
+fn inspect_reality_client_hello_fallbacks_on_unusable_hybrid_key_share_len_1215() {
+    let mut random = [0u8; 32];
+    random[20..32].copy_from_slice(&[0xAA; 12]);
+    let dns = DnsName::try_from("example.com").expect("valid dns name");
+    let hello = ClientHelloPayload {
+        client_version: ProtocolVersion::TLSv1_2,
+        random: Random(random),
+        session_id: session_id_from_32_bytes([0xFF; 32]),
+        cipher_suites: Vec::new(),
+        compression_methods: Vec::new(),
+        extensions: vec![
+            ClientExtension::make_sni(&dns),
+            ClientExtension::SupportedVersions(vec![ProtocolVersion::TLSv1_3]),
+            ClientExtension::KeyShare(vec![KeyShareEntry::new(
+                NamedGroup::X25519MLKEM768,
+                vec![0u8; 1215],
+            )]),
+        ],
+    };
+    let handshake_message = build_minimal_handshake_message(&random, &[0u8; 32]);
+    let server_names = vec!["example.com".to_string()];
+    let short_ids = vec![vec![0xAB, 0xCD]];
+
+    let result = inspect_reality_client_hello(
+        &hello,
+        &handshake_message,
+        inspect_cfg(&server_names, &short_ids, 0, None),
+    )
+    .expect("inspect");
+
+    assert!(
+        matches!(result, RealityDecision::Fallback),
+        "semantic-invalid hybrid key_share without usable standalone X25519 must fallback before Accepted"
+    );
+}
+
+#[test]
 fn inspect_reality_client_hello_allowed_sni_reaches_crypto_path() {
     let mut random = [0u8; 32];
     random[20..32].copy_from_slice(&[0xAA; 12]);

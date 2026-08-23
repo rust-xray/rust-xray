@@ -1,7 +1,10 @@
 use super::*;
 use crate::codec::Codec;
+use crate::protocol::enums::NamedGroup;
 use crate::protocol::enums::ProtocolVersion;
-use crate::protocol::structs::{ClientExtension, ClientHelloPayload, Random, SessionId};
+use crate::protocol::structs::{
+    ClientExtension, ClientHelloPayload, KeyShareEntry, Random, SessionId,
+};
 
 fn hello_with_x25519_keyshare(payload: Vec<u8>) -> ClientHelloPayload {
     ClientHelloPayload {

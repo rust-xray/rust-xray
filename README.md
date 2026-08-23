@@ -23,6 +23,7 @@ matrix. Short version:
 ### Working
 
 - REALITY TCP/raw inbound, pre-auth (SNI, AEAD, policy), and **accepted** TLS 1.3 path
+- REALITY pre-auth **X25519MLKEM768 ClientHello parsing**: hybrid `key_share` (`0x11EC`, 1216 bytes) parsed as opaque carrier; trailing 32-byte X25519 used for REALITY auth when no valid standalone `X25519` entry exists (upstream two-pass selection). **Does not** negotiate hybrid TLS on the accepted path.
 - VLESS TCP inbound: UUID auth, custom string ID → UUIDv5, `flow=""` and `xtls-rprx-vision` (Vision DIRECT MVP)
 - REALITY accepted-path cipher suites: AES128-GCM, AES256-GCM, ChaCha20-Poly1305
 - VLESS fallback: default, SNI/name, HTTP path, ALPN (`http/1.1`, `h2`), PROXY v1/v2 (`xver=1|2`)
@@ -55,7 +56,7 @@ connection.
 - Full Mux.Cool runtime, generic UDP over Mux (non-`:53`), XUDP
 - VLESS `command=Udp` (non-Mux)
 - REALITY over gRPC / WebSocket transport runtime (rejected at startup when `security: reality`)
-- **ML-KEM** hybrid KEM (separate from ML-DSA-65; not implemented)
+- **ML-KEM-768 cryptography** and **TLS 1.3 negotiated X25519MLKEM768** on the REALITY accepted path (hybrid ServerHello, 64-byte shared secret, dest group mirroring — Stage 3+; pre-auth hybrid **carrier parsing only** in Stage 2)
 - Full routing, balancers, outbound ecosystem, DoH, Vision splice/zero-copy beyond DIRECT MVP
 - DNS-over-TCP through VLESS outbound/routing (separate future task)
 - Full Xray-core drop-in compatibility
@@ -128,7 +129,7 @@ Live smoke forces each supported suite via local mock TLS 1.3 dest targets
 | SNI present | Before crypto | Continue | `Fallback` |
 | SNI in `serverNames` | Before crypto | Continue | `Fallback` |
 | `serverNames` non-empty | Before crypto | Continue | `Fallback` |
-| X25519 + HKDF | Crypto | Continue | `Fallback` |
+| X25519 (standalone or hybrid carrier) + HKDF | Crypto | Continue | `Fallback` |
 | AEAD `session_id` open | Crypto | `Opened` | `Fallback` |
 | `shortId` prefix match | After AEAD | Continue | `Fallback` |
 | `minClientVer` | After AEAD | Continue | `Fallback` |
@@ -323,7 +324,7 @@ docs/reality-accepted-path.md
 - Vision DIRECT MVP only — no full splice/zero-copy beyond padding + DIRECT relay.
 - VLESS Mux: experimental Happ baseline (Vision + Mux + numeric UDP DNS `:53`); full Mux.Cool / generic UDP / XUDP not implemented.
 - VLESS `command=Udp` / XUDP; XHTTP `packet-down` / XMUX; Vision over XHTTP; REALITY over gRPC/WebSocket (rejected at startup); full routing/outbounds not implemented.
-- ML-DSA-65 cert signing: experimental baseline when `mldsa65Seed` is set; **ML-KEM not implemented**.
+- ML-DSA-65 cert signing: experimental baseline when `mldsa65Seed` is set; **ML-KEM-768 crypto and hybrid TLS negotiation not implemented** (Stage 2: pre-auth hybrid `key_share` carrier parsing only)
 - TLS 1.3 CCM cipher suites (0x1304, 0x1305) rejected on accepted path.
 
 Full matrix: **[docs/compatibility-status.md](docs/compatibility-status.md)**.
