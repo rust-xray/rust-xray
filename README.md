@@ -23,6 +23,7 @@ matrix. Short version:
 ### Working
 
 - REALITY TCP/raw inbound, pre-auth (SNI, AEAD, policy), and **accepted** TLS 1.3 path
+- **REALITY fallback rate limits (Stage 6):** `limitFallbackUpload` / `limitFallbackDownload` on pre-auth fallback relay (juju/ratelimit-compatible; partial parity — see compatibility doc)
 - **REALITY post-handshake record-length detection/cache (Stage 5B):** proactive `dest × serverName × ALPN` probes at startup; runtime cache lookup; post-client-Finished camouflage ApplicationData emission on accepted path
 - **REALITY post-handshake CCS tolerance (Stage 5C):** proactive `dest × serverName × ALPN` extra-CCS tolerance probes; runtime cache lookup; accepted-path useless-record policy during `readClientFinished` and on the TLS application stream reader (default `Finite(32)`)
 - REALITY pre-auth **X25519MLKEM768 ClientHello parsing**: hybrid `key_share` (`0x11EC`, 1216 bytes) parsed as opaque carrier; trailing 32-byte X25519 used for REALITY auth when no valid standalone `X25519` entry exists (upstream two-pass selection). **Does not** negotiate hybrid TLS on the accepted path.
@@ -109,7 +110,6 @@ Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/REA
 - ML-KEM (ML-DSA-65 baseline is experimental — see docs)
 - Vision splice / zero-copy beyond DIRECT MVP
 - DNS-over-TCP through VLESS outbound/routing (separate future task)
-- Fallback rate limits (`limitFallbackUpload` / `limitFallbackDownload`)
 - TLS 1.3 CCM cipher suites (0x1304, 0x1305)
 
 Developer documentation: **[docs/reality-accepted-path.md](docs/reality-accepted-path.md)** (handshake internals; see compatibility doc for runtime status).

@@ -30,6 +30,7 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | REALITY accepted path | Working | TLS 1.3 server handshake + application stream (live smoke) |
 | REALITY post-handshake record detection (Stage 5B) | Working | Proactive `dest × serverName × ALPN` probes; typed cache; post-client-Finished camouflage emission |
 | REALITY post-handshake CCS tolerance (Stage 5C) | Working | Proactive `dest × serverName × ALPN` CCS tolerance probes; typed cache; accepted-path `readClientFinished` + application-stream useless-record policy (`Finite(1/16/32)` / `Unlimited`; default `Finite(32)`) |
+| REALITY fallback rate limits (Stage 6) | Working | `limitFallbackUpload` / `limitFallbackDownload` on pre-auth fallback relay only; juju/ratelimit v1.0.2-compatible token bucket. **Partial parity:** no upstream `MirrorConn` ClientHello mirroring timing; no upstream `s2cSaved` download prebuffer — limiter starts at post-initial relay boundary. Accepted REALITY/VLESS traffic is never rate-limited. |
 | TLS 1.3 accepted path | Working | AES128-GCM, AES256-GCM, CHACHA20-Poly1305 (CCM suites rejected) |
 | VLESS TCP inbound | Working | UUID auth, `decryption: "none"` |
 | Custom string VLESS ID | Working | UUIDv5 mapping (Xray-compatible) |

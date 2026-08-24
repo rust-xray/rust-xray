@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use tracing::info;
 
+use crate::config::LimitFallback;
 use crate::vless::{validate_fallback_configs, validate_fallback_xver, FallbackConfig};
 use serde_json::Value;
 
@@ -60,6 +61,8 @@ pub struct RealityInboundRuntime {
     pub xhttp_settings: Option<XHttpSettings>,
     pub dest_xver: u8,
     pub dest_transport: crate::reality::RealityDestTransport,
+    pub limit_fallback_upload: LimitFallback,
+    pub limit_fallback_download: LimitFallback,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +111,8 @@ impl std::fmt::Debug for RealityInboundRuntime {
             .field("xhttp_settings", &self.xhttp_settings)
             .field("dest_xver", &self.dest_xver)
             .field("dest_transport", &self.dest_transport)
+            .field("limit_fallback_upload", &self.limit_fallback_upload)
+            .field("limit_fallback_download", &self.limit_fallback_download)
             .finish()
     }
 }
@@ -319,6 +324,8 @@ struct RealityMergeKey {
     xhttp_path: Option<String>,
     xhttp_host: Option<String>,
     xhttp_mode: Option<String>,
+    limit_fallback_upload: LimitFallback,
+    limit_fallback_download: LimitFallback,
 }
 
 struct ParsedRealityInbound {
@@ -333,6 +340,8 @@ struct ParsedRealityInbound {
     xhttp_settings: Option<XHttpSettings>,
     dest_xver: u8,
     dest_transport: crate::reality::RealityDestTransport,
+    limit_fallback_upload: LimitFallback,
+    limit_fallback_download: LimitFallback,
 }
 
 fn parse_reality_inbound_for_merge(
@@ -421,6 +430,8 @@ fn parse_reality_inbound_for_merge(
             xhttp_mode: xhttp_settings
                 .as_ref()
                 .map(|settings| settings.effective_mode().to_ascii_lowercase()),
+            limit_fallback_upload: settings.limit_fallback_upload,
+            limit_fallback_download: settings.limit_fallback_download,
         },
         server_names: reality_server_names(settings)?,
         short_ids: reality_short_ids(settings)?,
@@ -430,6 +441,8 @@ fn parse_reality_inbound_for_merge(
         xhttp_settings,
         dest_xver: reality_dest_xver(settings)?,
         dest_transport: reality_dest_transport(settings),
+        limit_fallback_upload: settings.limit_fallback_upload,
+        limit_fallback_download: settings.limit_fallback_download,
     })
 }
 
@@ -545,6 +558,8 @@ fn build_reality_inbound_runtime_from_group(
         xhttp_settings: primary.xhttp_settings.clone(),
         dest_xver: primary.dest_xver,
         dest_transport: primary.dest_transport,
+        limit_fallback_upload: primary.limit_fallback_upload,
+        limit_fallback_download: primary.limit_fallback_download,
     })
 }
 

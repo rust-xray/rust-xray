@@ -1,4 +1,6 @@
-use crate::config::{InboundTransportConfig, RealityServerConfig, VlessRealityInbound, VlessUser};
+use crate::config::{
+    InboundTransportConfig, LimitFallback, RealityServerConfig, VlessRealityInbound, VlessUser,
+};
 use crate::reality::{
     post_handshake_probe_cache, PostHandshakeProbeCache, PostHandshakeProbeKey,
     PostHandshakeProbeState, RealityAlpnProfile, RealityDestTransport,
@@ -27,6 +29,8 @@ fn probe_inbound(dest: &str, server_names: &[&str]) -> VlessRealityInbound {
             decryption: "none".to_string(),
             dest_xver: 0,
             dest_transport: RealityDestTransport::Tcp,
+            limit_fallback_upload: LimitFallback::default(),
+            limit_fallback_download: LimitFallback::default(),
         },
     }
 }

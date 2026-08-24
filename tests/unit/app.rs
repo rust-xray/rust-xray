@@ -84,6 +84,39 @@ fn runtime_config_from_xray_builds_vless_clients() {
 }
 
 #[test]
+fn runtime_listener_merge_keeps_different_fallback_limits_separate() {
+    let mut xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
+    let mut upload_limited = xray.inbounds[0].clone();
+    upload_limited.tag = Some("upload-limited".to_string());
+    upload_limited
+        .stream_settings
+        .as_mut()
+        .expect("stream settings")
+        .reality_settings
+        .as_mut()
+        .expect("reality settings")
+        .limit_fallback_upload
+        .bytes_per_sec = 100;
+
+    let mut download_limited = xray.inbounds[0].clone();
+    download_limited.tag = Some("download-limited".to_string());
+    download_limited
+        .stream_settings
+        .as_mut()
+        .expect("stream settings")
+        .reality_settings
+        .as_mut()
+        .expect("reality settings")
+        .limit_fallback_download
+        .after_bytes = 1;
+
+    xray.inbounds.extend([upload_limited, download_limited]);
+    let runtime = load_runtime_config(&xray, Arc::new(StatsRegistry::new()))
+        .expect("build listener runtimes");
+    assert_eq!(runtime.inbounds.len(), 3);
+}
+
+#[test]
 fn runtime_config_uses_normalized_raw_tcp_transport() {
     let xray: XrayConfig = serde_json::from_str(&vless_reality_config_with_network_and_flow(
         "tcp",

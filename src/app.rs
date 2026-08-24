@@ -21,7 +21,7 @@ use crate::dns::DnsEngine;
 use crate::mux::MuxSessionTrace;
 use crate::outbound::{log_dns_outbounds, OutboundConnectRuntime};
 use crate::protocol::structs::ClientHelloPayload;
-use crate::proxy::relay_fallback_with_xver;
+use crate::proxy::{relay_fallback_with_options, FallbackRelayOptions};
 use crate::reality::{
     handle_accepted_reality_client_traced, inspect_reality_client_hello,
     start_reality_post_handshake_probes, RealityDecision, RealityInspectConfig,
@@ -220,11 +220,15 @@ async fn relay_vless_fallback_with_log(
         "VLESS fallback target selected"
     );
 
-    relay_fallback_with_xver(
+    relay_fallback_with_options(
         client,
         &dest_addr,
         initial_client_bytes,
-        xver,
+        FallbackRelayOptions::with_reality_limits(
+            xver,
+            config.inbound.reality.limit_fallback_upload,
+            config.inbound.reality.limit_fallback_download,
+        ),
         stats.as_ref(),
     )
     .await
@@ -529,7 +533,7 @@ fn normalized_reality_merge_key(inbound: &VlessRealityInbound) -> String {
         }
     };
     format!(
-        "listen={}|private_key={}|dest={}|decryption={}|max_time_diff={}|min={}|max={}|show={}|mldsa={:?}|transport={}",
+        "listen={}|private_key={}|dest={}|decryption={}|max_time_diff={}|min={}|max={}|show={}|mldsa={:?}|transport={}|upload_limit={:?}|download_limit={:?}",
         inbound.listen_addr,
         inbound.reality.private_key,
         inbound.reality.dest_addr,
@@ -539,7 +543,9 @@ fn normalized_reality_merge_key(inbound: &VlessRealityInbound) -> String {
         inbound.reality.max_client_ver.as_deref().unwrap_or(""),
         inbound.reality.show,
         inbound.reality.mldsa65_seed,
-        transport_key
+        transport_key,
+        inbound.reality.limit_fallback_upload,
+        inbound.reality.limit_fallback_download,
     )
 }
 

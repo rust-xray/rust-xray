@@ -1490,7 +1490,7 @@ fn ignores_client_only_mldsa65_verify_on_inbound_reality_settings() {
 }
 
 #[test]
-fn rejects_limit_fallback_upload_at_startup() {
+fn accepts_limit_fallback_upload_at_startup() {
     let config = vless_reality_config_from_reality_json(serde_json::json!({
         "dest": "example.com:443",
         "serverNames": ["example.com"],
@@ -1502,15 +1502,15 @@ fn rejects_limit_fallback_upload_at_startup() {
             "burstBytesPerSec": 200
         }
     }));
-    let err = first_reality_inbound_runtime(&config).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-    assert!(err
-        .to_string()
-        .contains("realitySettings.limitFallbackUpload"));
+    let runtime = first_reality_inbound_runtime(&config).expect("runtime config");
+    assert_eq!(runtime.limit_fallback_upload.after_bytes, 1024);
+    assert_eq!(runtime.limit_fallback_upload.bytes_per_sec, 100);
+    assert_eq!(runtime.limit_fallback_upload.burst_bytes_per_sec, 200);
+    assert!(runtime.limit_fallback_download.is_disabled());
 }
 
 #[test]
-fn rejects_limit_fallback_download_at_startup() {
+fn accepts_limit_fallback_download_at_startup() {
     let config = vless_reality_config_from_reality_json(serde_json::json!({
         "dest": "example.com:443",
         "serverNames": ["example.com"],
@@ -1522,11 +1522,139 @@ fn rejects_limit_fallback_download_at_startup() {
             "burstBytesPerSec": 100
         }
     }));
-    let err = first_reality_inbound_runtime(&config).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-    assert!(err
-        .to_string()
-        .contains("realitySettings.limitFallbackDownload"));
+    let runtime = first_reality_inbound_runtime(&config).expect("runtime config");
+    assert_eq!(runtime.limit_fallback_download.after_bytes, 2048);
+    assert_eq!(runtime.limit_fallback_download.bytes_per_sec, 50);
+    assert!(runtime.limit_fallback_upload.is_disabled());
+}
+
+#[test]
+fn limit_fallback_defaults_and_partial_objects_parse() {
+    let base = || {
+        vless_reality_config_from_reality_json(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": TEST_REALITY_PRIVATE_KEY,
+            "shortIds": [""]
+        }))
+    };
+    let runtime = first_reality_inbound_runtime(&base()).expect("defaults");
+    assert!(runtime.limit_fallback_upload.is_disabled());
+    assert!(runtime.limit_fallback_download.is_disabled());
+
+    let config = vless_reality_config_from_reality_json(serde_json::json!({
+        "dest": "example.com:443",
+        "serverNames": ["example.com"],
+        "privateKey": TEST_REALITY_PRIVATE_KEY,
+        "shortIds": [""],
+        "limitFallbackUpload": {}
+    }));
+    let runtime = first_reality_inbound_runtime(&config).expect("empty upload object");
+    assert!(runtime.limit_fallback_upload.is_disabled());
+
+    let config = vless_reality_config_from_reality_json(serde_json::json!({
+        "dest": "example.com:443",
+        "serverNames": ["example.com"],
+        "privateKey": TEST_REALITY_PRIVATE_KEY,
+        "shortIds": [""],
+        "limitFallbackUpload": { "bytesPerSec": 100_000 }
+    }));
+    let runtime = first_reality_inbound_runtime(&config).expect("partial upload");
+    assert_eq!(runtime.limit_fallback_upload.bytes_per_sec, 100_000);
+}
+
+#[test]
+fn limit_fallback_accepts_both_directions_and_u64_edges() {
+    let config = vless_reality_config_from_reality_json(serde_json::json!({
+        "dest": "example.com:443",
+        "serverNames": ["example.com"],
+        "privateKey": TEST_REALITY_PRIVATE_KEY,
+        "shortIds": [""],
+        "limitFallbackUpload": {
+            "afterBytes": u64::MAX,
+            "bytesPerSec": 0,
+            "burstBytesPerSec": u64::MAX
+        },
+        "limitFallbackDownload": {
+            "afterBytes": u64::MAX,
+            "bytesPerSec": u64::MAX,
+            "burstBytesPerSec": u64::MAX
+        }
+    }));
+    let runtime = first_reality_inbound_runtime(&config).expect("u64 edge config");
+
+    assert_eq!(runtime.limit_fallback_upload.after_bytes, u64::MAX);
+    assert_eq!(runtime.limit_fallback_upload.burst_bytes_per_sec, u64::MAX);
+    assert!(runtime.limit_fallback_upload.is_disabled());
+    assert_eq!(runtime.limit_fallback_download.after_bytes, u64::MAX);
+    assert_eq!(runtime.limit_fallback_download.bytes_per_sec, u64::MAX);
+    assert_eq!(
+        runtime.limit_fallback_download.burst_bytes_per_sec,
+        u64::MAX
+    );
+}
+
+#[test]
+fn limit_fallback_rejects_malformed_and_negative_values() {
+    let malformed = serde_json::from_value::<XrayConfig>(serde_json::json!({
+        "inbounds": [{
+            "port": 443,
+            "protocol": "vless",
+            "settings": { "clients": [{"id": "00000000-0000-0000-0000-000000000001"}], "decryption": "none" },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "dest": "example.com:443",
+                    "serverNames": ["example.com"],
+                    "privateKey": TEST_REALITY_PRIVATE_KEY,
+                    "shortIds": [""],
+                    "limitFallbackUpload": { "bytesPerSec": "fast" }
+                }
+            }
+        }]
+    }));
+    assert!(malformed.is_err());
+
+    let negative = serde_json::from_value::<XrayConfig>(serde_json::json!({
+        "inbounds": [{
+            "port": 443,
+            "protocol": "vless",
+            "settings": { "clients": [{"id": "00000000-0000-0000-0000-000000000001"}], "decryption": "none" },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "dest": "example.com:443",
+                    "serverNames": ["example.com"],
+                    "privateKey": TEST_REALITY_PRIVATE_KEY,
+                    "shortIds": [""],
+                    "limitFallbackUpload": { "bytesPerSec": -1 }
+                }
+            }
+        }]
+    }));
+    assert!(negative.is_err());
+}
+
+#[test]
+fn differing_limit_fallback_configs_do_not_merge() {
+    let make = |upload_bytes_per_sec: u64| {
+        vless_reality_config_from_reality_json(serde_json::json!({
+            "dest": "example.com:443",
+            "serverNames": ["example.com"],
+            "privateKey": TEST_REALITY_PRIVATE_KEY,
+            "shortIds": [""],
+            "limitFallbackUpload": { "bytesPerSec": upload_bytes_per_sec }
+        }))
+    };
+    let mut config = make(100);
+    config
+        .inbounds
+        .push(make(200).inbounds.into_iter().next().unwrap());
+    config.inbounds[1].tag = Some("reality-in-2".to_string());
+    let runtimes = reality_inbound_runtimes(&config).expect("runtimes");
+    assert_eq!(runtimes.len(), 2);
 }
 
 #[test]
@@ -1817,6 +1945,8 @@ fn reality_inbound_runtime_debug_does_not_expose_secrets() {
         xhttp_settings: None,
         dest_xver: 0,
         dest_transport: crate::reality::RealityDestTransport::Tcp,
+        limit_fallback_upload: LimitFallback::default(),
+        limit_fallback_download: LimitFallback::default(),
     };
     let debug = format!("{runtime:?}");
 

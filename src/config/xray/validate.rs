@@ -68,20 +68,6 @@ pub fn validate_reality_inbound_config_policy(
     stream: &StreamSettingsObject,
     settings: &RealitySettingsObject,
 ) -> std::io::Result<()> {
-    if settings.limit_fallback_upload.is_some() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "realitySettings.limitFallbackUpload is not supported",
-        ));
-    }
-
-    if settings.limit_fallback_download.is_some() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "realitySettings.limitFallbackDownload is not supported",
-        ));
-    }
-
     for field in REALITY_CLIENT_ONLY_INBOUND_FIELDS {
         if settings.extra.contains_key(*field) {
             warn!(

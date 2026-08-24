@@ -7,8 +7,8 @@ use crate::config::xray::{
     inbound_vless_settings, is_vless_reality_inbound, reality_dest_addr, reality_dest_transport,
     reality_dest_xver, reality_mldsa65_seed, reality_private_key, reality_server_names,
     reality_short_ids, resolve_api_listen, validate_reality_inbound_config_policy, ApiListenSource,
-    ApiTlsMaterial, InboundObject, OutboundObject, RealityInboundRuntime, RoutingRuleObject,
-    TransportNetwork, XHttpSettings, XrayConfig,
+    ApiTlsMaterial, InboundObject, LimitFallback, OutboundObject, RealityInboundRuntime,
+    RoutingRuleObject, TransportNetwork, XHttpSettings, XrayConfig,
 };
 use crate::dns::{DnsConfig, DnsServerConfig, QueryStrategy};
 use crate::reality::MLDSA65_SEED_LEN;
@@ -96,6 +96,8 @@ pub struct RealityServerConfig {
     pub decryption: String,
     pub dest_xver: u8,
     pub dest_transport: crate::reality::RealityDestTransport,
+    pub limit_fallback_upload: LimitFallback,
+    pub limit_fallback_download: LimitFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,6 +339,8 @@ pub fn normalize_vless_reality_inbound(
             decryption,
             dest_xver: reality_dest_xver(settings)?,
             dest_transport: reality_dest_transport(settings),
+            limit_fallback_upload: settings.limit_fallback_upload,
+            limit_fallback_download: settings.limit_fallback_download,
         },
         fallbacks,
     })
@@ -460,6 +464,8 @@ pub fn vless_reality_matches_runtime(
         && normalized.reality.decryption == runtime.vless_decryption
         && normalized.reality.dest_xver == runtime.dest_xver
         && normalized.reality.dest_transport == runtime.dest_transport
+        && normalized.reality.limit_fallback_upload == runtime.limit_fallback_upload
+        && normalized.reality.limit_fallback_download == runtime.limit_fallback_download
         && normalized.fallbacks == runtime.vless_fallbacks
         && normalized.users.len() == runtime.vless_clients.len()
         && transport_matches_runtime(&normalized.transport, runtime)

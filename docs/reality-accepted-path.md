@@ -201,7 +201,8 @@ Live matrix remains `scripts/live_reality_smoke/run-live-smoke.sh` unchanged.
 - **Vision splice / zero-copy** beyond DIRECT MVP
 - **`mldsa65Seed`** — experimental runtime baseline when configured ([baseline doc](./reality-mldsa65-runtime-baseline.md))
 - **X25519MLKEM768 on REALITY accepted TLS path** — Stage 2 implements **pre-auth carrier parsing only** (`src/reality/key_share.rs`): ClientHello group `0x11EC` with 1216-byte `key_exchange` (1184-byte opaque ML-KEM prefix + 32-byte X25519) may supply the REALITY auth X25519 public key when no valid standalone `X25519` entry exists. Upstream two-pass selection: standalone `X25519`/32 first, then hybrid trailing 32 bytes. **Not yet:** ML-KEM-768 crypto, hybrid ServerHello generation, 64-byte TLS shared secret, dest ServerHello group mirroring (`src/reality/tls13/key_share.rs` remains X25519-only).
-- **Fallback limits** — `limitFallbackUpload` / `limitFallbackDownload`
+- **Fallback limits** — `limitFallbackUpload` / `limitFallbackDownload` on the pre-auth fallback
+  relay; no `MirrorConn` timing or `s2cSaved` prebuffer parity
 - **TLS 1.3 CCM cipher suites** (0x1304, 0x1305) — rejected on accepted path
 
 ### Current decision flow (simplified)
@@ -261,7 +262,7 @@ Remaining work (roughly by dependency):
 2. **Dest handshake shape sampling** — record timing/length behavior beyond ServerHello observation.
 3. **Vision splice / zero-copy** — beyond DIRECT MVP padding relay.
 4. **ML-KEM / X25519MLKEM768 TLS negotiation** — Stage 2: pre-auth hybrid `key_share` carrier parsing only; accepted-path TLS 1.3 KEX remains X25519-only (Stage 3+).
-5. **Fallback rate limits** — `limitFallbackUpload` / `limitFallbackDownload`.
+5. **Fallback parity refinements** — `MirrorConn` timing and `s2cSaved` prebuffer behavior.
 
 ## Required implementation blocks
 
@@ -295,10 +296,12 @@ After TLS handshake completes, `RealityTls13ApplicationStream` is passed to
 `run_inbound_transport` (raw TCP or XHTTP). VLESS auth and freedom relay run on
 the decrypted application stream.
 
-### D. Fallback (unchanged semantics)
+### D. Fallback
 
 - Invalid / non-REALITY clients → transparent TCP relay to `dest` with initial
   bytes already read (current `relay_fallback` behavior)
+- Optional `limitFallbackUpload` / `limitFallbackDownload` applies only after the
+  initial bytes; accepted REALITY traffic never enters this relay
 - Must **not** regress: accepted validation failure after mirror phase should
   still behave like upstream transparent fallback where applicable
 

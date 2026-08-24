@@ -272,3 +272,24 @@ fn remnawave_routing_api_normalizes() {
         Some("api")
     );
 }
+
+#[test]
+fn normalized_runtime_limit_fallback_parity() {
+    let mut json = vless_reality_json("raw", false);
+    json = json.replace(
+        r#""shortIds": [""]"#,
+        r#""shortIds": [""], "limitFallbackUpload": {"afterBytes": 4096, "bytesPerSec": 8192, "burstBytesPerSec": 16384}, "limitFallbackDownload": {"bytesPerSec": 1024}"#,
+    );
+    let config: XrayConfig = serde_json::from_str(&json).unwrap();
+    validate_xray_panel_config(&config).unwrap();
+    let normalized = normalize_config(&config).unwrap();
+    let NormalizedInbound::VlessReality(inbound) = &normalized.inbounds[0] else {
+        panic!("expected VlessReality inbound");
+    };
+    assert_eq!(inbound.reality.limit_fallback_upload.after_bytes, 4096);
+    assert_eq!(inbound.reality.limit_fallback_upload.bytes_per_sec, 8192);
+    assert_eq!(inbound.reality.limit_fallback_download.bytes_per_sec, 1024);
+
+    let runtime = first_reality_inbound_runtime(&config).unwrap();
+    assert!(vless_reality_matches_runtime(inbound, &runtime));
+}

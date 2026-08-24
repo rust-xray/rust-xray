@@ -5,6 +5,8 @@ use crate::vless::FallbackConfig;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::LimitFallback;
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct LogConfig {
     pub loglevel: Option<String>,
@@ -267,11 +269,11 @@ pub struct RealitySettingsObject {
     #[serde(rename = "mldsa65Seed")]
     pub mldsa65_seed: Option<String>,
 
-    #[serde(rename = "limitFallbackUpload")]
-    pub limit_fallback_upload: Option<Value>,
+    #[serde(rename = "limitFallbackUpload", default)]
+    pub limit_fallback_upload: LimitFallback,
 
-    #[serde(rename = "limitFallbackDownload")]
-    pub limit_fallback_download: Option<Value>,
+    #[serde(rename = "limitFallbackDownload", default)]
+    pub limit_fallback_download: LimitFallback,
 
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,

@@ -1,6 +1,7 @@
 //! Xray / Remnawave panel JSON config parsing and validation.
 
 pub mod api;
+mod limit_fallback;
 pub mod load;
 pub mod raw;
 pub mod reality;
@@ -10,6 +11,7 @@ pub mod validate;
 pub mod xhttp;
 
 pub use api::*;
+pub use limit_fallback::LimitFallback;
 pub use load::*;
 pub use raw::*;
 pub use reality::*;
