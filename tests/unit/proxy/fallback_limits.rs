@@ -96,7 +96,18 @@ async fn bind_echo_target() -> (String, tokio::task::JoinHandle<()>) {
 
 fn test_stats_setup() -> (StatsSession, Arc<StatsRegistry>) {
     let registry = Arc::new(StatsRegistry::new());
-    let xray: XrayConfig = serde_json::from_str(r#"{"stats": {}}"#).expect("parse stats config");
+    let xray: XrayConfig = serde_json::from_str(
+        r#"{
+            "stats": {},
+            "policy": {
+                "system": {
+                    "statsInboundUplink": true,
+                    "statsInboundDownlink": true
+                }
+            }
+        }"#,
+    )
+    .expect("parse stats config");
     let state = StatsState::from_xray_config_with_registry(
         &xray,
         Arc::clone(&registry),

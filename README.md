@@ -31,10 +31,28 @@ matrix. Short version:
 - REALITY accepted-path cipher suites: AES128-GCM, AES256-GCM, ChaCha20-Poly1305
 - VLESS fallback: default, SNI/name, HTTP path, ALPN (`http/1.1`, `h2`), PROXY v1/v2 (`xver=1|2`)
 - Network aliases: `raw`, legacy `tcp`, and experimental `xhttp` / `splithttp`
-- Basic Remnawave/Xray gRPC API: `StatsService` (`QueryStats`, `GetStats`, `GetSysStats`) when `api` block is present
+- **Xray gRPC API (Stages 8A–8E3):** when `api` block is present — `ReflectionService` (optional), `StatsService`, `HandlerService`, `RoutingService`, `LoggerService`. Not full Xray API parity yet (see below).
+- **Routing / balancers (Stage 8E2):** `RuntimeRouter` executes static + dynamic rules on VLESS TCP dispatch; `DomainStrategy` (`AsIs`, `IpOnDemand`, `IpIfNonMatch`); GeoSite/GeoIP; protocol sniff matcher; webhook rules; balancers (`random`, `roundRobin`, `leastPing`, `leastLoad` algorithms). Live Observatory health for `leastPing`/`leastLoad` pending Stage 8E4.
+- **HandlerService (Stage 8E1):** dynamic inbound/outbound CRUD, user add/remove, list/get operations for supported VLESS+REALITY / freedom / blackhole types; merged logical inbound auth identity.
+- **LoggerService (Stage 8E3):** `RestartLogger` runtime-backed; reopens configured error/access file sinks after external rotation. General logging config gaps remain (`dnsLog`, `maskAddress`, JSON `loglevel` mapping — see compatibility doc).
 
 Accepted path **does not fallback** on failure — handshake/VLESS errors close the
 connection.
+
+### Xray gRPC API status (Stages 8A–8E3)
+
+| Service | Status |
+|---------|--------|
+| API foundation (`api.listen`, reflection, shared runtime) | Implemented |
+| `StatsService` | Implemented |
+| `HandlerService` | Implemented |
+| `RoutingService` | Implemented |
+| `LoggerService` | Implemented |
+| `ObservatoryService` | Not yet implemented |
+
+This is **not** full Xray API compatibility closure. Remaining API work includes
+legacy `v2ray.core.*` aliases, exact `api.tag` / `services` semantics, and
+Remna unix-abstract E2E (Stages 8D–8E5).
 
 ### Experimental
 
@@ -52,7 +70,7 @@ connection.
 
 - Mux.Cool frame parser and single TCP substream (no parallel substreams)
 - Mux UDP DNS for **domain** `:53` targets (resolver hook not wired)
-- Remnawave-style configs: load + REALITY inbound + API; routing/rules/balancers not executed
+- Remnawave / panel configs: load + REALITY inbound + API + routing execution for supported conditions; RemnaNode unix-abstract E2E pending Stage 8D
 
 ### Not yet implemented
 
@@ -60,7 +78,9 @@ connection.
 - VLESS `command=Udp` (non-Mux)
 - REALITY over gRPC / WebSocket transport runtime (rejected at startup when `security: reality`)
 - **ML-KEM-768 cryptography** and **TLS 1.3 negotiated X25519MLKEM768** on the REALITY accepted path (hybrid ServerHello, 64-byte shared secret, dest group mirroring — Stage 3+; pre-auth hybrid **carrier parsing only** in Stage 2)
-- Full routing, balancers, outbound ecosystem, DoH, Vision splice/zero-copy beyond DIRECT MVP
+- Full outbound ecosystem beyond freedom/blackhole, DoH, Vision splice/zero-copy beyond DIRECT MVP
+- **ObservatoryService** and live outbound health for balancer strategies (Stage 8E4)
+- Legacy `v2ray.core.*` API aliases and final API config closure (Stage 8E5)
 - REALITY post-handshake **Stage 5C** extras: `GlobalMaxCSSMsgCount`, alert-driven CCS probe paths
 - REALITY probe **exact uTLS ClientHello fingerprint** parity (`HelloGolang` / `HelloChrome_Auto`) — probes use rustls (**partial** parity; Stage 5B record-length + Stage 5C extra-CCS tolerance probing only)
 - REALITY session resumption on accepted path
@@ -104,7 +124,7 @@ Details: **[scripts/live_reality_smoke/README.md](scripts/live_reality_smoke/REA
 ### Remaining gaps (see compatibility doc)
 
 - Full Mux.Cool runtime; generic UDP over Mux; domain `:53` mux resolver; XUDP
-- VLESS `command=Udp` (non-Mux); full routing/outbounds
+- VLESS `command=Udp` (non-Mux); unsupported outbound proxy protocols
 - XHTTP `packet-down` / XMUX; Vision over XHTTP; XUDP over XHTTP
 - REALITY over gRPC / WebSocket runtime (rejected at startup)
 - ML-KEM (ML-DSA-65 baseline is experimental — see docs)
@@ -328,7 +348,7 @@ docs/reality-accepted-path.md
 - Accepted path errors do not fallback (see policy matrix above for pre-auth fallback cases).
 - Vision DIRECT MVP only — no full splice/zero-copy beyond padding + DIRECT relay.
 - VLESS Mux: experimental Happ baseline (Vision + Mux + numeric UDP DNS `:53`); full Mux.Cool / generic UDP / XUDP not implemented.
-- VLESS `command=Udp` / XUDP; XHTTP `packet-down` / XMUX; Vision over XHTTP; REALITY over gRPC/WebSocket (rejected at startup); full routing/outbounds not implemented.
+- VLESS `command=Udp` / XUDP; XHTTP `packet-down` / XMUX; Vision over XHTTP; REALITY over gRPC/WebSocket (rejected at startup); unsupported outbound proxy protocols beyond freedom/blackhole.
 - ML-DSA-65 cert signing: experimental baseline when `mldsa65Seed` is set; **ML-KEM-768 crypto and hybrid TLS negotiation not implemented** (Stage 2: pre-auth hybrid `key_share` carrier parsing only)
 - REALITY post-handshake probes use **rustls** ClientHello (not uTLS); fingerprint parity is **partial** for Stage 5B record-length and Stage 5C extra-CCS tolerance probing — see [reality-accepted-path.md](docs/reality-accepted-path.md#stage-5-post-handshake-record-mirroring)
 - TLS 1.3 CCM cipher suites (0x1304, 0x1305) rejected on accepted path.

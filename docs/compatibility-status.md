@@ -45,11 +45,30 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | Fallback `xver=2` PROXY v2 | Working | Live smoke + golden vector |
 | Network alias `raw` / legacy `tcp` | Working | Same REALITY TCP runtime |
 | StatsService API | Working | All seven RPCs when `api` block present; atomic counter reset; OnlineMap refcount; seven policy flags default false until `policy` enables them; online IP from TCP peer through all transports including XHTTP; dynamic users use level policy automatically; `GetSysStats` Go-runtime fields N/A in Rust (Stage 8B) |
+| Xray gRPC API foundation (Stage 8A) | Working | Canonical protobuf/service registration, direct `api.listen`, optional reflection, plaintext default, shared runtime state wiring (`StatsRegistry`, `InboundUserManagers`) |
+| HandlerService (Stage 8E1) | Working | Full current `HandlerService` RPC surface runtime-backed via `RuntimeInboundManager` / `RuntimeOutboundManager`; dynamic VLESS+REALITY inbound, freedom/blackhole outbound; merged logical inbound auth identity; no config file rewrite |
+| RoutingService (Stage 8E2) | Working | All seven RPCs runtime-backed via `RuntimeRouter`; static JSON + dynamic `AddRule`/`RemoveRule`; VLESS TCP dispatch uses same router; webhook rules fire after route selection; GeoSite/GeoIP; balancers (`random`, `roundRobin`, `leastPing`, `leastLoad` algorithms). Live Observatory health for `leastPing`/`leastLoad` pending Stage 8E4 |
+| LoggerService (Stage 8E3) | Working | Canonical `RestartLogger` RPC; runtime-backed sink reopen from in-memory config; file rotation reopen proven via tonic E2E. Legacy `v2ray.core.app.log.command.LoggerService` alias deferred to Stage 8E5 |
+| Outbound routing / rules / balancers | Working | `RuntimeRouter` shared by VLESS data-plane + `RoutingService`; `DomainStrategy` `AsIs` / `IpOnDemand` / `IpIfNonMatch`; GeoSite/GeoIP matchers; webhook; balancer override/fallback. `leastPing`/`leastLoad` selection algorithms work; live health observations pending Observatory (8E4) |
 | DNS engine core (cache, dedup, UDP/TCP) | Working | `DnsEngine` in-process; numeric IP servers; no system resolver on engine path |
 | Mux UDP DNS (Happ baseline) | Working | `DnsEngine` via `resolve_mux_udp_dns`; numeric `:53` (e.g. `1.1.1.1:53`) |
 
 Accepted REALITY clients **do not** fall back on handshake/VLESS failure — the
 connection closes (by design).
+
+### gRPC API services (Stages 8A–8E3)
+
+| Service | Status |
+|---------|--------|
+| `ReflectionService` | Working (optional) |
+| `StatsService` | Working |
+| `HandlerService` | Working |
+| `RoutingService` | Working |
+| `LoggerService` | Working |
+| `ObservatoryService` | Pending (Stage 8E4) |
+
+Full Xray API compatibility closure (legacy aliases, exact config semantics, Remna
+unix-abstract E2E) remains future work (Stages 8D–8E5).
 
 ---
 
@@ -79,18 +98,15 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Xray gRPC API foundation (Stage 8A) | Working | Canonical protobuf/service registration, direct `api.listen`, optional reflection, plaintext default, shared runtime state wiring (`StatsRegistry`, `InboundUserManagers`) |
-| HandlerService (Stage 8E1) | Working | Full current `HandlerService` RPC surface: `AddInbound`, `RemoveInbound`, `AlterInbound`, `ListInbounds` (tags + full config), `GetInboundUsers`, `GetInboundUsersCount`, `AddOutbound`, `RemoveOutbound`, `AlterOutbound` (upstream-style failure for unknown ops), `ListOutbounds`. Runtime-backed via `RuntimeInboundManager` / `RuntimeOutboundManager`; dynamic VLESS+REALITY inbound, freedom/blackhole outbound; no `UNIMPLEMENTED` stubs. Unsupported Xray proxy protocols still rejected deterministically. Dynamic changes are runtime-only (no config file rewrite). |
-| RoutingService (Stage 8E2) | Working | All seven RPCs runtime-backed via `RuntimeRouter`; static JSON + dynamic `AddRule`/`RemoveRule` share one rule table; VLESS TCP dispatch uses same router; routing stats channel opt-in (disabled at startup like upstream `nil` registration). Webhook rules fire after route selection (non-blocking HTTP POST, headers, dedup, cleanup on RemoveRule/replace/shutdown). `RouteContext.protocol` is sniffed payload content (`tls`/`http`/empty), not inbound proxy protocol. Unsupported: attributes production extraction (no sniff/dispatcher metadata), remote-client process identity, IpOnDemand second-pass DNS, observatory-aware balancer health. Canonical protobuf `local_os` (field 23) compiled for `AddRule`/TestRoute; JSON `localOS` alias also supported. |
-| LoggerService (Stage 8E3) | Working | Canonical `RestartLogger` RPC on `xray.app.log.command.LoggerService`; runtime-backed `RuntimeLoggerController` closes then reopens configured error/access outputs from in-memory config (no config file reload). File rotation reopen proven via tonic E2E. Legacy `v2ray.core.app.log.command.LoggerService` alias deferred to Stage 8E5. |
 | RemnaNode 3.3.2 E2E (Stage 8D) | Partial | StatsService parity implemented; unix-abstract API tunnel integration pending Stage 8D |
 | Mux.Cool frame parser | Partial | `New` / `Keep` / `End` / `KeepAlive`; TCP and UDP frame metadata parsed |
 | Mux TCP substream | Partial | Single active TCP substream to freedom outbound (no parallel substreams) |
 | Mux UDP DNS (domain `:53`) | Partial | Domain `:53` mux targets still closed (numeric IP DNS works) |
-| Outbound routing / rules / balancers | **Working (Stage 8E2)** | `RuntimeRouter` shared by VLESS data-plane + `RoutingService`; static + dynamic rules; balancers (random/roundRobin/leastPing/leastLoad selection); `TestRoute`, `AddRule`, `RemoveRule`, `ListRule`, `GetBalancerInfo`, `OverrideBalancerTarget`; `SubscribeRoutingStats` when routing stats channel enabled (disabled by default, matching upstream nil registration) |
-| Remnawave / panel configs | Partial | Config load + API + REALITY inbound + routing rule execution for supported conditions; geosite/geoip/process unsupported; attributes/process production metadata absent |
+| Remnawave / panel configs | Partial | Config load + API + REALITY inbound + routing execution for supported conditions; Remna unix-abstract E2E pending |
+| Routing rule metadata gaps | Partial | `attributes`: rule compiler + `TestRoute` supported; production extraction from sniff/dispatcher not implemented. `process`: matcher/`TestRoute` supported; remote VLESS clients have no local process identity |
 | DNS engine — DoH / hostname servers | Partial | `https://` parsed; queries return explicit unsupported |
 | DNS engine — `protocol: "dns"` outbound | Partial | Config tolerated; placeholder only (see [dns-future.md](./dns-future.md)) |
+| General logging config | Partial | `LoggerService.RestartLogger` works for supported sinks; `dnsLog` behavior, `maskAddress`, and JSON `loglevel` → filter mapping incomplete |
 
 ---
 
@@ -104,7 +120,7 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | XUDP | Not implemented |
 | Full UDP mux relay (all destinations / parallel substreams) | Not implemented |
 | DNS UDP relay inside Mux (domain names without resolver) | Not implemented |
-| Full routing / rules / balancers | Partial | Core routing + balancers via `RuntimeRouter`; geosite/geoip and observatory strategies not implemented |
+| ObservatoryService / live outbound health | Not implemented (Stage 8E4) |
 | Full outbound ecosystem | Not implemented |
 | FakeDNS | Not implemented |
 | DNS inbound / dokodemo-door hijack | Not implemented |
@@ -120,6 +136,8 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | REALITY session resumption on accepted path | Not implemented |
 | ML-KEM / hybrid KEM on REALITY **accepted TLS handshake** | Not implemented | Stage 2 adds **pre-auth only**: parse `X25519MLKEM768` ClientHello `key_share` (1216 B) and extract trailing X25519 for REALITY auth. **Not yet:** ML-KEM-768 encaps/decaps, hybrid ServerHello, 64-byte TLS shared secret, dest `key_share` mirroring. See [design doc](./reality-mlkem-design.md). |
 | Full Xray-core drop-in compatibility | Not implemented |
+| Legacy `v2ray.core.*` API service aliases | Not implemented (Stage 8E5) |
+| Final API config compatibility closure | Not implemented (Stage 8E5) |
 
 **DNS clarification:** Built-in `DnsEngine` serves Mux UDP DNS and optional freedom
 outbound resolve (`UseIP` / `UseIPv4` / `UseIPv6`). It does **not** replace full Xray DNS
@@ -161,10 +179,11 @@ mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`).
 
 ## Next Milestone
 
-1. **Domain `:53` mux destinations** — resolver hook without claiming full DNS module.
-2. **Generic UDP over Mux** — beyond port-53 DNS baseline.
-3. **Full Mux.Cool runtime** — parallel substreams, complete frame lifecycle.
-4. Keep REALITY/Vision/fallback/API/Happ-baseline smoke green (`aes_gcm_decrypt_failed=0`, ML-DSA-65 baseline).
+1. **Stage 8E4 — ObservatoryService** — live outbound health provider for `leastPing` / `leastLoad` balancers.
+2. **Domain `:53` mux destinations** — resolver hook without claiming full DNS module.
+3. **Generic UDP over Mux** — beyond port-53 DNS baseline.
+4. **Full Mux.Cool runtime** — parallel substreams, complete frame lifecycle.
+5. Keep REALITY/Vision/fallback/API/Happ-baseline smoke green (`aes_gcm_decrypt_failed=0`, ML-DSA-65 baseline).
 
 ---
 
