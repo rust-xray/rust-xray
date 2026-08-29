@@ -324,6 +324,13 @@ fn random_index(len: usize) -> usize {
     u64::from_le_bytes(bytes) as usize % len
 }
 
+pub fn balancer_requires_observatory(strategy: BalancerStrategy, fallback_tag: &str) -> bool {
+    match strategy {
+        BalancerStrategy::LeastPing | BalancerStrategy::LeastLoad => true,
+        BalancerStrategy::Random | BalancerStrategy::RoundRobin => !fallback_tag.is_empty(),
+    }
+}
+
 pub fn parse_strategy(raw: &str) -> Result<BalancerStrategy, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "" | "random" => Ok(BalancerStrategy::Random),

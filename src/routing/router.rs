@@ -28,7 +28,7 @@ pub struct RuntimeRouter {
     geodata: GeodataCache,
     domain_strategy: DomainStrategy,
     stats: Option<Arc<RoutingStatsChannel>>,
-    health: SharedHealthProvider,
+    observatory_health: Option<SharedHealthProvider>,
     mutation_lock: Mutex<()>,
 }
 
@@ -38,7 +38,7 @@ impl RuntimeRouter {
         outbound: Arc<RuntimeOutboundManager>,
         dns: Arc<DnsEngine>,
         enable_routing_stats: bool,
-        health: Option<SharedHealthProvider>,
+        observatory_health: Option<SharedHealthProvider>,
     ) -> Result<Arc<Self>, RouteError> {
         let resolver: Arc<dyn TargetResolver> = dns.clone();
         Self::new_with_resolver(
@@ -47,7 +47,7 @@ impl RuntimeRouter {
             dns,
             resolver,
             enable_routing_stats,
-            health,
+            observatory_health,
         )
     }
 
@@ -57,13 +57,14 @@ impl RuntimeRouter {
         dns: Arc<DnsEngine>,
         resolver: Arc<dyn TargetResolver>,
         enable_routing_stats: bool,
-        health: Option<SharedHealthProvider>,
+        observatory_health: Option<SharedHealthProvider>,
     ) -> Result<Arc<Self>, RouteError> {
         let geodata = GeodataCache::default();
-        let health =
-            health.unwrap_or_else(|| Arc::new(crate::routing::health::NoOutboundHealthProvider));
-        let compiler =
-            RuleCompiler::with_health(Arc::clone(&outbound), geodata.clone(), Arc::clone(&health));
+        let compiler = RuleCompiler::with_observatory_health(
+            Arc::clone(&outbound),
+            geodata.clone(),
+            observatory_health.clone(),
+        );
         let table = compiler.compile_startup_table(routing)?;
         let domain_strategy = routing
             .and_then(|routing| routing.domain_strategy.as_deref())
@@ -77,7 +78,7 @@ impl RuntimeRouter {
             geodata,
             domain_strategy,
             stats: enable_routing_stats.then(|| Arc::new(RoutingStatsChannel::new())),
-            health,
+            observatory_health,
             mutation_lock: Mutex::new(()),
         }))
     }
@@ -91,7 +92,9 @@ impl RuntimeRouter {
     }
 
     pub fn health_provider(&self) -> SharedHealthProvider {
-        Arc::clone(&self.health)
+        self.observatory_health
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::routing::health::NoOutboundHealthProvider))
     }
 
     pub fn domain_strategy(&self) -> DomainStrategy {
@@ -136,10 +139,10 @@ impl RuntimeRouter {
         let _guard = self.mutation_lock.lock().expect("router mutation lock");
         let decoded = decode_router_config(config)?;
         let current = Arc::clone(&*self.table.read().expect("router table lock"));
-        let compiler = RuleCompiler::with_health(
+        let compiler = RuleCompiler::with_observatory_health(
             Arc::clone(&self.outbound),
             self.geodata.clone(),
-            Arc::clone(&self.health),
+            self.observatory_health.clone(),
         );
         let next = compiler.reload_table(&current, &decoded, should_append)?;
         *self.table.write().expect("router table lock") = Arc::new(next);

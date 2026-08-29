@@ -16,7 +16,8 @@ use crate::api::proto::common::net::Network;
 use crate::api::proto::common::serial::TypedMessage;
 use crate::config::xray::raw::{RoutingConfig, RoutingRuleObject};
 use crate::routing::balancer::{
-    parse_strategy, Balancer, BalancerConfig, BalancerStrategy, LeastLoadConfig, StrategyWeight,
+    balancer_requires_observatory, parse_strategy, Balancer, BalancerConfig, BalancerStrategy,
+    LeastLoadConfig, StrategyWeight,
 };
 use crate::routing::conditions::{
     AttributeMatcher, Condition, ConditionChain, DomainMatcher, InboundTagMatcher, IpMatcher,
@@ -48,20 +49,44 @@ pub struct RouteTable {
 pub struct RuleCompiler {
     geodata: GeodataCache,
     outbound: Arc<RuntimeOutboundManager>,
-    health: crate::routing::health::SharedHealthProvider,
+    observatory_health: Option<crate::routing::health::SharedHealthProvider>,
 }
 
 impl RuleCompiler {
-    pub fn with_health(
+    pub fn with_observatory_health(
         outbound: Arc<RuntimeOutboundManager>,
         geodata: GeodataCache,
-        health: crate::routing::health::SharedHealthProvider,
+        observatory_health: Option<crate::routing::health::SharedHealthProvider>,
     ) -> Self {
         Self {
             geodata,
             outbound,
-            health,
+            observatory_health,
         }
+    }
+
+    fn compile_balancer(&self, config: BalancerConfig) -> Result<Arc<Balancer>, RouteError> {
+        if balancer_requires_observatory(config.strategy, &config.fallback_tag)
+            && self.observatory_health.is_none()
+        {
+            return Err(RouteError::UnresolvedDependencies(
+                "not all dependencies are resolved.".to_string(),
+            ));
+        }
+        let health = if balancer_requires_observatory(config.strategy, &config.fallback_tag) {
+            Some(Arc::clone(
+                self.observatory_health
+                    .as_ref()
+                    .expect("observatory availability checked above"),
+            ))
+        } else {
+            None
+        };
+        Ok(Arc::new(Balancer::new(
+            config,
+            Arc::clone(&self.outbound),
+            health,
+        )))
     }
 
     pub fn compile_startup_table(
@@ -77,14 +102,7 @@ impl RuleCompiler {
                 if balancers.contains_key(&balancer.tag) {
                     return Err(RouteError::DuplicateBalancerTag(balancer.tag.clone()));
                 }
-                balancers.insert(
-                    balancer.tag.clone(),
-                    Arc::new(Balancer::new(
-                        balancer,
-                        Arc::clone(&self.outbound),
-                        Some(Arc::clone(&self.health)),
-                    )),
-                );
+                balancers.insert(balancer.tag.clone(), self.compile_balancer(balancer)?);
             }
 
             for rule in &routing.rules {
@@ -127,14 +145,7 @@ impl RuleCompiler {
             if balancers.contains_key(&compiled.tag) {
                 return Err(RouteError::DuplicateBalancerTag(compiled.tag.clone()));
             }
-            balancers.insert(
-                compiled.tag.clone(),
-                Arc::new(Balancer::new(
-                    compiled,
-                    Arc::clone(&self.outbound),
-                    Some(Arc::clone(&self.health)),
-                )),
-            );
+            balancers.insert(compiled.tag.clone(), self.compile_balancer(compiled)?);
         }
 
         for proto in &config.rule {

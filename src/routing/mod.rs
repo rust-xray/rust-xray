@@ -14,6 +14,7 @@ mod sniff;
 mod stats;
 mod webhook;
 
+pub use balancer::{balancer_requires_observatory, parse_strategy, BalancerStrategy};
 pub use compile::decode_router_config;
 pub use context::{
     NetworkKind, RouteContext, RouteDecision, RouteError, ATTRIBUTE_RUNTIME_SOURCE,

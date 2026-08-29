@@ -41,6 +41,7 @@ fn map_route_error(err: RouteError) -> Status {
         RouteError::DuplicateBalancerTag(_) => Status::invalid_argument("duplicate balancer tag"),
         RouteError::BalancerNotFound(tag) => Status::not_found(format!("cannot find tag {tag}")),
         RouteError::Balancer(message) => Status::internal(message),
+        RouteError::UnresolvedDependencies(message) => Status::invalid_argument(message),
     }
 }
 

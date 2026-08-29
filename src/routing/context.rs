@@ -67,6 +67,8 @@ pub enum RouteError {
     BalancerNotFound(String),
     UnsupportedRule(String),
     Balancer(String),
+    /// Required feature dependency (for example Observatory) is not configured.
+    UnresolvedDependencies(String),
 }
 
 impl std::fmt::Display for RouteError {
@@ -74,6 +76,7 @@ impl std::fmt::Display for RouteError {
         match self {
             Self::NoClue => f.write_str("no clue"),
             Self::InvalidArgument(message) | Self::UnsupportedRule(message) => f.write_str(message),
+            Self::UnresolvedDependencies(message) => f.write_str(message),
             Self::DuplicateRuleTag(tag) => write!(f, "duplicate ruleTag {tag}"),
             Self::DuplicateBalancerTag(_tag) => write!(f, "duplicate balancer tag"),
             Self::BalancerNotFound(tag) => write!(f, "balancer {tag} not found"),
