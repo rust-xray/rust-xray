@@ -1748,6 +1748,8 @@ fn reality_type_and_xver_remain_valid_at_startup() {
         stats: None,
         policy: None,
         routing: None,
+        observatory: None,
+        burst_observatory: None,
         outbounds: Vec::new(),
         inbounds: vec![inbound],
         extra: BTreeMap::new(),

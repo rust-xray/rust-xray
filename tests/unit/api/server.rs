@@ -168,11 +168,11 @@ fn transport_invalid_cert_key_errors() {
 }
 
 #[test]
-fn parse_enabled_services_skips_observatory_but_mounts_stats() {
+fn parse_enabled_services_skips_observatory_when_runtime_missing() {
     let enabled =
         parse_enabled_services(&["ObservatoryService".to_string(), "StatsService".to_string()])
             .expect("parse services");
-    assert_eq!(enabled, vec![ApiService::Stats]);
+    assert_eq!(enabled, vec![ApiService::Observatory, ApiService::Stats]);
 }
 
 fn write_test_tls_pem(cert_path: &std::path::Path, key_path: &std::path::Path) {

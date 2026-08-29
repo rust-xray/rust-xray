@@ -3,6 +3,7 @@
 pub mod api;
 mod limit_fallback;
 pub mod load;
+mod observatory;
 pub mod raw;
 pub mod reality;
 pub mod routing;

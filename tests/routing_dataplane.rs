@@ -306,6 +306,8 @@ mod e2e {
                 domain_strategy: Some("UseIp".to_string()),
                 ..Default::default()
             }),
+            observatory: None,
+            burst_observatory: None,
             outbounds: vec![],
             inbounds: vec![],
             extra: Default::default(),

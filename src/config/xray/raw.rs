@@ -109,6 +109,44 @@ pub struct OutboundObject {
     pub extra: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ObservatoryConfig {
+    #[serde(rename = "subjectSelector", default)]
+    pub subject_selector: Vec<String>,
+    #[serde(rename = "probeURL", default)]
+    pub probe_url: Option<String>,
+    #[serde(rename = "probeInterval", default)]
+    pub probe_interval: Option<String>,
+    #[serde(rename = "enableConcurrency", default)]
+    pub enable_concurrency: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct BurstObservatoryConfig {
+    #[serde(rename = "subjectSelector", default)]
+    pub subject_selector: Vec<String>,
+    #[serde(rename = "pingConfig", default)]
+    pub ping_config: Option<HealthPingJsonConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct HealthPingJsonConfig {
+    #[serde(default)]
+    pub destination: Option<String>,
+    #[serde(default)]
+    pub connectivity: Option<String>,
+    #[serde(default)]
+    pub interval: Option<String>,
+    #[serde(default)]
+    pub sampling: Option<i32>,
+    #[serde(rename = "samplingCount", default)]
+    pub sampling_count: Option<i32>,
+    #[serde(default)]
+    pub timeout: Option<String>,
+    #[serde(rename = "httpMethod", default)]
+    pub http_method: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct XrayConfig {
     pub log: Option<LogConfig>,
@@ -117,6 +155,10 @@ pub struct XrayConfig {
     pub stats: Option<StatsConfig>,
     pub policy: Option<PolicyConfig>,
     pub routing: Option<RoutingConfig>,
+    #[serde(default)]
+    pub observatory: Option<ObservatoryConfig>,
+    #[serde(rename = "burstObservatory", default)]
+    pub burst_observatory: Option<BurstObservatoryConfig>,
 
     #[serde(default)]
     pub outbounds: Vec<OutboundObject>,

@@ -113,6 +113,8 @@ fn least_load_applies_cost_max_rtt_tolerance_baseline_and_expected() {
             health_ping: Some(HealthPingObservation {
                 average: 20_000_000,
                 deviation: 10_000_000,
+                max: 20_000_000,
+                min: 20_000_000,
                 all: 20,
                 fail: 1,
             }),
@@ -124,6 +126,8 @@ fn least_load_applies_cost_max_rtt_tolerance_baseline_and_expected() {
             health_ping: Some(HealthPingObservation {
                 average: 10_000_000,
                 deviation: 6_000_000,
+                max: 10_000_000,
+                min: 10_000_000,
                 all: 20,
                 fail: 1,
             }),
@@ -135,6 +139,8 @@ fn least_load_applies_cost_max_rtt_tolerance_baseline_and_expected() {
             health_ping: Some(HealthPingObservation {
                 average: 5_000_000,
                 deviation: 1_000_000,
+                max: 5_000_000,
+                min: 5_000_000,
                 all: 10,
                 fail: 8,
             }),
@@ -289,6 +295,8 @@ fn least_load_pick_is_member_of_principle_shortlist() {
             health_ping: Some(HealthPingObservation {
                 average: 10_000_000,
                 deviation: 10_000_000,
+                max: 10_000_000,
+                min: 10_000_000,
                 all: 10,
                 fail: 1,
             }),
@@ -300,6 +308,8 @@ fn least_load_pick_is_member_of_principle_shortlist() {
             health_ping: Some(HealthPingObservation {
                 average: 12_000_000,
                 deviation: 10_000_000,
+                max: 12_000_000,
+                min: 12_000_000,
                 all: 10,
                 fail: 1,
             }),

@@ -2,12 +2,16 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthPingObservation {
+    pub all: u32,
+    pub fail: u32,
     /// Nanoseconds, matching Xray observatory HealthPingMeasurement fields.
     pub average: i64,
     /// Nanoseconds, matching Xray observatory HealthPingMeasurement fields.
     pub deviation: i64,
-    pub all: u32,
-    pub fail: u32,
+    /// Nanoseconds, matching Xray observatory HealthPingMeasurement fields.
+    pub max: i64,
+    /// Nanoseconds, matching Xray observatory HealthPingMeasurement fields.
+    pub min: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

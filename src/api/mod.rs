@@ -2,6 +2,7 @@ pub mod client;
 pub mod diagnostics;
 pub mod handler;
 pub mod logger;
+pub mod observatory;
 pub mod proto;
 pub mod routing;
 pub mod server;

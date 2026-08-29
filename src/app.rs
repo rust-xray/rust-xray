@@ -1110,6 +1110,7 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
             )
         })?,
     );
+    handler_runtime.start_observatory();
 
     let api_task = start_xray_api_server(
         &config_source,

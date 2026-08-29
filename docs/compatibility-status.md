@@ -47,8 +47,9 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | StatsService API | Working | All seven RPCs when `api` block present; atomic counter reset; OnlineMap refcount; seven policy flags default false until `policy` enables them; online IP from TCP peer through all transports including XHTTP; dynamic users use level policy automatically; `GetSysStats` Go-runtime fields N/A in Rust (Stage 8B) |
 | Xray gRPC API foundation (Stage 8A) | Working | Canonical protobuf/service registration, direct `api.listen`, optional reflection, plaintext default, shared runtime state wiring (`StatsRegistry`, `InboundUserManagers`) |
 | HandlerService (Stage 8E1) | Working | Full current `HandlerService` RPC surface runtime-backed via `RuntimeInboundManager` / `RuntimeOutboundManager`; dynamic VLESS+REALITY inbound, freedom/blackhole outbound; merged logical inbound auth identity; no config file rewrite |
-| RoutingService (Stage 8E2) | Working | All seven RPCs runtime-backed via `RuntimeRouter`; static JSON + dynamic `AddRule`/`RemoveRule`; VLESS TCP dispatch uses same router; webhook rules fire after route selection; GeoSite/GeoIP; balancers (`random`, `roundRobin`, `leastPing`, `leastLoad` algorithms). Live Observatory health for `leastPing`/`leastLoad` pending Stage 8E4 |
+| RoutingService (Stage 8E2) | Working | All seven RPCs runtime-backed via `RuntimeRouter`; static JSON + dynamic `AddRule`/`RemoveRule`; VLESS TCP dispatch uses same router; webhook rules fire after route selection; GeoSite/GeoIP; balancers (`random`, `roundRobin`, `leastPing`, `leastLoad` algorithms). `DomainStrategy`: `IpOnDemand` lazily resolves target DNS when an IP condition needs target IP; `IpIfNonMatch` runs first pass without forced DNS, resolves once if no rule matches, then second pass. Live Observatory health for `leastPing`/`leastLoad` pending Stage 8E4 |
 | LoggerService (Stage 8E3) | Working | Canonical `RestartLogger` RPC; runtime-backed sink reopen from in-memory config; file rotation reopen proven via tonic E2E. Legacy `v2ray.core.app.log.command.LoggerService` alias deferred to Stage 8E5 |
+| ObservatoryService (Stage 8E4-A/B) | Working | Canonical `xray.core.app.observatory.command.ObservatoryService` with `GetOutboundStatus`; standard Observatory runtime probes selected outbounds via tagged outbound dispatch; BurstObservatory HealthPing ring-buffer statistics (`health_ping` populated, timestamps zero); background worker from JSON `observatory` / `burstObservatory` blocks independent of API service mount. When both blocks are configured, standard Observatory wins (upstream first-feature behavior). Live `leastPing`/`leastLoad` health wiring pending 8E4-C |
 | Outbound routing / rules / balancers | Working | `RuntimeRouter` shared by VLESS data-plane + `RoutingService`; `DomainStrategy` `AsIs` / `IpOnDemand` / `IpIfNonMatch`; GeoSite/GeoIP matchers; webhook; balancer override/fallback. `leastPing`/`leastLoad` selection algorithms work; live health observations pending Observatory (8E4) |
 | DNS engine core (cache, dedup, UDP/TCP) | Working | `DnsEngine` in-process; numeric IP servers; no system resolver on engine path |
 | Mux UDP DNS (Happ baseline) | Working | `DnsEngine` via `resolve_mux_udp_dns`; numeric `:53` (e.g. `1.1.1.1:53`) |
@@ -65,7 +66,7 @@ connection closes (by design).
 | `HandlerService` | Working |
 | `RoutingService` | Working |
 | `LoggerService` | Working |
-| `ObservatoryService` | Pending (Stage 8E4) |
+| `ObservatoryService` | Working (standard Observatory + BurstObservatory; live balancer health pending 8E4-C) |
 
 Full Xray API compatibility closure (legacy aliases, exact config semantics, Remna
 unix-abstract E2E) remains future work (Stages 8D–8E5).
@@ -102,8 +103,8 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | Mux.Cool frame parser | Partial | `New` / `Keep` / `End` / `KeepAlive`; TCP and UDP frame metadata parsed |
 | Mux TCP substream | Partial | Single active TCP substream to freedom outbound (no parallel substreams) |
 | Mux UDP DNS (domain `:53`) | Partial | Domain `:53` mux targets still closed (numeric IP DNS works) |
-| Remnawave / panel configs | Partial | Config load + API + REALITY inbound + routing execution for supported conditions; Remna unix-abstract E2E pending |
-| Routing rule metadata gaps | Partial | `attributes`: rule compiler + `TestRoute` supported; production extraction from sniff/dispatcher not implemented. `process`: matcher/`TestRoute` supported; remote VLESS clients have no local process identity |
+| Remnawave / panel configs | Partial | Config load + API + REALITY inbound + routing execution for supported conditions. GeoSite/GeoIP routing supported. `attributes` production extraction remains unavailable. Remote process metadata is generally unavailable for VLESS clients. Remna unix-abstract E2E remains pending |
+| Routing rule metadata gaps | Partial | `attributes`: compiler/`TestRoute` supported; production extraction missing. `process`: compiler/`TestRoute` supported; remote VLESS has no process identity. `local_os`: canonical field 23 supported |
 | DNS engine — DoH / hostname servers | Partial | `https://` parsed; queries return explicit unsupported |
 | DNS engine — `protocol: "dns"` outbound | Partial | Config tolerated; placeholder only (see [dns-future.md](./dns-future.md)) |
 | General logging config | Partial | `LoggerService.RestartLogger` works for supported sinks; `dnsLog` behavior, `maskAddress`, and JSON `loglevel` → filter mapping incomplete |
@@ -120,7 +121,8 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | XUDP | Not implemented |
 | Full UDP mux relay (all destinations / parallel substreams) | Not implemented |
 | DNS UDP relay inside Mux (domain names without resolver) | Not implemented |
-| ObservatoryService / live outbound health | Not implemented (Stage 8E4) |
+| Live observatory-backed balancer health | Pending (Stage 8E4-C) — standard and Burst Observatory runtimes implemented; live health observations for `leastPing`/`leastLoad` not wired yet |
+| BurstObservatory / HealthPing | Working (Stage 8E4-B) — tagged probes, ring buffer, All/Fail/Average/Deviation/Min/Max, connectivity check semantics, canonical `GetOutboundStatus` with `health_ping` |
 | Full outbound ecosystem | Not implemented |
 | FakeDNS | Not implemented |
 | DNS inbound / dokodemo-door hijack | Not implemented |
@@ -179,11 +181,11 @@ mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`).
 
 ## Next Milestone
 
-1. **Stage 8E4 — ObservatoryService** — live outbound health provider for `leastPing` / `leastLoad` balancers.
-2. **Domain `:53` mux destinations** — resolver hook without claiming full DNS module.
-3. **Generic UDP over Mux** — beyond port-53 DNS baseline.
-4. **Full Mux.Cool runtime** — parallel substreams, complete frame lifecycle.
-5. Keep REALITY/Vision/fallback/API/Happ-baseline smoke green (`aes_gcm_decrypt_failed=0`, ML-DSA-65 baseline).
+**Stage 8E4-C — Observatory live health wiring**
+
+1. Connect live `OutboundHealthProvider` to `leastPing` / `leastLoad`
+2. Final Stage 8E4 audit
+3. Keep the fully-green `cargo test` baseline
 
 ---
 

@@ -13,6 +13,7 @@ const REMNAWAVE_INTERNAL_CONFIG_PATH: &str = "/internal/get-config";
 pub fn validate_xray_panel_config(config: &XrayConfig) -> std::io::Result<()> {
     super::api::validate_api_config(config)?;
     super::routing::validate_routing_config(config)?;
+    super::observatory::validate_observatory_config(config)?;
     Ok(())
 }
 

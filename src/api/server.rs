@@ -10,7 +10,9 @@ use tracing::info;
 
 use crate::api::handler::HandlerServiceImpl;
 use crate::api::logger::LoggerServiceImpl;
+use crate::api::observatory::ObservatoryServiceImpl;
 use crate::api::proto::app::log::command::logger_service_server::LoggerServiceServer;
+use crate::api::proto::app::observatory::command::observatory_service_server::ObservatoryServiceServer;
 use crate::api::proto::app::proxyman::command::handler_service_server::HandlerServiceServer;
 use crate::api::proto::app::router::command::routing_service_server::RoutingServiceServer;
 use crate::api::proto::app::stats::command::stats_service_server::StatsServiceServer;
@@ -32,6 +34,7 @@ pub enum ApiService {
     Logger,
     Stats,
     Routing,
+    Observatory,
 }
 
 /// How the Xray-compatible gRPC API is exposed.
@@ -405,6 +408,7 @@ fn api_service_canonical_path(service: ApiService) -> &'static str {
         ApiService::Logger => "xray.app.log.command.LoggerService",
         ApiService::Stats => "xray.app.stats.command.StatsService",
         ApiService::Routing => "xray.app.router.command.RoutingService",
+        ApiService::Observatory => "xray.core.app.observatory.command.ObservatoryService",
     }
 }
 
@@ -469,11 +473,7 @@ pub fn parse_enabled_services(services: &[String]) -> std::io::Result<Vec<ApiSer
         } else if eq_ignore_ascii_case(service, "RoutingService") {
             ApiService::Routing
         } else if eq_ignore_ascii_case(service, "ObservatoryService") {
-            tracing::warn!(
-                service = %service,
-                "ObservatoryService listed in api.services but is not mounted in rust-xray API server"
-            );
-            continue;
+            ApiService::Observatory
         } else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -553,6 +553,13 @@ pub async fn serve_grpc_on(
         add_service!(RoutingServiceServer::new(RoutingServiceImpl::new(
             Arc::clone(&handler_runtime)
         )));
+    }
+    if services.contains(&ApiService::Observatory) {
+        let observatory =
+            ObservatoryServiceImpl::new(Arc::clone(&handler_runtime)).map_err(|err| {
+                std::io::Error::other(format!("ObservatoryService unavailable: {}", err.message()))
+            })?;
+        add_service!(ObservatoryServiceServer::new(observatory));
     }
 
     let router = router.ok_or_else(|| {

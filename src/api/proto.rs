@@ -69,6 +69,15 @@ pub mod app {
             tonic::include_proto!("xray.app.stats.command");
         }
     }
+    pub mod observatory {
+        tonic::include_proto!("xray.core.app.observatory");
+        pub mod burst {
+            tonic::include_proto!("xray.core.app.observatory.burst");
+        }
+        pub mod command {
+            tonic::include_proto!("xray.core.app.observatory.command");
+        }
+    }
 }
 
 pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("xray_api_descriptor");
