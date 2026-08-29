@@ -39,7 +39,10 @@ pub struct HandlerRuntime {
     pub inbound: Arc<RuntimeInboundManager>,
     pub outbound: Arc<RuntimeOutboundManager>,
     pub router: Arc<RuntimeRouter>,
+    /// Active observatory feature for API lookup (standard wins when both configured).
     pub observatory: Option<ActiveObservatory>,
+    pub standard_observatory: Option<Arc<RuntimeObservatory>>,
+    pub burst_observatory: Option<Arc<RuntimeBurstObservatory>>,
 }
 
 impl HandlerRuntime {
@@ -53,39 +56,111 @@ impl HandlerRuntime {
         for ob in &xray.outbounds {
             let _ = outbound.register_startup_outbound(ob);
         }
-        let dns = DnsEngine::shared();
-        let router = RuntimeRouter::new(
-            xray.routing.as_ref(),
-            Arc::clone(&outbound),
-            dns,
-            enable_routing_stats,
-            None,
-        )?;
-        let inbound = RuntimeInboundManager::new(
-            Arc::clone(&xray),
+        let observatories = build_observatories(&xray, Arc::clone(&outbound))?;
+        assemble_handler_runtime(
+            outbound,
+            xray,
             stats_registry,
             api_dokodemo_tag,
-            Arc::clone(&router),
-        );
-        let observatory = build_active_observatory(&xray, Arc::clone(&outbound))?;
-        Ok(Self {
-            inbound,
-            outbound,
-            router,
-            observatory,
-        })
+            enable_routing_stats,
+            observatories,
+        )
     }
 
     pub fn start_observatory(self: &Arc<Self>) {
-        if let Some(observatory) = self.observatory.as_ref() {
+        if let Some(observatory) = self.standard_observatory.as_ref() {
+            observatory.start();
+        }
+        if let Some(observatory) = self.burst_observatory.as_ref() {
             observatory.start();
         }
     }
 
     pub async fn shutdown_observatory(&self) {
-        if let Some(observatory) = self.observatory.as_ref() {
+        if let Some(observatory) = self.standard_observatory.as_ref() {
             observatory.shutdown().await;
         }
+        if let Some(observatory) = self.burst_observatory.as_ref() {
+            observatory.shutdown().await;
+        }
+    }
+
+    /// Build a handler runtime for Standard Observatory + routing integration tests.
+    pub fn for_observatory_routing_tests(
+        stats_registry: Arc<StatsRegistry>,
+        observatory_config: ObservatoryRuntimeConfig,
+        outbounds: Vec<crate::api::proto::core::OutboundHandlerConfig>,
+    ) -> Arc<Self> {
+        let outbound = RuntimeOutboundManager::new();
+        for config in outbounds {
+            outbound
+                .add_outbound(config)
+                .expect("test outbound must be valid");
+        }
+        init_test_connect_runtime();
+        let xray = Arc::new(empty_test_xray_config());
+        let standard_observatory = Some(RuntimeObservatory::new(
+            observatory_config,
+            Arc::clone(&outbound),
+            OutboundConnectRuntime::shared(),
+        ));
+        let observatory = ActiveObservatory::Standard(Arc::clone(
+            standard_observatory.as_ref().expect("standard observatory"),
+        ));
+        Arc::new(
+            assemble_handler_runtime(
+                outbound,
+                xray,
+                stats_registry,
+                None,
+                true,
+                ObservatoryRuntimeParts {
+                    active: Some(observatory),
+                    standard: standard_observatory,
+                    burst: None,
+                },
+            )
+            .expect("observatory routing test runtime"),
+        )
+    }
+
+    /// Build a handler runtime for Burst Observatory + routing integration tests.
+    pub fn for_burst_observatory_routing_tests(
+        stats_registry: Arc<StatsRegistry>,
+        observatory_config: BurstObservatoryRuntimeConfig,
+        outbounds: Vec<crate::api::proto::core::OutboundHandlerConfig>,
+    ) -> Arc<Self> {
+        let outbound = RuntimeOutboundManager::new();
+        for config in outbounds {
+            outbound
+                .add_outbound(config)
+                .expect("test outbound must be valid");
+        }
+        init_test_connect_runtime();
+        let xray = Arc::new(empty_test_xray_config());
+        let burst_observatory = Some(RuntimeBurstObservatory::new(
+            observatory_config,
+            Arc::clone(&outbound),
+            OutboundConnectRuntime::shared(),
+        ));
+        let observatory = ActiveObservatory::Burst(Arc::clone(
+            burst_observatory.as_ref().expect("burst observatory"),
+        ));
+        Arc::new(
+            assemble_handler_runtime(
+                outbound,
+                xray,
+                stats_registry,
+                None,
+                true,
+                ObservatoryRuntimeParts {
+                    active: Some(observatory),
+                    standard: None,
+                    burst: burst_observatory,
+                },
+            )
+            .expect("burst observatory routing test runtime"),
+        )
     }
 
     /// Build a handler runtime for Standard Observatory tests.
@@ -102,24 +177,29 @@ impl HandlerRuntime {
         }
         init_test_connect_runtime();
         let xray = Arc::new(empty_test_xray_config());
-        let router = test_router(&xray, Arc::clone(&outbound));
-        let inbound = RuntimeInboundManager::new(
-            Arc::clone(&xray),
-            stats_registry,
-            None,
-            Arc::clone(&router),
-        );
-        let observatory = ActiveObservatory::Standard(RuntimeObservatory::new(
+        let standard_observatory = Some(RuntimeObservatory::new(
             observatory_config,
             Arc::clone(&outbound),
             OutboundConnectRuntime::shared(),
         ));
-        Arc::new(Self {
-            inbound,
-            outbound,
-            router,
-            observatory: Some(observatory),
-        })
+        let observatory = ActiveObservatory::Standard(Arc::clone(
+            standard_observatory.as_ref().expect("standard observatory"),
+        ));
+        Arc::new(
+            assemble_handler_runtime(
+                outbound,
+                xray,
+                stats_registry,
+                None,
+                false,
+                ObservatoryRuntimeParts {
+                    active: Some(observatory),
+                    standard: standard_observatory,
+                    burst: None,
+                },
+            )
+            .expect("observatory test runtime"),
+        )
     }
 
     /// Build a handler runtime for Burst Observatory tests.
@@ -136,24 +216,74 @@ impl HandlerRuntime {
         }
         init_test_connect_runtime();
         let xray = Arc::new(empty_test_xray_config());
-        let router = test_router(&xray, Arc::clone(&outbound));
-        let inbound = RuntimeInboundManager::new(
-            Arc::clone(&xray),
-            stats_registry,
-            None,
-            Arc::clone(&router),
-        );
-        let observatory = ActiveObservatory::Burst(RuntimeBurstObservatory::new(
+        let burst_observatory = Some(RuntimeBurstObservatory::new(
             observatory_config,
             Arc::clone(&outbound),
             OutboundConnectRuntime::shared(),
         ));
-        Arc::new(Self {
-            inbound,
-            outbound,
-            router,
-            observatory: Some(observatory),
-        })
+        let observatory = ActiveObservatory::Burst(Arc::clone(
+            burst_observatory.as_ref().expect("burst observatory"),
+        ));
+        Arc::new(
+            assemble_handler_runtime(
+                outbound,
+                xray,
+                stats_registry,
+                None,
+                false,
+                ObservatoryRuntimeParts {
+                    active: Some(observatory),
+                    standard: None,
+                    burst: burst_observatory,
+                },
+            )
+            .expect("burst observatory test runtime"),
+        )
+    }
+
+    /// Build a handler runtime with both Standard and Burst observatories configured.
+    pub fn for_coexistence_observatory_tests(
+        stats_registry: Arc<StatsRegistry>,
+        standard_config: ObservatoryRuntimeConfig,
+        burst_config: BurstObservatoryRuntimeConfig,
+        outbounds: Vec<crate::api::proto::core::OutboundHandlerConfig>,
+    ) -> Arc<Self> {
+        let outbound = RuntimeOutboundManager::new();
+        for config in outbounds {
+            outbound
+                .add_outbound(config)
+                .expect("test outbound must be valid");
+        }
+        init_test_connect_runtime();
+        let xray = Arc::new(empty_test_xray_config());
+        let standard_observatory = Some(RuntimeObservatory::new(
+            standard_config,
+            Arc::clone(&outbound),
+            OutboundConnectRuntime::shared(),
+        ));
+        let burst_observatory = Some(RuntimeBurstObservatory::new(
+            burst_config,
+            Arc::clone(&outbound),
+            OutboundConnectRuntime::shared(),
+        ));
+        let observatory = ActiveObservatory::Standard(Arc::clone(
+            standard_observatory.as_ref().expect("standard observatory"),
+        ));
+        Arc::new(
+            assemble_handler_runtime(
+                outbound,
+                xray,
+                stats_registry,
+                None,
+                false,
+                ObservatoryRuntimeParts {
+                    active: Some(observatory),
+                    standard: standard_observatory,
+                    burst: burst_observatory,
+                },
+            )
+            .expect("coexistence observatory test runtime"),
+        )
     }
 
     /// Minimal runtime for HandlerService integration tests (no startup inbounds/outbounds).
@@ -175,26 +305,80 @@ impl HandlerRuntime {
     }
 }
 
-fn build_active_observatory(
+struct ObservatoryRuntimeParts {
+    active: Option<ActiveObservatory>,
+    standard: Option<Arc<RuntimeObservatory>>,
+    burst: Option<Arc<RuntimeBurstObservatory>>,
+}
+
+fn assemble_handler_runtime(
+    outbound: Arc<RuntimeOutboundManager>,
+    xray: Arc<XrayConfig>,
+    stats_registry: Arc<StatsRegistry>,
+    api_dokodemo_tag: Option<String>,
+    enable_routing_stats: bool,
+    observatories: ObservatoryRuntimeParts,
+) -> Result<HandlerRuntime, crate::routing::RouteError> {
+    let health = observatories
+        .active
+        .as_ref()
+        .map(ActiveObservatory::health_provider);
+    let router = RuntimeRouter::new(
+        xray.routing.as_ref(),
+        Arc::clone(&outbound),
+        DnsEngine::shared(),
+        enable_routing_stats,
+        health,
+    )?;
+    let inbound = RuntimeInboundManager::new(
+        Arc::clone(&xray),
+        stats_registry,
+        api_dokodemo_tag,
+        Arc::clone(&router),
+    );
+    Ok(HandlerRuntime {
+        inbound,
+        outbound,
+        router,
+        observatory: observatories.active,
+        standard_observatory: observatories.standard,
+        burst_observatory: observatories.burst,
+    })
+}
+
+fn build_observatories(
     xray: &XrayConfig,
     outbound: Arc<RuntimeOutboundManager>,
-) -> Result<Option<ActiveObservatory>, crate::routing::RouteError> {
-    if let Some(raw) = xray.observatory.as_ref() {
-        let config = ObservatoryRuntimeConfig::from_raw(raw);
-        return Ok(Some(ActiveObservatory::Standard(RuntimeObservatory::new(
-            config,
+) -> Result<ObservatoryRuntimeParts, crate::routing::RouteError> {
+    let standard = xray.observatory.as_ref().map(|raw| {
+        RuntimeObservatory::new(
+            ObservatoryRuntimeConfig::from_raw(raw),
+            Arc::clone(&outbound),
+            OutboundConnectRuntime::shared(),
+        )
+    });
+    let burst = match xray.burst_observatory.as_ref() {
+        Some(raw) => Some(RuntimeBurstObservatory::new(
+            BurstObservatoryRuntimeConfig::from_raw(raw)
+                .map_err(|err| crate::routing::RouteError::InvalidArgument(err.to_string()))?,
             outbound,
             OutboundConnectRuntime::shared(),
-        ))));
-    }
-    if let Some(raw) = xray.burst_observatory.as_ref() {
-        let config = BurstObservatoryRuntimeConfig::from_raw(raw)
-            .map_err(|err| crate::routing::RouteError::InvalidArgument(err.to_string()))?;
-        return Ok(Some(ActiveObservatory::Burst(
-            RuntimeBurstObservatory::new(config, outbound, OutboundConnectRuntime::shared()),
-        )));
-    }
-    Ok(None)
+        )),
+        None => None,
+    };
+    let active = standard
+        .as_ref()
+        .map(|standard| ActiveObservatory::Standard(Arc::clone(standard)))
+        .or_else(|| {
+            burst
+                .as_ref()
+                .map(|burst| ActiveObservatory::Burst(Arc::clone(burst)))
+        });
+    Ok(ObservatoryRuntimeParts {
+        active,
+        standard,
+        burst,
+    })
 }
 
 fn empty_test_xray_config() -> XrayConfig {
@@ -215,18 +399,4 @@ fn empty_test_xray_config() -> XrayConfig {
 
 fn init_test_connect_runtime() {
     OutboundConnectRuntime::init_shared(&empty_test_xray_config());
-}
-
-fn test_router(
-    xray: &Arc<XrayConfig>,
-    outbound: Arc<RuntimeOutboundManager>,
-) -> Arc<RuntimeRouter> {
-    RuntimeRouter::new(
-        xray.routing.as_ref(),
-        outbound,
-        DnsEngine::shared(),
-        false,
-        None,
-    )
-    .expect("test router")
 }

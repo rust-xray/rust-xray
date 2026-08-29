@@ -32,7 +32,7 @@ matrix. Short version:
 - VLESS fallback: default, SNI/name, HTTP path, ALPN (`http/1.1`, `h2`), PROXY v1/v2 (`xver=1|2`)
 - Network aliases: `raw`, legacy `tcp`, and experimental `xhttp` / `splithttp`
 - **Xray gRPC API (Stages 8A–8E4-B):** when `api` block is present — `ReflectionService` (optional), `StatsService`, `HandlerService`, `RoutingService`, `LoggerService`, `ObservatoryService`. Not full Xray API parity yet (see below).
-- **Routing / balancers (Stage 8E2):** `RuntimeRouter` executes static + dynamic rules on VLESS TCP dispatch; `DomainStrategy` (`AsIs`, `IpOnDemand`, `IpIfNonMatch`); GeoSite/GeoIP; protocol sniff matcher; webhook rules; balancers (`random`, `roundRobin`, `leastPing`, `leastLoad` algorithms). Live Observatory health for `leastPing`/`leastLoad` pending Stage 8E4-C.
+- **Routing / balancers (Stage 8E2–8E4):** `RuntimeRouter` executes static + dynamic rules on VLESS TCP dispatch; `DomainStrategy` (`AsIs`, `IpOnDemand`, `IpIfNonMatch`); GeoSite/GeoIP; protocol sniff matcher; webhook rules; balancers (`random`, `roundRobin`, `leastPing`, `leastLoad` algorithms). Live Observatory health wired for `leastPing`/`leastLoad` and random/roundRobin fallback health filtering (Stage 8E4-C).
 - **HandlerService (Stage 8E1):** dynamic inbound/outbound CRUD, user add/remove, list/get operations for supported VLESS+REALITY / freedom / blackhole types; merged logical inbound auth identity.
 - **LoggerService (Stage 8E3):** `RestartLogger` runtime-backed; reopens configured error/access file sinks after external rotation. General logging config gaps remain (`dnsLog`, `maskAddress`, JSON `loglevel` mapping — see compatibility doc).
 
@@ -48,7 +48,7 @@ connection.
 | `HandlerService` | Implemented |
 | `RoutingService` | Implemented |
 | `LoggerService` | Implemented |
-| `ObservatoryService` | Implemented (standard Observatory + BurstObservatory HealthPing; live balancer health pending 8E4-C) |
+| `ObservatoryService` | Implemented (standard Observatory + BurstObservatory HealthPing; live balancer health wired in Stage 8E4-C) |
 
 This is **not** full Xray API compatibility closure. Remaining API work includes
 legacy `v2ray.core.*` aliases, exact `api.tag` / `services` semantics, and
@@ -79,7 +79,6 @@ Remna unix-abstract E2E (Stages 8D–8E5).
 - REALITY over gRPC / WebSocket transport runtime (rejected at startup when `security: reality`)
 - **ML-KEM-768 cryptography** and **TLS 1.3 negotiated X25519MLKEM768** on the REALITY accepted path (hybrid ServerHello, 64-byte shared secret, dest group mirroring — Stage 3+; pre-auth hybrid **carrier parsing only** in Stage 2)
 - Full outbound ecosystem beyond freedom/blackhole, DoH, Vision splice/zero-copy beyond DIRECT MVP
-- **ObservatoryService** live outbound health for balancer strategies (Stage 8E4-C)
 - Legacy `v2ray.core.*` API aliases and final API config closure (Stage 8E5)
 - REALITY post-handshake **Stage 5C** extras: `GlobalMaxCSSMsgCount`, alert-driven CCS probe paths
 - REALITY probe **exact uTLS ClientHello fingerprint** parity (`HelloGolang` / `HelloChrome_Auto`) — probes use rustls (**partial** parity; Stage 5B record-length + Stage 5C extra-CCS tolerance probing only)
@@ -92,7 +91,7 @@ Happ's current **UDP DNS over VLESS Mux** path by itself.
 
 ### Next milestone
 
-**Stage 8E4-C — Observatory:** connect live Observatory/BurstObservatory health to `leastPing`/`leastLoad` balancers.
+**Stage 8E5 — API compatibility closure** (legacy `v2ray.core.*` aliases, exact `api.tag` / `services` semantics, Remna unix-abstract E2E).
 
 See [compatibility-status.md](docs/compatibility-status.md) for remaining Mux/UDP gaps.
 

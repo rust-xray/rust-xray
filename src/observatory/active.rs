@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::api::proto::app::observatory::ObservationResult;
 use crate::observatory::burst::RuntimeBurstObservatory;
 use crate::observatory::RuntimeObservatory;
-use crate::routing::OutboundHealthProvider;
+use crate::routing::{OutboundHealthProvider, SharedHealthProvider};
 
 /// Active observatory feature selected at runtime.
 pub enum ActiveObservatory {
@@ -39,6 +39,13 @@ impl ActiveObservatory {
         match self {
             Self::Standard(observatory) => observatory.observation_result(),
             Self::Burst(observatory) => observatory.observation_result(),
+        }
+    }
+
+    pub fn health_provider(&self) -> SharedHealthProvider {
+        match self {
+            Self::Standard(observatory) => Arc::clone(observatory) as SharedHealthProvider,
+            Self::Burst(observatory) => Arc::clone(observatory) as SharedHealthProvider,
         }
     }
 

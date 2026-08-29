@@ -18,7 +18,9 @@ use rust_xray::observatory::{
     BurstObservatoryRuntimeConfig, BurstTestHooks, HealthPingRuntimeConfig,
     ObservatoryRuntimeConfig, ProbeDelaySource, RuntimeBurstObservatory,
 };
-use rust_xray::routing::{HealthPingObservation, OutboundHealthObservation};
+use rust_xray::routing::{
+    HealthPingObservation, OutboundHealthObservation, OutboundHealthProvider,
+};
 use rust_xray::runtime::{encode_blackhole_outbound, encode_freedom_outbound, HandlerRuntime};
 use rust_xray::stats::StatsRegistry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -132,10 +134,8 @@ fn build_burst_runtime(
 
 fn burst_observatory(runtime: &Arc<HandlerRuntime>) -> &Arc<RuntimeBurstObservatory> {
     runtime
-        .observatory
+        .burst_observatory
         .as_ref()
-        .expect("observatory")
-        .burst()
         .expect("burst observatory")
 }
 
@@ -368,7 +368,7 @@ async fn burst_removed_outbound_cleanup() {
         .check(&["probe-a".to_string(), "probe-b".to_string()])
         .await;
     runtime.outbound.remove_outbound("probe-b").expect("remove");
-    observatory.cleanup(&["probe-a".to_string()]).await;
+    observatory.cleanup(&["probe-a".to_string()]);
     assert!(status_by_tag(&observatory.observation_result(), "probe-b").is_none());
 }
 
@@ -426,13 +426,152 @@ async fn burst_scheduler_sampling_period() {
         })
         .await;
     observatory
-        .do_check(&["direct".to_string()], Duration::from_millis(100), 2)
+        .do_scheduled_check_for_test(&["direct".to_string()], Duration::from_millis(100), 2)
         .await;
     assert_eq!(state.requests.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
 async fn burst_scheduler_cancels_previous_round() {
+    let _guard = burst_test_serial().await;
+    let (probe_addr, _probe, state) = spawn_probe_server(ProbeServerMode::Stall).await;
+    let runtime = build_burst_runtime(
+        vec!["direct"],
+        HealthPingRuntimeConfig::for_test(
+            probe_url(probe_addr, "/probe"),
+            "",
+            Duration::from_millis(200),
+            1,
+            Duration::from_secs(5),
+            "HEAD",
+        ),
+        vec![encode_freedom_outbound("direct")],
+    );
+    let observatory = Arc::clone(burst_observatory(&runtime));
+    observatory.start();
+    while state.requests.load(Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    state.release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let snapshot = observatory.observation_result();
+    let health = status_by_tag(&snapshot, "direct")
+        .expect("status")
+        .health_ping
+        .as_ref()
+        .expect("health");
+    assert_eq!(health.all, 1);
+    observatory.shutdown().await;
+}
+
+#[tokio::test]
+async fn burst_startup_runs_initial_check_and_scheduled_round() {
+    let _guard = burst_test_serial().await;
+    let (probe_addr, _probe, state) = spawn_probe_server(ProbeServerMode::Ok204).await;
+    let runtime = build_burst_runtime(
+        vec!["direct"],
+        HealthPingRuntimeConfig::for_test(
+            probe_url(probe_addr, "/probe"),
+            "",
+            Duration::from_millis(500),
+            3,
+            Duration::from_secs(5),
+            "HEAD",
+        ),
+        vec![encode_freedom_outbound("direct")],
+    );
+    let observatory = burst_observatory(&runtime);
+    observatory
+        .set_test_hooks(BurstTestHooks {
+            delay_source: Some(Arc::new(SequentialDelaySource {
+                delays: std::sync::Mutex::new(vec![Duration::ZERO, Duration::ZERO, Duration::ZERO]),
+            })),
+            ..Default::default()
+        })
+        .await;
+    observatory.start();
+    while state.requests.load(Ordering::SeqCst) < 4 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(observatory.scheduled_round_starts.load(Ordering::SeqCst) >= 1);
+    observatory.shutdown().await;
+}
+
+#[tokio::test]
+async fn burst_probe_stalled_http_respects_timeout() {
+    let _guard = burst_test_serial().await;
+    let (probe_addr, _probe, _) = spawn_probe_server(ProbeServerMode::Stall).await;
+    let timeout = Duration::from_millis(150);
+    let runtime = build_burst_runtime(
+        vec!["direct"],
+        HealthPingRuntimeConfig::for_test(
+            probe_url(probe_addr, "/probe"),
+            "",
+            Duration::from_secs(30),
+            3,
+            timeout,
+            "HEAD",
+        ),
+        vec![encode_freedom_outbound("direct")],
+    );
+    let observatory = burst_observatory(&runtime);
+    let started = std::time::Instant::now();
+    observatory.check(&["direct".to_string()]).await;
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let snapshot = observatory.observation_result();
+    let health = status_by_tag(&snapshot, "direct")
+        .expect("status")
+        .health_ping
+        .as_ref()
+        .expect("health");
+    assert_eq!(health.fail, 1);
+}
+
+#[tokio::test]
+async fn burst_observation_result_concurrent_stress() {
+    let _guard = burst_test_serial().await;
+    let (probe_addr, _probe, _) = spawn_probe_server(ProbeServerMode::Ok204).await;
+    let runtime = build_burst_runtime(
+        vec!["direct"],
+        HealthPingRuntimeConfig::for_test(
+            probe_url(probe_addr, "/probe"),
+            "",
+            Duration::from_secs(30),
+            5,
+            Duration::from_secs(5),
+            "HEAD",
+        ),
+        vec![encode_freedom_outbound("direct")],
+    );
+    let observatory = Arc::clone(burst_observatory(&runtime));
+    let mut writers = Vec::new();
+    for _ in 0..8 {
+        let obs = Arc::clone(&observatory);
+        writers.push(tokio::spawn(async move {
+            obs.check(&["direct".to_string()]).await;
+        }));
+    }
+    let mut readers = Vec::new();
+    for _ in 0..32 {
+        let obs = Arc::clone(&observatory);
+        readers.push(tokio::spawn(async move {
+            let snapshot = obs.observation_result();
+            let status = status_by_tag(&snapshot, "direct");
+            if let Some(status) = status {
+                let health = status.health_ping.as_ref().expect("health");
+                assert!(health.all >= health.fail);
+            }
+            obs.observations().expect("observations");
+        }));
+    }
+    for handle in writers.into_iter().chain(readers) {
+        handle.await.expect("task");
+    }
+}
+
+#[tokio::test]
+async fn burst_shutdown_terminates_stalled_probe() {
     let _guard = burst_test_serial().await;
     let (probe_addr, _probe, state) = spawn_probe_server(ProbeServerMode::Stall).await;
     let runtime = build_burst_runtime(
@@ -447,33 +586,70 @@ async fn burst_scheduler_cancels_previous_round() {
         ),
         vec![encode_freedom_outbound("direct")],
     );
-    let observatory = Arc::clone(burst_observatory(&runtime));
-    let stalled = Arc::clone(&observatory);
-    let stalled_round = tokio::spawn(async move {
-        stalled
-            .do_check(&["direct".to_string()], Duration::ZERO, 1)
-            .await;
-    });
+    let observatory = burst_observatory(&runtime);
+    observatory.start();
     while state.requests.load(Ordering::SeqCst) == 0 {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let active = Arc::clone(&observatory);
-    let active_round = tokio::spawn(async move {
-        active.check(&["direct".to_string()]).await;
-    });
-    while state.requests.load(Ordering::SeqCst) < 2 {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    state.release.notify_waiters();
-    active_round.await.expect("active round");
-    let _ = tokio::time::timeout(Duration::from_secs(2), stalled_round).await;
-    let snapshot = observatory.observation_result();
-    let health = status_by_tag(&snapshot, "direct")
-        .expect("status")
-        .health_ping
+    let started = std::time::Instant::now();
+    observatory.shutdown().await;
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let requests = state.requests.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(state.requests.load(Ordering::SeqCst), requests);
+}
+
+#[tokio::test]
+async fn burst_standard_coexistence_both_run() {
+    let _guard = burst_test_serial().await;
+    let (probe_addr, _probe, _) = spawn_probe_server(ProbeServerMode::Ok204).await;
+    let url = probe_url(probe_addr, "/probe");
+    let runtime = HandlerRuntime::for_coexistence_observatory_tests(
+        Arc::new(StatsRegistry::new()),
+        ObservatoryRuntimeConfig::for_test(
+            vec!["direct".to_string()],
+            url.clone(),
+            Duration::from_millis(50),
+            false,
+        ),
+        BurstObservatoryRuntimeConfig::for_test(
+            vec!["direct".to_string()],
+            HealthPingRuntimeConfig::for_test(
+                url,
+                "",
+                Duration::from_secs(30),
+                3,
+                Duration::from_secs(5),
+                "HEAD",
+            ),
+        ),
+        vec![encode_freedom_outbound("direct")],
+    );
+    runtime.start_observatory();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let standard = runtime
+        .standard_observatory
         .as_ref()
-        .expect("health");
-    assert_eq!(health.all, 1);
+        .expect("standard runtime");
+    let burst = runtime.burst_observatory.as_ref().expect("burst runtime");
+    assert!(burst.scheduled_round_starts.load(Ordering::SeqCst) >= 1);
+    let standard_status = standard.observation_result();
+    let standard_direct = status_by_tag(&standard_status, "direct");
+    assert!(
+        standard_direct.is_some_and(|status| status.last_try_time > 0),
+        "standard scheduler should have probed"
+    );
+    let api_status = runtime
+        .observatory
+        .as_ref()
+        .expect("active observatory")
+        .observation_result();
+    let api_direct = status_by_tag(&api_status, "direct").expect("api status");
+    assert!(api_direct.health_ping.is_none());
+    let burst_status = burst.observation_result();
+    let burst_direct = status_by_tag(&burst_status, "direct").expect("burst status");
+    assert!(burst_direct.health_ping.is_some());
+    runtime.shutdown_observatory().await;
 }
 
 #[tokio::test]

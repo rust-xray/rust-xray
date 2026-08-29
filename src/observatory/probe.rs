@@ -78,6 +78,39 @@ pub async fn measure_delay_tagged(
     outbound_manager: Arc<RuntimeOutboundManager>,
     connect_runtime: Arc<OutboundConnectRuntime>,
 ) -> Result<Duration, String> {
+    timeout(
+        options.timeout,
+        measure_delay_tagged_unbounded(
+            outbound_tag,
+            destination,
+            options,
+            outbound_manager,
+            connect_runtime,
+        ),
+    )
+    .await
+    .map_err(|_| "probe timed out".to_string())?
+}
+
+pub async fn measure_delay_direct(
+    destination: &str,
+    options: &HttpProbeOptions,
+) -> Result<Duration, String> {
+    timeout(
+        options.timeout,
+        measure_delay_direct_unbounded(destination, options),
+    )
+    .await
+    .map_err(|_| "probe timed out".to_string())?
+}
+
+async fn measure_delay_tagged_unbounded(
+    outbound_tag: &str,
+    destination: &str,
+    options: &HttpProbeOptions,
+    outbound_manager: Arc<RuntimeOutboundManager>,
+    connect_runtime: Arc<OutboundConnectRuntime>,
+) -> Result<Duration, String> {
     let uri = parse_destination_uri(destination)?;
     let host = uri
         .host()
@@ -107,7 +140,7 @@ pub async fn measure_delay_tagged(
     }
 }
 
-pub async fn measure_delay_direct(
+async fn measure_delay_direct_unbounded(
     destination: &str,
     options: &HttpProbeOptions,
 ) -> Result<Duration, String> {
@@ -143,21 +176,17 @@ pub async fn probe_outbound(
         timeout: PROBE_HTTP_TIMEOUT,
     };
     let started = Instant::now();
-    match timeout(
-        options.timeout,
-        measure_delay_tagged(
-            outbound_tag,
-            probe_url,
-            &options,
-            outbound_manager,
-            connect_runtime,
-        ),
+    match measure_delay_tagged(
+        outbound_tag,
+        probe_url,
+        &options,
+        outbound_manager,
+        connect_runtime,
     )
     .await
     {
-        Ok(Ok(_)) => ProbeResult::alive(started.elapsed().as_millis() as i64),
-        Ok(Err(reason)) => ProbeResult::dead(outbound_tag, reason),
-        Err(_) => ProbeResult::dead(outbound_tag, "probe timed out"),
+        Ok(_) => ProbeResult::alive(started.elapsed().as_millis() as i64),
+        Err(reason) => ProbeResult::dead(outbound_tag, reason),
     }
 }
 
@@ -228,7 +257,7 @@ async fn https_request(
         options.method
     );
 
-    drive_tls_handshake(&mut connection, &mut stream, options.timeout).await?;
+    drive_tls_handshake(&mut connection, &mut stream).await?;
     connection
         .writer()
         .write_all(request.as_bytes())
@@ -292,13 +321,8 @@ fn validate_status_line(response: &[u8]) -> Result<(), String> {
 async fn drive_tls_handshake(
     connection: &mut rustls::ClientConnection,
     stream: &mut TcpStream,
-    probe_timeout: Duration,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + probe_timeout;
     while connection.is_handshaking() {
-        if Instant::now() >= deadline {
-            return Err("TLS handshake timed out".to_string());
-        }
         drive_tls_io(connection, stream).await?;
     }
     Ok(())

@@ -90,6 +90,10 @@ impl RuntimeRouter {
         &self.outbound
     }
 
+    pub fn health_provider(&self) -> SharedHealthProvider {
+        Arc::clone(&self.health)
+    }
+
     pub fn domain_strategy(&self) -> DomainStrategy {
         self.domain_strategy
     }

@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use rand::Rng;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::time::{self, sleep, MissedTickBehavior};
 
 use super::config::{BurstObservatoryRuntimeConfig, HealthPingRuntimeConfig};
 use super::health_ping::{HealthPingRing, HealthPingStats};
@@ -50,14 +50,24 @@ pub struct RuntimeBurstObservatory {
     config: BurstObservatoryRuntimeConfig,
     outbound: Arc<RuntimeOutboundManager>,
     connect_runtime: Arc<OutboundConnectRuntime>,
-    results: Mutex<HashMap<String, HealthPingRing>>,
+    results: RwLock<HashMap<String, HealthPingRing>>,
     shutdown: AtomicBool,
     worker_started: AtomicBool,
-    round_generation: AtomicU64,
+    oneshot_generation: AtomicU64,
+    scheduled_generation: AtomicU64,
     scheduler_handle: Mutex<Option<JoinHandle<()>>>,
+    scheduled_round_handle: Mutex<Option<JoinHandle<()>>>,
     delay_source: Arc<dyn ProbeDelaySource>,
     #[doc(hidden)]
     pub test_hooks: Mutex<BurstTestHooks>,
+    #[doc(hidden)]
+    pub scheduled_round_starts: AtomicUsize,
+}
+
+#[derive(Clone, Copy)]
+enum RoundKind {
+    Oneshot,
+    Scheduled,
 }
 
 impl RuntimeBurstObservatory {
@@ -70,13 +80,16 @@ impl RuntimeBurstObservatory {
             config,
             outbound,
             connect_runtime,
-            results: Mutex::new(HashMap::new()),
+            results: RwLock::new(HashMap::new()),
             shutdown: AtomicBool::new(false),
             worker_started: AtomicBool::new(false),
-            round_generation: AtomicU64::new(0),
+            oneshot_generation: AtomicU64::new(0),
+            scheduled_generation: AtomicU64::new(0),
             scheduler_handle: Mutex::new(None),
+            scheduled_round_handle: Mutex::new(None),
             delay_source: Arc::new(RandomProbeDelaySource),
             test_hooks: Mutex::new(BurstTestHooks::default()),
+            scheduled_round_starts: AtomicUsize::new(0),
         })
     }
 
@@ -86,10 +99,10 @@ impl RuntimeBurstObservatory {
 
     pub fn observation_result(&self) -> ObservationResult {
         let now = self.now();
-        let results = self
-            .results
-            .try_lock()
-            .expect("burst results lock poisoned");
+        let results = match self.results.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let mut status = results
             .iter()
             .map(|(tag, ring)| outbound_status_from_stats(tag, &ring.statistics(now)))
@@ -113,28 +126,23 @@ impl RuntimeBurstObservatory {
         let handle = tokio::spawn(async move {
             let selected = this.select_tags();
             if !selected.is_empty() {
-                this.check(&selected).await;
+                let tags = selected.clone();
+                let oneshot = Arc::clone(&this);
+                tokio::spawn(async move {
+                    oneshot.check(&tags).await;
+                });
             }
+            this.launch_scheduled_round().await;
+
             let period = this.config.ping.scheduler_period;
+            let mut ticker = time::interval(period);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {
+                ticker.tick().await;
                 if this.shutdown.load(Ordering::Acquire) {
                     break;
                 }
-                sleep(period).await;
-                if this.shutdown.load(Ordering::Acquire) {
-                    break;
-                }
-                let selected = this.select_tags();
-                if selected.is_empty() {
-                    continue;
-                }
-                this.do_check(
-                    &selected,
-                    this.config.ping.scheduler_period,
-                    this.config.ping.sampling_count,
-                )
-                .await;
-                this.cleanup(&selected).await;
+                this.launch_scheduled_round().await;
             }
         });
         if let Ok(mut guard) = self.scheduler_handle.try_lock() {
@@ -144,20 +152,75 @@ impl RuntimeBurstObservatory {
 
     pub async fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
-        let handle = self.scheduler_handle.lock().await.take();
-        if let Some(handle) = handle {
-            let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        self.scheduled_generation.fetch_add(1, Ordering::AcqRel);
+        self.oneshot_generation.fetch_add(1, Ordering::AcqRel);
+
+        if let Some(handle) = self.scheduled_round_handle.lock().await.take() {
+            handle.abort();
         }
-        self.round_generation.fetch_add(1, Ordering::AcqRel);
+        if let Some(handle) = self.scheduler_handle.lock().await.take() {
+            handle.abort();
+            let _ = time::timeout(Duration::from_secs(2), handle).await;
+        }
     }
 
     pub async fn check(self: &Arc<Self>, tags: &[String]) {
-        self.do_check(tags, Duration::ZERO, 1).await;
+        let generation = self.oneshot_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.do_check(tags, Duration::ZERO, 1, RoundKind::Oneshot, generation)
+            .await;
     }
 
     #[doc(hidden)]
-    pub async fn do_check(self: &Arc<Self>, tags: &[String], duration: Duration, rounds: u32) {
-        let generation = self.round_generation.fetch_add(1, Ordering::AcqRel) + 1;
+    pub async fn do_scheduled_check_for_test(
+        self: &Arc<Self>,
+        tags: &[String],
+        duration: Duration,
+        rounds: u32,
+    ) {
+        let generation = self.scheduled_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.do_check(tags, duration, rounds, RoundKind::Scheduled, generation)
+            .await;
+    }
+
+    async fn launch_scheduled_round(self: &Arc<Self>) {
+        if self.shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        let selected = self.select_tags();
+        if selected.is_empty() {
+            return;
+        }
+        self.scheduled_round_starts.fetch_add(1, Ordering::AcqRel);
+
+        self.scheduled_generation.fetch_add(1, Ordering::AcqRel);
+        if let Some(handle) = self.scheduled_round_handle.lock().await.take() {
+            handle.abort();
+        }
+        let generation = self.scheduled_generation.load(Ordering::Acquire);
+        let this = Arc::clone(self);
+        let tags = selected.clone();
+        let handle = tokio::spawn(async move {
+            this.do_check(
+                &tags,
+                this.config.ping.scheduler_period,
+                this.config.ping.sampling_count,
+                RoundKind::Scheduled,
+                generation,
+            )
+            .await;
+            this.cleanup(&tags);
+        });
+        *self.scheduled_round_handle.lock().await = Some(handle);
+    }
+
+    async fn do_check(
+        self: &Arc<Self>,
+        tags: &[String],
+        duration: Duration,
+        rounds: u32,
+        kind: RoundKind,
+        generation: u64,
+    ) {
         let count = tags.len().saturating_mul(rounds as usize);
         if count == 0 {
             return;
@@ -180,7 +243,7 @@ impl RuntimeBurstObservatory {
                         sleep(delay).await;
                     }
                     if this.shutdown.load(Ordering::Acquire)
-                        || this.round_generation.load(Ordering::Acquire) != generation
+                        || !this.is_generation_active(kind, generation)
                     {
                         return;
                     }
@@ -213,7 +276,7 @@ impl RuntimeBurstObservatory {
                         Err(_) => ProbeOutcome::Failed,
                     };
                     if this.shutdown.load(Ordering::Acquire)
-                        || this.round_generation.load(Ordering::Acquire) != generation
+                        || !this.is_generation_active(kind, generation)
                     {
                         return;
                     }
@@ -227,18 +290,17 @@ impl RuntimeBurstObservatory {
         drop(tx);
 
         for _ in 0..count {
-            if self.shutdown.load(Ordering::Acquire)
-                || self.round_generation.load(Ordering::Acquire) != generation
+            if self.shutdown.load(Ordering::Acquire) || !self.is_generation_active(kind, generation)
             {
                 break;
             }
             let Some((tag, outcome)) = rx.recv().await else {
                 break;
             };
-            if self.round_generation.load(Ordering::Acquire) != generation {
+            if !self.is_generation_active(kind, generation) {
                 break;
             }
-            self.apply_outcome(&tag, outcome).await;
+            self.apply_outcome(&tag, outcome);
         }
 
         for handle in handles {
@@ -246,9 +308,19 @@ impl RuntimeBurstObservatory {
         }
     }
 
-    async fn apply_outcome(self: &Arc<Self>, tag: &str, outcome: ProbeOutcome) {
+    fn is_generation_active(&self, kind: RoundKind, generation: u64) -> bool {
+        match kind {
+            RoundKind::Oneshot => self.oneshot_generation.load(Ordering::Acquire) == generation,
+            RoundKind::Scheduled => self.scheduled_generation.load(Ordering::Acquire) == generation,
+        }
+    }
+
+    fn apply_outcome(self: &Arc<Self>, tag: &str, outcome: ProbeOutcome) {
         let now = self.now();
-        let mut results = self.results.lock().await;
+        let mut results = match self.results.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         match outcome {
             ProbeOutcome::Skip => {}
             ProbeOutcome::Success(delay) => {
@@ -267,8 +339,11 @@ impl RuntimeBurstObservatory {
     }
 
     #[doc(hidden)]
-    pub async fn cleanup(self: &Arc<Self>, tags: &[String]) {
-        let mut results = self.results.lock().await;
+    pub fn cleanup(self: &Arc<Self>, tags: &[String]) {
+        let mut results = match self.results.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         results.retain(|tag, _| tags.iter().any(|selected| selected == tag));
     }
 
