@@ -43,6 +43,7 @@ pub struct VlessRealityInbound {
     pub transport: InboundTransportConfig,
     pub reality: RealityServerConfig,
     pub fallbacks: Vec<FallbackConfig>,
+    pub sniffing_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,7 +142,7 @@ pub struct NormalizedDns {
 pub struct NormalizedRouting {
     pub rules: Vec<NormalizedRoutingRule>,
     pub domain_strategy: Option<String>,
-    /// Proxy traffic routing is parsed for compatibility but not enforced at runtime.
+    /// Proxy traffic routing via RuntimeRouter (static + dynamic rules).
     pub enforced: bool,
 }
 
@@ -343,6 +344,96 @@ pub fn normalize_vless_reality_inbound(
             limit_fallback_download: settings.limit_fallback_download,
         },
         fallbacks,
+        sniffing_enabled: inbound
+            .extra
+            .get("sniffing")
+            .and_then(|value| value.get("enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+pub fn normalize_vless_plain_tcp_inbound(
+    inbound: &InboundObject,
+) -> std::io::Result<VlessRealityInbound> {
+    let stream = inbound.stream_settings.as_ref().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "plain VLESS inbound requires streamSettings",
+        )
+    })?;
+    if stream
+        .security
+        .as_deref()
+        .is_some_and(|security| !security.is_empty() && !security.eq_ignore_ascii_case("none"))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "plain VLESS inbound requires empty security",
+        ));
+    }
+    let transport_network = TransportNetwork::parse(stream.network.as_deref())?;
+    if transport_network != TransportNetwork::RawTcp {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "plain VLESS inbound supports raw/tcp transport only",
+        ));
+    }
+
+    let vless_settings = inbound_vless_settings(inbound)?;
+    let (users, decryption, fallbacks) = match vless_settings {
+        Some(settings) => {
+            let mut clients = settings.clients;
+            apply_inbound_vless_client_flows(
+                &mut clients,
+                settings.flow.as_deref(),
+                stream.security.as_deref(),
+                stream.network.as_deref(),
+            )?;
+            validate_vless_client_flows(&clients)?;
+            let users = build_vless_clients(&clients)?;
+            (
+                users,
+                settings
+                    .decryption
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "none".to_string()),
+                settings.fallbacks,
+            )
+        }
+        None => (Vec::new(), "none".to_string(), Vec::new()),
+    };
+
+    Ok(VlessRealityInbound {
+        tag: inbound.tag.clone(),
+        listen_addr: inbound_listen_addr(inbound)?,
+        users,
+        transport: InboundTransportConfig::RawTcp,
+        reality: RealityServerConfig {
+            dest_addr: "127.0.0.1:1".to_string(),
+            private_key: String::new(),
+            server_names: Vec::new(),
+            short_ids: Vec::new(),
+            max_time_diff: 0,
+            min_client_ver: None,
+            max_client_ver: None,
+            show: false,
+            mldsa65_seed: None,
+            decryption,
+            dest_xver: 0,
+            dest_transport: crate::reality::RealityDestTransport::Tcp,
+            limit_fallback_upload: Default::default(),
+            limit_fallback_download: Default::default(),
+        },
+        fallbacks,
+        sniffing_enabled: inbound
+            .extra
+            .get("sniffing")
+            .and_then(|value| value.get("enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -411,7 +502,7 @@ fn normalize_routing(routing: Option<&crate::config::xray::RoutingConfig>) -> No
     NormalizedRouting {
         rules: routing.rules.iter().map(normalize_routing_rule).collect(),
         domain_strategy: routing.domain_strategy.clone(),
-        enforced: false,
+        enforced: true,
     }
 }
 

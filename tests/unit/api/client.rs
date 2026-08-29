@@ -1,6 +1,6 @@
 use super::*;
 use crate::api::server::{serve_grpc_on, ApiService, ApiTransportMode};
-use crate::runtime::InboundUserManagers;
+use crate::runtime::HandlerRuntime;
 use tokio::net::TcpListener;
 
 #[tokio::test]
@@ -21,7 +21,8 @@ async fn query_stats_returns_value_from_server() {
     let addr = listener.local_addr().unwrap();
     let registry_for_server = Arc::clone(&registry);
     tokio::spawn(async move {
-        let inbound_users = Arc::new(InboundUserManagers::new());
+        let inbound_users =
+            HandlerRuntime::for_handler_tests(Arc::new(crate::stats::StatsRegistry::new()));
         let _ = serve_grpc_on(
             listener,
             vec![ApiService::Stats],

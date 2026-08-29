@@ -39,7 +39,7 @@ async fn spawn_xhttp_tcp_server(settings: XHttpSettings) -> (SocketAddr, JoinHan
             let settings = settings.clone();
             let users = Arc::clone(&users);
             tokio::spawn(async move {
-                let _ = serve_xhttp_stream_one(socket, &settings, users, None).await;
+                let _ = serve_xhttp_stream_one(socket, &settings, users, None, None, None).await;
             });
         }
     });

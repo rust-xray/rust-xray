@@ -101,7 +101,7 @@ fn udp_dns_relay_with_fake_udp_server_returns_mux_response() {
 
         let destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), udp_port);
         let open = encode_mux_new_udp(15, &destination, &expected_query);
-        let (mut client_io, server_io) = tokio::io::duplex(8192);
+        let (mut client_io, mut server_io) = tokio::io::duplex(8192);
         client_io
             .write_all(&open)
             .await
@@ -109,7 +109,9 @@ fn udp_dns_relay_with_fake_udp_server_returns_mux_response() {
 
         let dns = Arc::new(DnsEngine::with_mux_defaults());
         let handle =
-            tokio::spawn(async move { handle_mux_cool_inbound_with_dns(server_io, dns).await });
+            tokio::spawn(
+                async move { handle_mux_cool_inbound_with_dns(&mut server_io, dns).await },
+            );
 
         let frame = read_mux_frame(&mut client_io)
             .await
@@ -163,7 +165,7 @@ fn udp_dns_success_close_frame_enabled_by_env() {
 
         let destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), udp_port);
         let open = encode_mux_new_udp(19, &destination, &expected_query);
-        let (mut client_io, server_io) = tokio::io::duplex(8192);
+        let (mut client_io, mut server_io) = tokio::io::duplex(8192);
         client_io
             .write_all(&open)
             .await
@@ -171,7 +173,9 @@ fn udp_dns_success_close_frame_enabled_by_env() {
 
         let dns = Arc::new(DnsEngine::with_mux_defaults());
         let handle =
-            tokio::spawn(async move { handle_mux_cool_inbound_with_dns(server_io, dns).await });
+            tokio::spawn(
+                async move { handle_mux_cool_inbound_with_dns(&mut server_io, dns).await },
+            );
 
         let frame = read_mux_frame(&mut client_io)
             .await
@@ -226,7 +230,7 @@ fn udp_dns_multiple_packets_same_mux_id_zero_without_close() {
         let destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), udp_port);
         let first = encode_mux_new_udp(0, &destination, &expected_query);
         let second = crate::mux::encoder::encode_mux_keep_udp(0, &destination, &expected_query);
-        let (mut client_io, server_io) = tokio::io::duplex(8192);
+        let (mut client_io, mut server_io) = tokio::io::duplex(8192);
         client_io.write_all(&first).await.expect("write first dns");
 
         let dns = Arc::new(DnsEngine::new(
@@ -246,7 +250,9 @@ fn udp_dns_multiple_packets_same_mux_id_zero_without_close() {
             },
         ));
         let handle =
-            tokio::spawn(async move { handle_mux_cool_inbound_with_dns(server_io, dns).await });
+            tokio::spawn(
+                async move { handle_mux_cool_inbound_with_dns(&mut server_io, dns).await },
+            );
 
         assert_eq!(
             read_mux_frame(&mut client_io)
@@ -321,7 +327,7 @@ fn udp_dns_timeout_closes_substream_without_killing_session() {
 
         let destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), udp_port);
         let open = encode_mux_new_udp(17, &destination, &expected_query);
-        let (mut client_io, server_io) = tokio::io::duplex(8192);
+        let (mut client_io, mut server_io) = tokio::io::duplex(8192);
         client_io
             .write_all(&open)
             .await
@@ -344,7 +350,9 @@ fn udp_dns_timeout_closes_substream_without_killing_session() {
             },
         ));
         let handle =
-            tokio::spawn(async move { handle_mux_cool_inbound_with_dns(server_io, dns).await });
+            tokio::spawn(
+                async move { handle_mux_cool_inbound_with_dns(&mut server_io, dns).await },
+            );
         assert_eq!(
             read_mux_frame(&mut client_io)
                 .await
@@ -417,16 +425,15 @@ fn mux_udp_dns_repeat_query_hits_engine_cache() {
 
         for mux_id in [21u16, 22u16] {
             let open = encode_mux_new_udp(mux_id, &destination, &expected_query);
-            let (mut client_io, server_io) = tokio::io::duplex(8192);
+            let (mut client_io, mut server_io) = tokio::io::duplex(8192);
             client_io
                 .write_all(&open)
                 .await
                 .expect("write mux udp open");
             let dns_task = Arc::clone(&dns);
-            let handle =
-                tokio::spawn(
-                    async move { handle_mux_cool_inbound_with_dns(server_io, dns_task).await },
-                );
+            let handle = tokio::spawn(async move {
+                handle_mux_cool_inbound_with_dns(&mut server_io, dns_task).await
+            });
             let frame = read_mux_frame(&mut client_io)
                 .await
                 .expect("read mux udp response");

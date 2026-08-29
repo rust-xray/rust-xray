@@ -11,12 +11,13 @@ use rust_xray::api::proto::common::serial::TypedMessage;
 use rust_xray::api::proto::proxy::vless::Account;
 use rust_xray::api::server::{serve_grpc_on, ApiService, ApiTransportMode};
 use rust_xray::config::XrayConfig;
-use rust_xray::runtime::InboundUserManagers;
+use rust_xray::runtime::HandlerRuntime;
 use rust_xray::stats::{user_traffic_uplink, StatsRegistry, StatsState};
 use rust_xray::vless::config::VlessClient;
 use rust_xray::vless::protocol::{VlessCommand, VlessDestination, VlessRequest};
 use rust_xray::vless::user_manager::VlessUserManager;
 use std::net::{IpAddr, Ipv4Addr};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tonic::transport::Endpoint;
 use tonic::Code;
@@ -38,9 +39,18 @@ async fn spawn_handler_server(
     manager: Arc<VlessUserManager>,
     stats_registry: Arc<StatsRegistry>,
 ) -> std::net::SocketAddr {
-    let inbound_users = Arc::new(InboundUserManagers::new());
-    inbound_users.register(Arc::clone(&manager));
+    let handler_runtime = HandlerRuntime::for_handler_tests(Arc::clone(&stats_registry));
+    handler_runtime
+        .inbound
+        .user_managers()
+        .register(Arc::clone(&manager));
+    spawn_handler_server_with(handler_runtime, stats_registry).await
+}
 
+async fn spawn_handler_server_with(
+    handler_runtime: Arc<HandlerRuntime>,
+    stats_registry: Arc<StatsRegistry>,
+) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {
@@ -48,7 +58,7 @@ async fn spawn_handler_server(
             listener,
             vec![ApiService::Handler],
             stats_registry,
-            inbound_users,
+            handler_runtime,
             ApiTransportMode::Plaintext,
         )
         .await;
@@ -58,9 +68,20 @@ async fn spawn_handler_server(
 }
 
 fn add_user_request(email: &str, id: &str, flow: &str) -> AlterInboundRequest {
+    add_user_request_with(email, id, flow, 0, "none")
+}
+
+fn add_user_request_with(
+    email: &str,
+    id: &str,
+    flow: &str,
+    level: u32,
+    encryption: &str,
+) -> AlterInboundRequest {
     let account = Account {
         id: id.to_string(),
         flow: flow.to_string(),
+        encryption: encryption.to_string(),
         ..Default::default()
     };
     let account_msg = TypedMessage {
@@ -68,7 +89,7 @@ fn add_user_request(email: &str, id: &str, flow: &str) -> AlterInboundRequest {
         value: account.encode_to_vec(),
     };
     let user = User {
-        level: 0,
+        level,
         email: email.to_string(),
         account: Some(account_msg),
     };
@@ -439,10 +460,607 @@ async fn added_user_email_is_used_for_stats_counters() {
         ))
         .expect("auth");
     let session = stats_state
-        .session(auth.email, auth.level)
+        .session(auth.email, auth.level, None)
         .expect("stats session");
     session.record_uplink(42);
 
     let counter = user_traffic_uplink("dynamic@example.test");
     assert_eq!(registry.get(&counter, false).unwrap(), 42);
+}
+
+fn build_vless_tcp_request(user_id: &[u8; 16], port: u16) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(0);
+    buf.extend_from_slice(user_id);
+    buf.push(0);
+    buf.push(0x01);
+    buf.extend_from_slice(&port.to_be_bytes());
+    buf.extend_from_slice(&[0x01, 127, 0, 0, 1]);
+    buf
+}
+
+async fn vless_tcp_auth_succeeds(manager: Arc<VlessUserManager>, user_id: uuid::Uuid) -> bool {
+    vless_tcp_auth_result(manager, user_id).await.is_ok()
+}
+
+async fn vless_tcp_auth_result(
+    manager: Arc<VlessUserManager>,
+    user_id: uuid::Uuid,
+) -> std::io::Result<()> {
+    use rust_xray::vless::handle_vless_tcp_inbound;
+    use tokio::io::duplex;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let outbound_port = listener.local_addr()?.port();
+    tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+        }
+    });
+
+    let request = build_vless_tcp_request(user_id.as_bytes(), outbound_port);
+    let (mut client_io, server_io) = duplex(8192);
+    client_io.write_all(&request).await?;
+    let relay = tokio::spawn(async move {
+        handle_vless_tcp_inbound(server_io, manager.as_ref(), None, None, None).await
+    });
+    tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        let _ = client_io.read(&mut buf).await;
+        let _ = client_io.shutdown().await;
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), relay)
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "relay timeout"))?
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "relay join failed"))?
+}
+
+#[tokio::test]
+async fn add_user_via_wire_enables_immediate_vless_tcp_auth() {
+    let manager = Arc::new(VlessUserManager::new(INBOUND_TAG, vec![]));
+    let dynamic_uuid = uuid::Uuid::parse_str(DYNAMIC_ID).unwrap();
+    assert!(
+        !vless_tcp_auth_succeeds(Arc::clone(&manager), dynamic_uuid).await,
+        "auth must fail before AddUser"
+    );
+
+    let registry = Arc::new(StatsRegistry::new());
+    let addr = spawn_handler_server(Arc::clone(&manager), Arc::clone(&registry)).await;
+    let mut client = HandlerServiceClient::new(
+        Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap(),
+    );
+    client
+        .alter_inbound(add_user_request("dynamic@example.test", DYNAMIC_ID, ""))
+        .await
+        .expect("add user");
+
+    assert!(
+        vless_tcp_auth_succeeds(Arc::clone(&manager), dynamic_uuid).await,
+        "auth must succeed immediately after AddUser"
+    );
+}
+
+#[tokio::test]
+async fn remove_user_via_wire_disables_new_vless_tcp_auth() {
+    let manager = Arc::new(VlessUserManager::new(INBOUND_TAG, vec![]));
+    manager
+        .add_user(rust_xray::vless::user_manager::ManagedUser {
+            id: uuid::Uuid::parse_str(DYNAMIC_ID).unwrap(),
+            email: "dynamic@example.test".to_string(),
+            flow: None,
+            level: None,
+            expiry_secs: None,
+        })
+        .expect("seed");
+
+    let dynamic_uuid = uuid::Uuid::parse_str(DYNAMIC_ID).unwrap();
+    assert!(vless_tcp_auth_succeeds(Arc::clone(&manager), dynamic_uuid).await);
+
+    let registry = Arc::new(StatsRegistry::new());
+    let addr = spawn_handler_server(Arc::clone(&manager), registry).await;
+    let mut client = HandlerServiceClient::new(
+        Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap(),
+    );
+    client
+        .alter_inbound(remove_user_request("dynamic@example.test"))
+        .await
+        .expect("remove user");
+
+    assert!(
+        !vless_tcp_auth_succeeds(Arc::clone(&manager), dynamic_uuid).await,
+        "new auth must fail after RemoveUser"
+    );
+}
+
+#[tokio::test]
+async fn alter_inbound_remove_missing_user_returns_not_found() {
+    let manager = Arc::new(VlessUserManager::new(INBOUND_TAG, vec![]));
+    let registry = Arc::new(StatsRegistry::new());
+    let addr = spawn_handler_server(manager, registry).await;
+    let mut client = HandlerServiceClient::new(
+        Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap(),
+    );
+    let err = client
+        .alter_inbound(remove_user_request("missing@example.test"))
+        .await
+        .expect_err("missing user");
+    assert_eq!(err.code(), Code::NotFound);
+}
+
+#[tokio::test]
+async fn alter_inbound_duplicate_uuid_is_rejected() {
+    let manager = Arc::new(VlessUserManager::new(
+        INBOUND_TAG,
+        vec![VlessClient {
+            id: uuid::Uuid::parse_str(STATIC_ID).unwrap(),
+            email: Some("static@example.test".to_string()),
+            flow: None,
+            level: None,
+        }],
+    ));
+    let registry = Arc::new(StatsRegistry::new());
+    let addr = spawn_handler_server(manager, registry).await;
+    let mut client = HandlerServiceClient::new(
+        Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap(),
+    );
+    let err = client
+        .alter_inbound(add_user_request("other@example.test", STATIC_ID, ""))
+        .await
+        .expect_err("duplicate uuid");
+    assert_eq!(err.code(), Code::AlreadyExists);
+}
+
+#[tokio::test]
+async fn get_inbound_users_round_trip_preserves_vision_flow_and_level() {
+    let manager = Arc::new(VlessUserManager::new(INBOUND_TAG, vec![]));
+    let registry = Arc::new(StatsRegistry::new());
+    let addr = spawn_handler_server(Arc::clone(&manager), registry).await;
+    let mut client = HandlerServiceClient::new(
+        Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap(),
+    );
+    client
+        .alter_inbound(add_user_request_with(
+            "stage8c@example.com",
+            DYNAMIC_ID,
+            "xtls-rprx-vision",
+            1,
+            "none",
+        ))
+        .await
+        .expect("add user");
+
+    let resp = client
+        .get_inbound_users(GetInboundUserRequest {
+            tag: INBOUND_TAG.to_string(),
+            email: "stage8c@example.com".to_string(),
+        })
+        .await
+        .expect("get user")
+        .into_inner();
+    assert_eq!(resp.users.len(), 1);
+    assert_eq!(resp.users[0].email, "stage8c@example.com");
+    assert_eq!(resp.users[0].level, 1);
+    let account = resp.users[0].account.as_ref().expect("account");
+    assert_eq!(account.r#type, "xray.proxy.vless.Account");
+    let decoded = Account::decode(account.value.as_slice()).expect("decode");
+    assert_eq!(decoded.id, DYNAMIC_ID);
+    assert_eq!(decoded.flow, "xtls-rprx-vision");
+    assert_eq!(decoded.encryption, "none");
+}
+
+#[tokio::test]
+async fn add_custom_string_vless_id_via_wire_authenticates() {
+    let manager = Arc::new(VlessUserManager::new(INBOUND_TAG, vec![]));
+    let custom_id = "remna-custom-id";
+    let expected_uuid = rust_xray::vless::config::parse_vless_user_id(custom_id).expect("uuid");
+    let registry = Arc::new(StatsRegistry::new());
+    let addr = spawn_handler_server(Arc::clone(&manager), registry).await;
+    let mut client = HandlerServiceClient::new(
+        Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap(),
+    );
+    client
+        .alter_inbound(add_user_request("custom@example.test", custom_id, ""))
+        .await
+        .expect("add user");
+    assert!(
+        vless_tcp_auth_succeeds(Arc::clone(&manager), expected_uuid).await,
+        "custom-string id must authenticate"
+    );
+}
+
+#[tokio::test]
+async fn remove_static_user_via_api() {
+    let manager = Arc::new(VlessUserManager::new(
+        INBOUND_TAG,
+        vec![VlessClient {
+            id: uuid::Uuid::parse_str(STATIC_ID).unwrap(),
+            email: Some("static@example.test".to_string()),
+            flow: None,
+            level: None,
+        }],
+    ));
+    let registry = Arc::new(StatsRegistry::new());
+    let addr = spawn_handler_server(Arc::clone(&manager), registry).await;
+    let mut client = HandlerServiceClient::new(
+        Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap(),
+    );
+    client
+        .alter_inbound(remove_user_request("static@example.test"))
+        .await
+        .expect("remove static");
+
+    let resp = client
+        .get_inbound_users(GetInboundUserRequest {
+            tag: INBOUND_TAG.to_string(),
+            email: String::new(),
+        })
+        .await
+        .expect("get users")
+        .into_inner();
+    assert!(resp.users.is_empty());
+    assert!(
+        !vless_tcp_auth_succeeds(
+            Arc::clone(&manager),
+            uuid::Uuid::parse_str(STATIC_ID).unwrap(),
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn tag_isolation_remove_does_not_affect_other_inbound() {
+    let manager_a = Arc::new(VlessUserManager::new(
+        "inbound-a",
+        vec![VlessClient {
+            id: uuid::Uuid::parse_str(STATIC_ID).unwrap(),
+            email: Some("shared@example.test".to_string()),
+            flow: None,
+            level: None,
+        }],
+    ));
+    let manager_b = Arc::new(VlessUserManager::new(
+        "inbound-b",
+        vec![VlessClient {
+            id: uuid::Uuid::parse_str(DYNAMIC_ID).unwrap(),
+            email: Some("shared@example.test".to_string()),
+            flow: None,
+            level: None,
+        }],
+    ));
+    let registry = Arc::new(StatsRegistry::new());
+    let handler_runtime = HandlerRuntime::for_handler_tests(Arc::clone(&registry));
+    handler_runtime
+        .inbound
+        .user_managers()
+        .register(Arc::clone(&manager_a));
+    handler_runtime
+        .inbound
+        .user_managers()
+        .register(Arc::clone(&manager_b));
+
+    let addr = spawn_handler_server_with(handler_runtime, registry).await;
+    let mut client = HandlerServiceClient::new(
+        Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap(),
+    );
+
+    let mut remove = remove_user_request("shared@example.test");
+    remove.tag = "inbound-a".to_string();
+    client.alter_inbound(remove).await.expect("remove from a");
+
+    assert!(
+        !vless_tcp_auth_succeeds(
+            Arc::clone(&manager_a),
+            uuid::Uuid::parse_str(STATIC_ID).unwrap(),
+        )
+        .await
+    );
+    assert!(
+        vless_tcp_auth_succeeds(
+            Arc::clone(&manager_b),
+            uuid::Uuid::parse_str(DYNAMIC_ID).unwrap(),
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn dynamic_user_level_applies_stats_online_policy() {
+    use rust_xray::api::proto::app::stats::command::stats_service_client::StatsServiceClient;
+    use rust_xray::api::proto::app::stats::command::GetStatsRequest;
+    use rust_xray::api::server::ApiService;
+    use rust_xray::stats::user_online;
+
+    let config: XrayConfig = serde_json::from_str(
+        r#"{
+            "stats": {},
+            "policy": {
+                "levels": {
+                    "0": {},
+                    "1": {
+                        "statsUserOnline": true,
+                        "statsUserUplink": true
+                    }
+                }
+            },
+            "inbounds": []
+        }"#,
+    )
+    .expect("parse");
+    let stats_state = StatsState::from_xray_config(&config, Some(INBOUND_TAG.to_string()));
+    let registry = Arc::clone(&stats_state.registry);
+
+    let manager = Arc::new(VlessUserManager::new(INBOUND_TAG, vec![]));
+    let handler_runtime = HandlerRuntime::for_handler_tests(Arc::clone(&registry));
+    handler_runtime
+        .inbound
+        .user_managers()
+        .register(Arc::clone(&manager));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = serve_grpc_on(
+            listener,
+            vec![ApiService::Handler, ApiService::Stats],
+            registry,
+            handler_runtime,
+            ApiTransportMode::Plaintext,
+        )
+        .await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut handler = HandlerServiceClient::new(channel.clone());
+    let mut stats = StatsServiceClient::new(channel);
+
+    handler
+        .alter_inbound(add_user_request_with(
+            "level1@example.test",
+            DYNAMIC_ID,
+            "",
+            1,
+            "none",
+        ))
+        .await
+        .expect("add user");
+
+    let auth = manager
+        .authenticate(&vless_request_for(
+            uuid::Uuid::parse_str(DYNAMIC_ID).unwrap(),
+        ))
+        .expect("auth");
+    let session = stats_state
+        .session(
+            auth.email,
+            auth.level,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+        )
+        .expect("session");
+    let _guard = session.begin_session().expect("online");
+
+    let online = stats
+        .get_stats_online(GetStatsRequest {
+            name: user_online("level1@example.test"),
+            reset: false,
+        })
+        .await
+        .expect("online")
+        .into_inner()
+        .stat
+        .expect("stat")
+        .value;
+    assert_eq!(online, 1);
+}
+
+#[tokio::test]
+async fn remove_user_while_connected_preserves_online_until_session_end() {
+    use rust_xray::api::proto::app::stats::command::stats_service_client::StatsServiceClient;
+    use rust_xray::api::proto::app::stats::command::GetStatsRequest;
+    use rust_xray::api::server::ApiService;
+    use rust_xray::stats::user_online;
+
+    let stats_state = test_stats_state(Arc::new(StatsRegistry::new()));
+    let registry = Arc::clone(&stats_state.registry);
+    let manager = Arc::new(VlessUserManager::new(INBOUND_TAG, vec![]));
+    let handler_runtime = HandlerRuntime::for_handler_tests(Arc::clone(&registry));
+    handler_runtime
+        .inbound
+        .user_managers()
+        .register(Arc::clone(&manager));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = serve_grpc_on(
+            listener,
+            vec![ApiService::Handler, ApiService::Stats],
+            registry,
+            handler_runtime,
+            ApiTransportMode::Plaintext,
+        )
+        .await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut handler = HandlerServiceClient::new(channel.clone());
+    let mut stats = StatsServiceClient::new(channel);
+
+    handler
+        .alter_inbound(add_user_request("online@example.test", DYNAMIC_ID, ""))
+        .await
+        .expect("add user");
+
+    let auth = manager
+        .authenticate(&vless_request_for(
+            uuid::Uuid::parse_str(DYNAMIC_ID).unwrap(),
+        ))
+        .expect("auth");
+    let session = stats_state
+        .session(
+            auth.email,
+            auth.level,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+        )
+        .expect("session");
+    let guard = session.begin_session().expect("online");
+
+    handler
+        .alter_inbound(remove_user_request("online@example.test"))
+        .await
+        .expect("remove user");
+
+    let online_name = user_online("online@example.test");
+    let online = stats
+        .get_stats_online(GetStatsRequest {
+            name: online_name.clone(),
+            reset: false,
+        })
+        .await
+        .expect("online while session alive")
+        .into_inner()
+        .stat
+        .expect("stat")
+        .value;
+    assert_eq!(online, 1);
+
+    assert!(
+        !vless_tcp_auth_succeeds(
+            Arc::clone(&manager),
+            uuid::Uuid::parse_str(DYNAMIC_ID).unwrap(),
+        )
+        .await
+    );
+
+    drop(guard);
+    let online = stats
+        .get_stats_online(GetStatsRequest {
+            name: online_name,
+            reset: false,
+        })
+        .await
+        .expect("online after session end")
+        .into_inner()
+        .stat
+        .expect("stat")
+        .value;
+    assert_eq!(online, 0);
+}
+
+#[tokio::test]
+async fn dynamic_user_authenticates_over_xhttp_production_path() {
+    use rust_xray::config::XHttpSettings;
+    use rust_xray::transport::xhttp::serve_xhttp_stream_one;
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+
+    let manager = Arc::new(VlessUserManager::new(INBOUND_TAG, vec![]));
+    let registry = Arc::new(StatsRegistry::new());
+    let addr = spawn_handler_server(Arc::clone(&manager), registry).await;
+    let mut client = HandlerServiceClient::new(
+        Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap(),
+    );
+    client
+        .alter_inbound(add_user_request(
+            "xhttp-dynamic@example.test",
+            DYNAMIC_ID,
+            "",
+        ))
+        .await
+        .expect("add user");
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind outbound");
+    let outbound_port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+        }
+    });
+
+    let user_id = uuid::Uuid::parse_str(DYNAMIC_ID).unwrap();
+    let mut vless_body = build_vless_tcp_request(user_id.as_bytes(), outbound_port);
+    let request = format!(
+        "POST /xhttp HTTP/1.1\r\nHost: example.com\r\nContent-Length: {}\r\n\r\n",
+        vless_body.len()
+    );
+    let mut request_bytes = request.into_bytes();
+    request_bytes.append(&mut vless_body);
+
+    let settings = XHttpSettings {
+        path: "/xhttp".to_string(),
+        host: Some("example.com".to_string()),
+        ..XHttpSettings::default()
+    };
+    let (mut client_io, server_io) = duplex(8192);
+    let users = Arc::clone(&manager);
+    let bridge = tokio::spawn(async move {
+        serve_xhttp_stream_one(
+            server_io,
+            &settings,
+            users,
+            None,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+            None,
+        )
+        .await
+    });
+    client_io.write_all(&request_bytes).await.expect("write");
+    let mut header = [0u8; 2];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client_io.read_exact(&mut header),
+    )
+    .await
+    .expect("xhttp response timeout")
+    .expect("xhttp response header");
+    client_io.shutdown().await.ok();
+    bridge.await.expect("join").expect("xhttp bridge ok");
 }

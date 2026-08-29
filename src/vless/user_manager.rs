@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::RwLock;
 
 use uuid::Uuid;
@@ -17,6 +17,8 @@ pub struct VlessAuthenticatedClient {
     pub email: Option<String>,
     pub flow: Option<String>,
     pub level: Option<u32>,
+    /// Logical inbound tag that authenticated this session.
+    pub inbound_tag: String,
 }
 
 fn is_supported_vless_flow(flow: Option<&str>) -> bool {
@@ -59,14 +61,24 @@ impl std::error::Error for UserManagerError {}
 #[derive(Debug)]
 pub struct VlessUserManager {
     pub inbound_tag: String,
+    sniffing_enabled: bool,
     users_by_id: RwLock<HashMap<Uuid, ManagedUser>>,
     email_to_id: RwLock<HashMap<String, Uuid>>,
 }
 
 impl VlessUserManager {
     pub fn new(inbound_tag: impl Into<String>, static_clients: Vec<VlessClient>) -> Self {
+        Self::new_with_sniffing(inbound_tag, static_clients, false)
+    }
+
+    pub fn new_with_sniffing(
+        inbound_tag: impl Into<String>,
+        static_clients: Vec<VlessClient>,
+        sniffing_enabled: bool,
+    ) -> Self {
         let manager = Self {
             inbound_tag: inbound_tag.into(),
+            sniffing_enabled,
             users_by_id: RwLock::new(HashMap::new()),
             email_to_id: RwLock::new(HashMap::new()),
         };
@@ -94,6 +106,10 @@ impl VlessUserManager {
             }
         }
         manager
+    }
+
+    pub fn sniffing_enabled(&self) -> bool {
+        self.sniffing_enabled
     }
 
     pub fn inbound_tag(&self) -> &str {
@@ -221,7 +237,17 @@ impl VlessUserManager {
             },
             flow: client.flow.clone(),
             level: client.level,
+            inbound_tag: self.inbound_tag.clone(),
         })
+    }
+
+    pub fn user_ids(&self) -> HashSet<Uuid> {
+        self.users_by_id
+            .read()
+            .expect("users lock")
+            .keys()
+            .copied()
+            .collect()
     }
 
     /// Returns all managed users (static + dynamic), sorted by email then UUID.

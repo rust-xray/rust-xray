@@ -7,16 +7,16 @@ pub(crate) fn validate_routing_config(config: &XrayConfig) -> std::io::Result<()
         return Ok(());
     };
     if !routing.rules.is_empty() {
-        warn!(
+        tracing::debug!(
             rule_count = routing.rules.len(),
-            "routing.rules are parsed for API listen compatibility but are not enforced for proxy traffic"
+            "routing.rules loaded into RuntimeRouter"
         );
     }
     if !routing.balancers.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "routing.balancers are not supported at runtime",
-        ));
+        warn!(
+            balancer_count = routing.balancers.len(),
+            "routing.balancers parsed; unsupported strategies fail at compile time"
+        );
     }
     Ok(())
 }

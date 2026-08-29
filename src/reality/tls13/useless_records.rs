@@ -3,6 +3,7 @@
 //! Mirrors upstream REALITY/TLS `retryReadRecord` / `MaxUselessRecords` semantics on the
 //! accepted REALITY server read path.
 
+use std::fmt;
 use std::io::{Error, ErrorKind};
 
 use crate::reality::post_handshake::UselessRecordTolerance;
@@ -13,6 +14,20 @@ use crate::tls::records::{
 const TLS_ALERT_LEVEL_WARNING: u8 = 1;
 const TLS_ALERT_LEVEL_FATAL: u8 = 2;
 const TLS_ALERT_USER_CANCELED: u8 = 0x5a;
+
+/// Typed signal that consecutive useless-record tolerance was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UselessRecordOverflow {
+    pub limit: usize,
+}
+
+impl fmt::Display for UselessRecordOverflow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TLS 1.3 too many ignored records (limit={})", self.limit)
+    }
+}
+
+impl std::error::Error for UselessRecordOverflow {}
 
 /// Tracks consecutive ignored/non-advancing TLS records against an effective tolerance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,11 +56,11 @@ impl UselessRecordCounter {
         self.consecutive = 0;
     }
 
-    pub fn observe_useless(&mut self) -> Result<(), Error> {
+    pub fn observe_useless(&mut self) -> Result<(), UselessRecordOverflow> {
         self.consecutive += 1;
         if let Some(limit) = self.tolerance.effective_limit() {
             if self.consecutive > limit {
-                return Err(too_many_ignored_records_error(limit));
+                return Err(UselessRecordOverflow { limit });
             }
         }
         Ok(())
@@ -53,10 +68,17 @@ impl UselessRecordCounter {
 }
 
 pub fn too_many_ignored_records_error(limit: usize) -> Error {
-    Error::new(
-        ErrorKind::InvalidData,
-        format!("TLS 1.3 too many ignored records (limit={limit})"),
-    )
+    Error::new(ErrorKind::InvalidData, UselessRecordOverflow { limit })
+}
+
+pub fn useless_record_overflow_limit(err: &Error) -> Option<usize> {
+    err.get_ref()
+        .and_then(|inner| inner.downcast_ref::<UselessRecordOverflow>())
+        .map(|overflow| overflow.limit)
+}
+
+pub fn is_useless_record_overflow(err: &Error) -> bool {
+    useless_record_overflow_limit(err).is_some()
 }
 
 pub fn is_valid_tls13_compatibility_ccs_record(record: &TlsRecord) -> bool {

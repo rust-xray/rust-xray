@@ -1,15 +1,18 @@
 mod names;
+mod online_map;
 mod policy;
 mod registry;
 mod session;
 
 pub use names::{
     inbound_traffic_downlink, inbound_traffic_uplink, outbound_traffic_downlink,
-    outbound_traffic_uplink, user_traffic_downlink, user_traffic_uplink,
+    outbound_traffic_uplink, parse_user_online_email, user_online, user_traffic_downlink,
+    user_traffic_uplink,
 };
+pub use online_map::OnlineMap;
 pub use policy::{default_outbound_tag, stats_policy_from_config, StatsPolicy};
 pub use registry::{GetStatError, StatEntry, StatsRegistry};
-pub use session::StatsSession;
+pub use session::{OnlineSessionGuard, StatsConnection, StatsSession};
 
 use std::sync::Arc;
 
@@ -23,6 +26,7 @@ pub struct StatsState {
     pub policy_config: Option<Arc<PolicyConfig>>,
     pub inbound_tag: String,
     pub outbound_tag: String,
+    manager_enabled: bool,
 }
 
 impl StatsState {
@@ -36,6 +40,7 @@ impl StatsState {
             policy_config: config.policy.clone().map(Arc::new),
             inbound_tag,
             outbound_tag: default_outbound_tag(config),
+            manager_enabled: config.stats.is_some(),
         }
     }
 
@@ -50,17 +55,19 @@ impl StatsState {
             policy_config: config.policy.clone().map(Arc::new),
             inbound_tag,
             outbound_tag: default_outbound_tag(config),
+            manager_enabled: config.stats.is_some(),
         }
     }
 
     pub fn enabled(&self) -> bool {
-        self.base_policy != StatsPolicy::disabled()
+        self.manager_enabled
     }
 
     pub fn session(
         &self,
         user_email: Option<String>,
         user_level: Option<u32>,
+        source_ip: Option<std::net::IpAddr>,
     ) -> Option<StatsSession> {
         if !self.enabled() {
             return None;
@@ -73,6 +80,7 @@ impl StatsState {
             self.outbound_tag.clone(),
             user_email,
             user_level,
+            source_ip,
         ))
     }
 }

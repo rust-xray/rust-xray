@@ -1,14 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use crate::api;
 use crate::cli::{self, Command, RunOptions};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::codec::{Codec, Reader};
@@ -26,7 +25,11 @@ use crate::reality::{
     handle_accepted_reality_client_traced, inspect_reality_client_hello,
     start_reality_post_handshake_probes, RealityDecision, RealityInspectConfig,
 };
-use crate::runtime::InboundUserManagers;
+use crate::routing::RuntimeRouter;
+use crate::runtime::{
+    encode_inbound_handler_config, HandlerRuntime, LogicalInboundAuthError, LogicalInboundAuthSet,
+    VlessInboundAuthContext,
+};
 use crate::stats::{StatsRegistry, StatsState};
 use crate::tls::{read_client_hello_record, PrefixedStream, TlsClientHelloRecord};
 use crate::vless::{
@@ -37,13 +40,28 @@ use crate::vless::{
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
 const NON_TLS_PREAMBLE_READ_LIMIT: usize = 4096;
 const PREAMBLE_HEX_PREVIEW_MAX: usize = 32;
-static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+#[derive(Clone)]
+pub struct InboundListenerConfig {
+    pub inbound: VlessRealityInbound,
+    pub merged_inbound_tags: Vec<String>,
+    pub auth: VlessInboundAuthContext,
+    pub plain_vless: bool,
+    pub router: Option<Arc<RuntimeRouter>>,
+}
 
-struct InboundListenerConfig {
-    inbound: VlessRealityInbound,
-    merged_inbound_tags: Vec<String>,
-    user_manager: Arc<VlessUserManager>,
-    stats: Option<Arc<StatsState>>,
+impl std::fmt::Debug for InboundListenerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InboundListenerConfig")
+            .field("inbound", &self.inbound)
+            .field("merged_inbound_tags", &self.merged_inbound_tags)
+            .field(
+                "logical_inbound_count",
+                &self.auth.auth_set().manager_count(),
+            )
+            .field("plain_vless", &self.plain_vless)
+            .field("router", &self.router.is_some())
+            .finish()
+    }
 }
 
 impl InboundListenerConfig {
@@ -54,6 +72,61 @@ impl InboundListenerConfig {
     fn inbound_tag_label(&self) -> &str {
         self.tag().unwrap_or("reality-in")
     }
+
+    pub fn auth_context(&self) -> &VlessInboundAuthContext {
+        &self.auth
+    }
+}
+
+pub(crate) fn build_inbound_auth_context(
+    merged_tags: &[String],
+    logical_users: &BTreeMap<String, Vec<VlessClient>>,
+    inbound: &VlessRealityInbound,
+    xray: &XrayConfig,
+    stats_registry: &Arc<StatsRegistry>,
+    stats_enabled: bool,
+) -> Result<VlessInboundAuthContext, LogicalInboundAuthError> {
+    let auth_set = Arc::new(LogicalInboundAuthSet::new());
+    let mut stats_by_tag = HashMap::new();
+
+    let users_by_tag = if logical_users.is_empty() {
+        let primary = merged_tags
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "reality-in".to_string());
+        BTreeMap::from([(primary, inbound.users.clone())])
+    } else {
+        logical_users.clone()
+    };
+
+    for tag in merged_tags {
+        let users = users_by_tag.get(tag).cloned().unwrap_or_default();
+        let manager = Arc::new(VlessUserManager::new_with_sniffing(
+            tag.clone(),
+            users,
+            inbound.sniffing_enabled,
+        ));
+        auth_set.register(manager)?;
+        if stats_enabled {
+            stats_by_tag.insert(
+                tag.clone(),
+                Arc::new(StatsState::from_xray_config_with_registry(
+                    xray,
+                    Arc::clone(stats_registry),
+                    tag.clone(),
+                )),
+            );
+        }
+    }
+
+    Ok(VlessInboundAuthContext::new(
+        auth_set,
+        Arc::new(RwLock::new(stats_by_tag)),
+    ))
+}
+
+pub(crate) fn plain_vless_merge_key(listen_addr: &str) -> String {
+    format!("plain:{listen_addr}")
 }
 
 struct ServerRuntimeConfig {
@@ -178,9 +251,13 @@ async fn relay_vless_fallback_with_log(
     reason: &str,
 ) -> std::io::Result<()> {
     let stats = config
-        .stats
+        .auth
+        .auth_set()
+        .tags()
+        .first()
+        .and_then(|tag| config.auth.stats_for(tag))
         .as_ref()
-        .and_then(|state| state.session(None, None));
+        .and_then(|state| state.session(None, None, None));
     let ctx = build_fallback_context(hello, initial_client_bytes);
     let selection = resolve_fallback_selection(
         &config.inbound.fallbacks,
@@ -303,12 +380,16 @@ fn is_early_eof(err: &std::io::Error) -> bool {
     err.to_string().to_ascii_lowercase().contains("early eof")
 }
 
-async fn handle_client(
+pub async fn handle_inbound_client(
     stream: TcpStream,
     config: Arc<InboundListenerConfig>,
     conn_id: u64,
     conn_started: Instant,
 ) -> std::io::Result<()> {
+    if config.plain_vless {
+        return handle_plain_vless_client(stream, config, conn_id, conn_started).await;
+    }
+
     let peer = stream.peer_addr().ok();
     let inbound_tag = config.inbound_tag_label();
     let inbound_protocol = "vless";
@@ -394,6 +475,7 @@ async fn handle_tls_client(
     conn_id: u64,
     conn_started: Instant,
 ) -> std::io::Result<()> {
+    let socket_meta = crate::routing::RouteSocketMeta::from_tcp_stream(&stream);
     debug!(
         conn_id,
         ?peer,
@@ -444,14 +526,15 @@ async fn handle_tls_client(
                 ch,
                 accepted,
                 &config.inbound.reality.dest_addr,
-                Arc::clone(&config.user_manager),
+                config.auth.clone(),
                 mldsa65_seed.as_ref(),
-                config.stats.as_deref(),
                 &config.inbound.transport,
                 Some(MuxSessionTrace {
                     conn_id,
                     conn_started,
                 }),
+                socket_meta,
+                config.router.clone(),
             )
             .await
             {
@@ -494,7 +577,25 @@ async fn handle_tls_client(
     }
 }
 
-fn validate_reality_runtime_feature_gates(config: &InboundListenerConfig) -> std::io::Result<()> {
+async fn handle_plain_vless_client(
+    stream: TcpStream,
+    config: Arc<InboundListenerConfig>,
+    _conn_id: u64,
+    _conn_started: Instant,
+) -> std::io::Result<()> {
+    let socket_meta = crate::routing::RouteSocketMeta::from_tcp_stream(&stream);
+    crate::vless::handle_vless_tcp_inbound_with_auth_context(
+        stream,
+        &config.auth,
+        &socket_meta,
+        config.router.as_ref(),
+    )
+    .await
+}
+
+pub fn validate_reality_runtime_feature_gates(
+    config: &InboundListenerConfig,
+) -> std::io::Result<()> {
     let _mldsa65_enabled = config.inbound.reality.mldsa65_seed.is_some();
     Ok(())
 }
@@ -520,7 +621,7 @@ fn transport_log_label(transport: &InboundTransportConfig) -> &'static str {
     }
 }
 
-fn normalized_reality_merge_key(inbound: &VlessRealityInbound) -> String {
+pub fn normalized_reality_merge_key(inbound: &VlessRealityInbound) -> String {
     let transport_key = match &inbound.transport {
         InboundTransportConfig::RawTcp => "raw".to_string(),
         InboundTransportConfig::XHttp(xhttp) => {
@@ -533,7 +634,7 @@ fn normalized_reality_merge_key(inbound: &VlessRealityInbound) -> String {
         }
     };
     format!(
-        "listen={}|private_key={}|dest={}|decryption={}|max_time_diff={}|min={}|max={}|show={}|mldsa={:?}|transport={}|upload_limit={:?}|download_limit={:?}",
+        "listen={}|private_key={}|dest={}|decryption={}|max_time_diff={}|min={}|max={}|show={}|mldsa={:?}|transport={}|sniffing={}|upload_limit={:?}|download_limit={:?}",
         inbound.listen_addr,
         inbound.reality.private_key,
         inbound.reality.dest_addr,
@@ -544,6 +645,7 @@ fn normalized_reality_merge_key(inbound: &VlessRealityInbound) -> String {
         inbound.reality.show,
         inbound.reality.mldsa65_seed,
         transport_key,
+        inbound.sniffing_enabled,
         inbound.reality.limit_fallback_upload,
         inbound.reality.limit_fallback_download,
     )
@@ -603,10 +705,45 @@ fn merge_vless_users(
     Ok(users)
 }
 
+fn reject_duplicate_uuid_across_logical_inbounds(
+    logical_users: &BTreeMap<String, Vec<VlessClient>>,
+    tag: &str,
+    users: &[VlessClient],
+) -> std::io::Result<()> {
+    for user in users {
+        for (existing_tag, existing_users) in logical_users {
+            if existing_tag == tag {
+                continue;
+            }
+            if existing_users.iter().any(|existing| existing.id == user.id) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "duplicate vless user id {} on merged listener: already registered under inbound {existing_tag}, cannot add under {tag}",
+                        user.id
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn merged_normalized_reality_inbounds(
     normalized: &NormalizedConfig,
-) -> std::io::Result<Vec<(VlessRealityInbound, Vec<String>)>> {
-    let mut groups: Vec<(String, VlessRealityInbound, Vec<String>)> = Vec::new();
+) -> std::io::Result<
+    Vec<(
+        VlessRealityInbound,
+        Vec<String>,
+        BTreeMap<String, Vec<VlessClient>>,
+    )>,
+> {
+    let mut groups: Vec<(
+        String,
+        VlessRealityInbound,
+        Vec<String>,
+        BTreeMap<String, Vec<VlessClient>>,
+    )> = Vec::new();
     for inbound in normalized
         .inbounds
         .iter()
@@ -616,13 +753,18 @@ fn merged_normalized_reality_inbounds(
         })
     {
         let key = normalized_reality_merge_key(inbound);
-        if let Some((_, existing, tags)) = groups
+        let tag = inbound
+            .tag
+            .clone()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "reality-in".to_string());
+        if let Some((_, existing, tags, logical_users)) = groups
             .iter_mut()
-            .find(|(group_key, _, _)| group_key == &key)
+            .find(|(group_key, _, _, _)| group_key == &key)
         {
-            if let Some(tag) = inbound.tag.clone() {
-                push_unique_string(tags, tag);
-            }
+            push_unique_string(tags, tag.clone());
+            reject_duplicate_uuid_across_logical_inbounds(logical_users, &tag, &inbound.users)?;
+            logical_users.insert(tag, inbound.users.clone());
             for server_name in &inbound.reality.server_names {
                 push_unique_string(&mut existing.reality.server_names, server_name.clone());
             }
@@ -637,20 +779,16 @@ fn merged_normalized_reality_inbounds(
                     .chain(inbound.users.clone().into_iter()),
             )?;
         } else {
-            let mut tags = Vec::new();
-            if let Some(tag) = inbound.tag.clone() {
-                tags.push(tag);
-            }
-            if tags.is_empty() {
-                tags.push("reality-in".to_string());
-            }
-            groups.push((key, inbound.clone(), tags));
+            let tags = vec![tag.clone()];
+            let mut logical_users = BTreeMap::new();
+            logical_users.insert(tag, inbound.users.clone());
+            groups.push((key, inbound.clone(), tags, logical_users));
         }
     }
 
     Ok(groups
         .into_iter()
-        .map(|(_, inbound, tags)| (inbound, tags))
+        .map(|(_, inbound, tags, logical_users)| (inbound, tags, logical_users))
         .collect())
 }
 
@@ -677,30 +815,27 @@ fn runtime_config_from_normalized(
     let stats_enabled = StatsState::from_xray_config(xray, None).enabled();
     let mut inbounds = Vec::with_capacity(runtimes.len());
 
-    for (inbound, merged_inbound_tags) in runtimes {
+    for (inbound, merged_inbound_tags, logical_users) in runtimes {
         let inbound_tag = inbound
             .tag
             .clone()
             .filter(|tag| !tag.is_empty())
             .unwrap_or_else(|| "reality-in".to_string());
-        let user_manager = Arc::new(VlessUserManager::new(
-            inbound_tag.clone(),
-            inbound.users.clone(),
-        ));
-        let stats = if stats_enabled {
-            Some(Arc::new(StatsState::from_xray_config_with_registry(
-                xray,
-                Arc::clone(&stats_registry),
-                inbound_tag.clone(),
-            )))
-        } else {
-            None
-        };
+        let auth = build_inbound_auth_context(
+            &merged_inbound_tags,
+            &logical_users,
+            &inbound,
+            xray,
+            &stats_registry,
+            stats_enabled,
+        )
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
         let listener_config = InboundListenerConfig {
             inbound,
             merged_inbound_tags,
-            user_manager,
-            stats,
+            auth,
+            plain_vless: false,
+            router: None,
         };
         validate_reality_runtime_feature_gates(&listener_config)?;
 
@@ -710,6 +845,7 @@ fn runtime_config_from_normalized(
             info!("REALITY show mode enabled in config");
         }
 
+        let total_users = listener_config.auth.auth_set().manager_count();
         info!(
             listen = %listener_config.inbound.listen_addr,
             dest = %listener_config.inbound.reality.dest_addr,
@@ -717,8 +853,7 @@ fn runtime_config_from_normalized(
             short_id_count = listener_config.inbound.reality.short_ids.len(),
             transport = transport_log_label(&listener_config.inbound.transport),
             max_time_diff = listener_config.inbound.reality.max_time_diff,
-            vless_client_count = listener_config.user_manager.user_count(),
-            vless_flow_distribution = %listener_config.user_manager.flow_distribution_log_label(),
+            logical_inbound_count = total_users,
             merged_inbound_tags = ?listener_config.merged_inbound_tags,
             vless_fallback_count = listener_config.inbound.fallbacks.len(),
             "loaded REALITY inbound settings"
@@ -792,7 +927,7 @@ async fn dispatch(command: Command) -> std::io::Result<()> {
 async fn start_xray_api_server(
     config_source: &str,
     xray: &XrayConfig,
-    inbound_users: Arc<InboundUserManagers>,
+    handler_runtime: Arc<HandlerRuntime>,
     stats_registry: Arc<StatsRegistry>,
 ) -> std::io::Result<Option<tokio::task::JoinHandle<std::io::Result<()>>>> {
     let Some(api) = xray.api.as_ref() else {
@@ -857,12 +992,18 @@ async fn start_xray_api_server(
         .map_err(|err| stage_error("failed to bind Xray API", err))?;
     info!(bind_addr = %bound_addr, "Xray API bind OK");
 
-    api::server::log_api_listener_ready(&listen, bound_addr, &api.services, &transport);
+    api::server::log_api_listener_ready(&listen, bound_addr, &api.services, &enabled, &transport);
     crate::startup_log::eprintln_api_listening(&listen, transport.as_log_label());
 
     let api_task = tokio::spawn(async move {
-        api::server::serve_grpc_on(listener, enabled, stats_registry, inbound_users, transport)
-            .await
+        api::server::serve_grpc_on(
+            listener,
+            enabled,
+            stats_registry,
+            handler_runtime,
+            transport,
+        )
+        .await
     });
 
     Ok(Some(api_task))
@@ -893,6 +1034,15 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
         .await
         .map_err(|err| stage_error("failed to load config source", err))?;
     crate::startup_log::eprintln_bootstrap("config load success");
+    if let Some(controller) = crate::logging::RuntimeLoggerController::global() {
+        controller.apply_runtime_config(xray.log.as_ref());
+        controller.restart().map_err(|err| {
+            stage_error(
+                "failed to start configured logger outputs",
+                std::io::Error::other(err.to_string()),
+            )
+        })?;
+    }
     info!(
         source = %redact_config_source(&config_source),
         config_source_kind = source_kind,
@@ -943,21 +1093,38 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
         }
     }
 
-    let inbound_users = Arc::new(InboundUserManagers::new());
     let stats_state = StatsState::from_xray_config(&xray, api_dokodemo_inbound_tag(&xray));
     let stats_registry = Arc::clone(&stats_state.registry);
+    let xray = Arc::new(xray);
+    let handler_runtime = Arc::new(
+        HandlerRuntime::new(
+            Arc::clone(&xray),
+            Arc::clone(&stats_registry),
+            api_dokodemo_inbound_tag(&xray),
+            false,
+        )
+        .map_err(|err| {
+            stage_error(
+                "failed to initialize routing runtime",
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()),
+            )
+        })?,
+    );
 
     let api_task = start_xray_api_server(
         &config_source,
         &xray,
-        Arc::clone(&inbound_users),
+        Arc::clone(&handler_runtime),
         Arc::clone(&stats_registry),
     )
     .await?;
 
     info!("loading REALITY runtime");
-    let server_config = load_runtime_config(&xray, stats_registry)
+    let mut server_config = load_runtime_config(&xray, stats_registry)
         .map_err(|err| stage_error("failed to load REALITY runtime", err))?;
+    for inbound in &mut server_config.inbounds {
+        inbound.router = Some(Arc::clone(&handler_runtime.router));
+    }
     if server_config.inbounds.is_empty() {
         return Err(stage_error(
             "failed to load REALITY runtime",
@@ -987,83 +1154,99 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
         .collect();
     start_reality_post_handshake_probes(&probe_inbounds);
 
-    for inbound in &server_config.inbounds {
-        inbound_users.register(Arc::clone(&inbound.user_manager));
-        for tag in &inbound.merged_inbound_tags {
-            inbound_users.register_tag(tag, Arc::clone(&inbound.user_manager));
-        }
+    for outbound in &xray.outbounds {
+        handler_runtime
+            .outbound
+            .register_startup_outbound(outbound)
+            .map_err(|err| {
+                stage_error(
+                    "failed to register startup outbound",
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()),
+                )
+            })?;
     }
 
     for inbound in &server_config.inbounds {
-        let listen_addr = inbound.inbound.listen_addr.clone();
         let inbound_tag = inbound
             .inbound
             .tag
             .clone()
             .unwrap_or_else(|| "reality-in".to_string());
-        let config = Arc::new(InboundListenerConfig {
-            inbound: inbound.inbound.clone(),
-            merged_inbound_tags: inbound.merged_inbound_tags.clone(),
-            user_manager: Arc::clone(&inbound.user_manager),
-            stats: inbound.stats.clone(),
-        });
+        let users = inbound
+            .auth
+            .auth_set()
+            .get_manager(&inbound_tag)
+            .map(|manager| {
+                manager
+                    .list_managed_users()
+                    .into_iter()
+                    .filter(|user| !user.email.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let handler_config =
+            encode_inbound_handler_config(&inbound.inbound, &users).map_err(|err| {
+                stage_error(
+                    "failed to encode startup inbound handler config",
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()),
+                )
+            })?;
 
         info!(
-            addr = %listen_addr,
+            addr = %inbound.inbound.listen_addr,
             inbound_tag = %inbound_tag,
-            transport = transport_log_label(&config.inbound.transport),
+            transport = transport_log_label(&inbound.inbound.transport),
             "REALITY inbound starting"
         );
-        if let InboundTransportConfig::XHttp(xhttp) = &config.inbound.transport {
+        if let InboundTransportConfig::XHttp(xhttp) = &inbound.inbound.transport {
             info!(
                 inbound_tag = %inbound_tag,
-                listen = %listen_addr,
+                listen = %inbound.inbound.listen_addr,
                 path = %xhttp.path,
                 mode = %xhttp.mode,
                 "xhttp inbound starting"
             );
         }
-        let listener = TcpListener::bind(&listen_addr)
+
+        for tag in &inbound.merged_inbound_tags {
+            if let Some(manager) = inbound.auth.auth_set().get_manager(tag) {
+                handler_runtime
+                    .inbound
+                    .user_managers()
+                    .register(Arc::clone(&manager));
+            }
+        }
+
+        handler_runtime
+            .inbound
+            .register_startup_inbound(
+                Arc::new(InboundListenerConfig {
+                    inbound: inbound.inbound.clone(),
+                    merged_inbound_tags: inbound.merged_inbound_tags.clone(),
+                    auth: inbound.auth.clone(),
+                    plain_vless: inbound.plain_vless,
+                    router: inbound.router.clone(),
+                }),
+                handler_config,
+            )
             .await
-            .map_err(|err| stage_error("failed to bind inbound", err))?;
+            .map_err(|err| {
+                stage_error(
+                    "failed to register startup inbound",
+                    std::io::Error::new(std::io::ErrorKind::Other, err.to_string()),
+                )
+            })?;
+
         crate::startup_log::eprintln_bootstrap(format!(
-            "REALITY listener started addr={listen_addr} tag={inbound_tag}"
+            "REALITY listener started addr={} tag={inbound_tag}",
+            inbound.inbound.listen_addr
         ));
         info!(
-            addr = %listen_addr,
+            addr = %inbound.inbound.listen_addr,
             inbound_tag = %inbound_tag,
-            transport = transport_log_label(&config.inbound.transport),
+            transport = transport_log_label(&inbound.inbound.transport),
             "REALITY listener started"
         );
-
-        tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, peer)) => {
-                        let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
-                        let conn_started = Instant::now();
-                        debug!(conn_id, %peer, elapsed_ms_since_conn_start = 0u128, "REALITY TCP client accepted");
-                        let config = Arc::clone(&config);
-                        tokio::spawn(async move {
-                            if let Err(err) =
-                                handle_client(stream, config, conn_id, conn_started).await
-                            {
-                                debug!(
-                                    conn_id,
-                                    %peer,
-                                    error = %err,
-                                    elapsed_ms_since_conn_start = conn_started.elapsed().as_millis(),
-                                    "connection closed with error"
-                                );
-                            }
-                        });
-                    }
-                    Err(err) => {
-                        warn!(error = %err, addr = %listen_addr, "failed to accept REALITY TCP connection");
-                    }
-                }
-            }
-        });
     }
 
     if let Some(mut api_task) = api_task {

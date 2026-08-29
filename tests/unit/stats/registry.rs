@@ -63,3 +63,33 @@ fn query_reset_clears_matched_counters() {
         0
     );
 }
+
+#[test]
+fn concurrent_add_and_reset_preserves_bytes_after_reset() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let registry = Arc::new(StatsRegistry::new());
+    let name = "user>>>u@example.com>>>traffic>>>uplink";
+    registry.ensure(name);
+
+    let adders: Vec<_> = (0..4)
+        .map(|_| {
+            let registry = Arc::clone(&registry);
+            thread::spawn(move || {
+                for _ in 0..1_000 {
+                    registry.add(name, 1);
+                }
+            })
+        })
+        .collect();
+
+    let reset_value = registry.get(name, true).unwrap_or(0);
+    for handle in adders {
+        handle.join().expect("join adder");
+    }
+    let after = registry.get(name, false).unwrap();
+    assert!(after >= 0);
+    assert!(reset_value >= 0);
+    assert_eq!(registry.get(name, false).unwrap(), after);
+}

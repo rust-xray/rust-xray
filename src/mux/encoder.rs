@@ -135,8 +135,7 @@ pub(crate) fn write_mux_destination_metadata(
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) fn encode_mux_new_tcp(id: u16, destination: &VlessDestination, data: &[u8]) -> Vec<u8> {
+pub fn encode_mux_new_tcp(id: u16, destination: &VlessDestination, data: &[u8]) -> Vec<u8> {
     encode_mux_new(MuxNetwork::Tcp, id, destination, data)
 }
 
@@ -150,7 +149,6 @@ pub(crate) fn encode_mux_keep_udp(id: u16, destination: &VlessDestination, data:
     encode_mux_udp_packet(id, destination, data).unwrap()
 }
 
-#[cfg(test)]
 fn encode_mux_new(
     network: MuxNetwork,
     id: u16,

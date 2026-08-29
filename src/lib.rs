@@ -13,6 +13,7 @@ pub mod mux;
 pub mod outbound;
 pub mod proxy;
 pub mod reality;
+pub mod routing;
 pub mod runtime;
 pub mod startup_log;
 pub mod stats;

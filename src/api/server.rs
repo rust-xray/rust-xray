@@ -21,7 +21,7 @@ use crate::config::{
     extract_api_inbound_tls_material, is_localhost_api_listen,
     is_remnawave_http_unix_config_source, ApiTlsMaterial, XrayConfig,
 };
-use crate::runtime::InboundUserManagers;
+use crate::runtime::HandlerRuntime;
 use crate::stats::StatsRegistry;
 
 /// Enabled Xray API gRPC services (from `api.services`).
@@ -398,10 +398,29 @@ pub async fn bind_api_listener(listen: &str) -> std::io::Result<(TcpListener, So
     Ok((listener, bound))
 }
 
+fn api_service_canonical_path(service: ApiService) -> &'static str {
+    match service {
+        ApiService::Reflection => "grpc.reflection.v1.ServerReflection",
+        ApiService::Handler => "xray.app.proxyman.command.HandlerService",
+        ApiService::Logger => "xray.app.log.command.LoggerService",
+        ApiService::Stats => "xray.app.stats.command.StatsService",
+        ApiService::Routing => "xray.app.router.command.RoutingService",
+    }
+}
+
+fn format_mounted_service_paths(enabled: &[ApiService]) -> String {
+    enabled
+        .iter()
+        .map(|service| api_service_canonical_path(*service))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub fn log_api_listener_ready(
     configured_listen: &str,
     bound_addr: SocketAddr,
-    services: &[String],
+    configured_services: &[String],
+    enabled: &[ApiService],
     mode: &ApiTransportMode,
 ) {
     let configured = configured_listen.trim();
@@ -410,15 +429,21 @@ pub fn log_api_listener_ready(
         ApiTransportMode::Tls { .. } => "TLS",
         ApiTransportMode::Mtls { .. } => "mTLS",
     };
+    let mounted = format_mounted_service_paths(enabled);
     info!(api_listen = %configured, "Xray API config listen");
     info!(
         api_bind_addr = %bound_addr,
         api_transport = mode.as_log_label(),
+        api_mounted_services = %mounted,
         "Xray API listening on {bound_addr} {transport_label}"
     );
-    info!(api_services = ?services, "Xray API enabled services");
+    info!(
+        api_services = ?configured_services,
+        api_mounted_services = %mounted,
+        "Xray API enabled services"
+    );
     crate::startup_log::eprintln_bootstrap(format!(
-        "API owns {bound_addr} for {transport_label} gRPC (xray.app.stats.command.StatsService)"
+        "API owns {bound_addr} for {transport_label} gRPC ({mounted})"
     ));
 }
 
@@ -476,7 +501,7 @@ pub async fn serve_grpc_on(
     listener: TcpListener,
     services: Vec<ApiService>,
     stats_registry: Arc<StatsRegistry>,
-    inbound_users: Arc<InboundUserManagers>,
+    handler_runtime: Arc<HandlerRuntime>,
     transport: ApiTransportMode,
 ) -> std::io::Result<()> {
     let local_addr = listener.local_addr()?;
@@ -515,14 +540,19 @@ pub async fn serve_grpc_on(
     }
     if services.contains(&ApiService::Handler) {
         add_service!(HandlerServiceServer::new(HandlerServiceImpl::new(
-            Arc::clone(&inbound_users,)
+            Arc::clone(&handler_runtime)
         )));
     }
     if services.contains(&ApiService::Logger) {
-        add_service!(LoggerServiceServer::new(LoggerServiceImpl));
+        let logger = LoggerServiceImpl::from_global().map_err(|err| {
+            std::io::Error::other(format!("LoggerService unavailable: {}", err.message()))
+        })?;
+        add_service!(LoggerServiceServer::new(logger));
     }
     if services.contains(&ApiService::Routing) {
-        add_service!(RoutingServiceServer::new(RoutingServiceImpl));
+        add_service!(RoutingServiceServer::new(RoutingServiceImpl::new(
+            Arc::clone(&handler_runtime)
+        )));
     }
 
     let router = router.ok_or_else(|| {
@@ -542,11 +572,18 @@ pub async fn serve_grpc(
     listen: &str,
     services: Vec<ApiService>,
     stats_registry: Arc<StatsRegistry>,
-    inbound_users: Arc<InboundUserManagers>,
+    handler_runtime: Arc<HandlerRuntime>,
 ) -> std::io::Result<()> {
     let transport = api_transport_mode_from_env()?;
     let (listener, _) = bind_api_listener(listen).await?;
-    serve_grpc_on(listener, services, stats_registry, inbound_users, transport).await
+    serve_grpc_on(
+        listener,
+        services,
+        stats_registry,
+        handler_runtime,
+        transport,
+    )
+    .await
 }
 
 #[cfg(test)]

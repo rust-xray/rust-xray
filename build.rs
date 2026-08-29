@@ -3,13 +3,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [
         "app/stats/command/command.proto",
         "app/proxyman/command/command.proto",
+        "app/proxyman/config.proto",
         "app/log/command/config.proto",
         "app/router/command/command.proto",
+        "app/router/config.proto",
         "common/protocol/user.proto",
         "common/serial/typed_message.proto",
+        "common/net/address.proto",
+        "common/net/port.proto",
         "common/net/network.proto",
+        "common/geodata/geodat.proto",
         "core/config.proto",
         "proxy/vless/account_minimal.proto",
+        "proxy/vless/inbound/config.proto",
+        "proxy/freedom/config.proto",
+        "proxy/blackhole/config.proto",
+        "transport/internet/config.proto",
+        "transport/internet/reality/config.proto",
+        "transport/internet/splithttp/config.proto",
     ];
 
     let mut config = tonic_build::configure()

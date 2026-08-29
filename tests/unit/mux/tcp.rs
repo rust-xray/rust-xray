@@ -72,13 +72,13 @@ fn unsupported_udp_non_dns_closes_substream_without_panic() {
     block_on(async {
         let destination = VlessDestination::Domain("udp.example".to_string(), 54);
         let open = encode_mux_new_udp(16, &destination, b"not-dns");
-        let (mut client_io, server_io) = tokio::io::duplex(8192);
+        let (mut client_io, mut server_io) = tokio::io::duplex(8192);
         client_io
             .write_all(&open)
             .await
             .expect("write mux udp open");
 
-        let handle = tokio::spawn(async move { handle_mux_cool_inbound(server_io).await });
+        let handle = tokio::spawn(async move { handle_mux_cool_inbound(&mut server_io).await });
         assert_eq!(
             read_mux_frame(&mut client_io).await.expect("read mux end"),
             MuxFrame {
@@ -115,13 +115,13 @@ fn generic_udp_relay_returns_mux_response_for_arbitrary_destination() {
 
         let destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), udp_port);
         let open = encode_mux_new_udp(18, &destination, b"hello");
-        let (mut client_io, server_io) = tokio::io::duplex(8192);
+        let (mut client_io, mut server_io) = tokio::io::duplex(8192);
         client_io
             .write_all(&open)
             .await
             .expect("write generic udp open");
 
-        let handle = tokio::spawn(async move { handle_mux_cool_inbound(server_io).await });
+        let handle = tokio::spawn(async move { handle_mux_cool_inbound(&mut server_io).await });
         assert_eq!(
             read_mux_frame(&mut client_io)
                 .await
@@ -176,7 +176,7 @@ fn generic_udp_slow_destination_does_not_block_next_mux_frame() {
         let fast_destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), fast_port);
         let slow_open = encode_mux_new_udp(30, &slow_destination, b"slow");
         let fast_open = encode_mux_new_udp(31, &fast_destination, b"fast");
-        let (mut client_io, server_io) = tokio::io::duplex(8192);
+        let (mut client_io, mut server_io) = tokio::io::duplex(8192);
         client_io
             .write_all(&slow_open)
             .await
@@ -186,7 +186,7 @@ fn generic_udp_slow_destination_does_not_block_next_mux_frame() {
             .await
             .expect("write fast udp open");
 
-        let handle = tokio::spawn(async move { handle_mux_cool_inbound(server_io).await });
+        let handle = tokio::spawn(async move { handle_mux_cool_inbound(&mut server_io).await });
         assert_eq!(
             read_mux_frame(&mut client_io)
                 .await

@@ -1,7 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::config::XrayConfig;
-use crate::dns::routing::DnsRouter;
 use crate::dns::{DnsEngine, DnsError};
 
 use super::domain_strategy::OutboundDomainStrategy;
@@ -14,10 +13,9 @@ pub struct OutboundConnectRuntime {
     pub routing: Option<RoutingDnsRuntime>,
 }
 
-/// Routing + DNS resolution skeleton for future rule-driven outbound dials.
+/// DNS resolution context for outbound dials when domain strategy requires lookup.
 #[derive(Clone)]
 pub struct RoutingDnsRuntime {
-    pub router: DnsRouter,
     pub domain_strategy: OutboundDomainStrategy,
     pub dns: Arc<DnsEngine>,
 }
@@ -47,8 +45,7 @@ impl OutboundConnectRuntime {
                 .and_then(|routing| routing.domain_strategy.as_deref()),
             xray.dns.as_ref().map(|dns| dns.query_strategy),
         );
-        let routing = xray.routing.as_ref().map(|routing| RoutingDnsRuntime {
-            router: DnsRouter::new(Some(routing.clone()), xray.outbounds.clone()),
+        let routing = xray.routing.as_ref().map(|_| RoutingDnsRuntime {
             domain_strategy,
             dns: DnsEngine::shared(),
         });

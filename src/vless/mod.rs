@@ -22,7 +22,9 @@ pub use fallback::{
 };
 pub use inbound::{
     handle_reality_vless_tcp_inbound, handle_reality_vless_tcp_inbound_traced,
-    handle_vless_tcp_inbound, handle_vless_tcp_inbound_with_response_hook, is_supported_vless_flow,
+    handle_vless_tcp_inbound, handle_vless_tcp_inbound_with_auth_context,
+    handle_vless_tcp_inbound_with_response_hook, handle_vless_tcp_inbound_with_socket_meta,
+    handle_vless_tcp_inbound_with_socket_meta_and_response_hook, is_supported_vless_flow,
     prepare_vless_tcp_response, read_vless_request, write_vless_response_header,
     VlessInboundRequest,
 };

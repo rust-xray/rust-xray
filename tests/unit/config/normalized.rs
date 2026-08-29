@@ -265,7 +265,7 @@ fn remnawave_routing_api_normalizes() {
     let runtime = first_reality_inbound_runtime(&config).unwrap();
     assert!(vless_reality_matches_runtime(reality_inbounds[0], &runtime));
 
-    assert!(!normalized.routing.enforced);
+    assert!(normalized.routing.enforced);
     assert_eq!(normalized.routing.rules.len(), 1);
     assert_eq!(
         normalized.routing.rules[0].outbound_tag.as_deref(),

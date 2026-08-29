@@ -56,7 +56,13 @@ pub use record_crypto::{
 };
 pub use state::{complete_reality_tls13_handshake, RealityTls13ServerState};
 pub use stream::{
-    ApplicationStreamDirectRelay, RealityTls13ApplicationStream, RealityTls13ClientReader,
-    RealityTls13ClientWriter, RealityTls13RelayClient, RealityTls13RelaySplit,
+    relay_split_bidirectional_with_overflow_alert, relay_tls13_split_bidirectional,
+    ApplicationStreamDirectRelay, ClientFinishedReadError, RealityTls13ApplicationStream,
+    RealityTls13ClientReader, RealityTls13ClientWriter, RealityTls13RelayClient,
+    RealityTls13RelaySplit, SplitMuxInbound, Tls13OverflowAlertWriter,
 };
 pub use transcript::{Tls13HashAlgorithm, TranscriptHash};
+pub use useless_records::{
+    is_useless_record_overflow, too_many_ignored_records_error, useless_record_overflow_limit,
+    UselessRecordCounter, UselessRecordOverflow,
+};

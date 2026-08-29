@@ -9,7 +9,6 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use super::bridge::run_packet_up_bridge;
 use super::mode::EffectiveXHttpMode;
 use super::packet_up_input::{
     PacketUpBoundedInput, PacketUpInputError, PacketUpSessionInputReader,
@@ -456,13 +455,15 @@ pub(crate) fn spawn_stream_up_bridge(
     stats_state: Option<StatsState>,
     inbound_tag: String,
     conn_id: u64,
+    socket_meta: crate::routing::RouteSocketMeta,
+    router: Option<Arc<crate::routing::RuntimeRouter>>,
 ) {
     let session_id = launch.session_id.clone();
     let runtime_for_download = Arc::clone(&launch.runtime);
     let manager = shared_stream_up_manager();
     tokio::spawn(async move {
         let started = Instant::now();
-        let result = run_packet_up_bridge(
+        let result = crate::transport::xhttp::bridge::run_packet_up_bridge_with_socket_meta(
             launch.reader,
             move |chunk| broadcast_download(&runtime_for_download, chunk),
             &inbound_tag,
@@ -470,6 +471,8 @@ pub(crate) fn spawn_stream_up_bridge(
             &session_id,
             &users,
             stats_state.as_ref(),
+            &socket_meta,
+            router.as_ref(),
         )
         .await;
         manager.close_session(&session_id, "bridge_completed");

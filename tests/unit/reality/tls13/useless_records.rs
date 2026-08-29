@@ -1,10 +1,12 @@
 use std::io::{Cursor, ErrorKind};
 
 use crate::reality::post_handshake::UselessRecordTolerance;
-use crate::reality::tls13::stream::read_client_finished_tls_record_from_stream;
+use crate::reality::tls13::stream::{
+    read_client_finished_tls_record_from_stream, ClientFinishedReadError,
+};
 use crate::reality::tls13::useless_records::{
     classify_record_before_client_finished, classify_record_on_application_stream,
-    too_many_ignored_records_error, UselessRecordCounter,
+    too_many_ignored_records_error, UselessRecordCounter, UselessRecordOverflow,
 };
 use crate::tls::records::{
     build_application_data_record, build_tls_record, TLS13_COMPATIBILITY_CCS_RECORD,
@@ -18,6 +20,18 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .build()
         .expect("tokio runtime")
         .block_on(future)
+}
+
+async fn read_client_finished_io<S>(
+    stream: &mut S,
+    tolerance: UselessRecordTolerance,
+) -> std::io::Result<crate::tls::TlsRecord>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    read_client_finished_tls_record_from_stream(stream, tolerance)
+        .await
+        .map_err(ClientFinishedReadError::into_io_error)
 }
 
 fn compatibility_ccs_record() -> Vec<u8> {
@@ -38,9 +52,8 @@ fn finished_flight(ccs_count: usize) -> Vec<u8> {
 fn counter_finite_one_accepts_first_rejects_second() {
     let mut counter = UselessRecordCounter::new(UselessRecordTolerance::Finite(1));
     counter.observe_useless().expect("first");
-    let err = counter.observe_useless().unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::InvalidData);
-    assert!(err.to_string().contains("limit=1"));
+    let overflow = counter.observe_useless().unwrap_err();
+    assert_eq!(overflow, UselessRecordOverflow { limit: 1 });
 }
 
 #[test]
@@ -50,9 +63,8 @@ fn counter_finite_sixteen_and_thirty_two_boundaries() {
         for _ in 0..tolerated {
             counter.observe_useless().expect("within limit");
         }
-        let err = counter.observe_useless().unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::InvalidData);
-        assert!(err.to_string().contains(&format!("limit={limit}")));
+        let overflow = counter.observe_useless().unwrap_err();
+        assert_eq!(overflow, UselessRecordOverflow { limit });
     }
 }
 
@@ -76,8 +88,8 @@ fn counter_resets_on_advancing_record() {
     for _ in 0..16 {
         counter.observe_useless().expect("second run");
     }
-    let err = counter.observe_useless().unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    let overflow = counter.observe_useless().unwrap_err();
+    assert_eq!(overflow, UselessRecordOverflow { limit: 16 });
 }
 
 #[test]
@@ -161,20 +173,14 @@ fn application_stream_classifies_valid_ccs_as_useless() {
 fn read_client_finished_finite_one_matrix() {
     block_on(async {
         let tolerance = UselessRecordTolerance::Finite(1);
-        let ok = read_client_finished_tls_record_from_stream(
-            &mut Cursor::new(finished_flight(1)),
-            tolerance,
-        )
-        .await
-        .expect("ccs+finished");
+        let ok = read_client_finished_io(&mut Cursor::new(finished_flight(1)), tolerance)
+            .await
+            .expect("ccs+finished");
         assert_eq!(ok.content_type, TlsRecordContentType::ApplicationData);
 
-        let err = read_client_finished_tls_record_from_stream(
-            &mut Cursor::new(finished_flight(2)),
-            tolerance,
-        )
-        .await
-        .unwrap_err();
+        let err = read_client_finished_io(&mut Cursor::new(finished_flight(2)), tolerance)
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         assert!(err.to_string().contains("limit=1"));
     });
@@ -184,19 +190,13 @@ fn read_client_finished_finite_one_matrix() {
 fn read_client_finished_finite_sixteen_matrix() {
     block_on(async {
         let tolerance = UselessRecordTolerance::Finite(16);
-        read_client_finished_tls_record_from_stream(
-            &mut Cursor::new(finished_flight(16)),
-            tolerance,
-        )
-        .await
-        .expect("16 ccs");
+        read_client_finished_io(&mut Cursor::new(finished_flight(16)), tolerance)
+            .await
+            .expect("16 ccs");
 
-        let err = read_client_finished_tls_record_from_stream(
-            &mut Cursor::new(finished_flight(17)),
-            tolerance,
-        )
-        .await
-        .unwrap_err();
+        let err = read_client_finished_io(&mut Cursor::new(finished_flight(17)), tolerance)
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         assert!(err.to_string().contains("limit=16"));
     });
@@ -206,19 +206,13 @@ fn read_client_finished_finite_sixteen_matrix() {
 fn read_client_finished_finite_thirty_two_matrix() {
     block_on(async {
         let tolerance = UselessRecordTolerance::Finite(32);
-        read_client_finished_tls_record_from_stream(
-            &mut Cursor::new(finished_flight(32)),
-            tolerance,
-        )
-        .await
-        .expect("32 ccs");
+        read_client_finished_io(&mut Cursor::new(finished_flight(32)), tolerance)
+            .await
+            .expect("32 ccs");
 
-        let err = read_client_finished_tls_record_from_stream(
-            &mut Cursor::new(finished_flight(33)),
-            tolerance,
-        )
-        .await
-        .unwrap_err();
+        let err = read_client_finished_io(&mut Cursor::new(finished_flight(33)), tolerance)
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         assert!(err.to_string().contains("limit=32"));
     });
@@ -227,7 +221,7 @@ fn read_client_finished_finite_thirty_two_matrix() {
 #[test]
 fn read_client_finished_unlimited_accepts_sixty_four() {
     block_on(async {
-        read_client_finished_tls_record_from_stream(
+        read_client_finished_io(
             &mut Cursor::new(finished_flight(64)),
             UselessRecordTolerance::Unlimited,
         )
@@ -241,12 +235,10 @@ fn read_client_finished_rejects_unexpected_handshake_record() {
     block_on(async {
         let handshake = build_tls_record(TLS_RECORD_HANDSHAKE, TLS_LEGACY_VERSION_1_2, &[0x01])
             .expect("handshake");
-        let err = read_client_finished_tls_record_from_stream(
-            &mut Cursor::new(handshake),
-            UselessRecordTolerance::DEFAULT,
-        )
-        .await
-        .unwrap_err();
+        let err =
+            read_client_finished_io(&mut Cursor::new(handshake), UselessRecordTolerance::DEFAULT)
+                .await
+                .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
     });
 }

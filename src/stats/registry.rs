@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use super::online_map::OnlineMap;
+
 /// One traffic counter (Xray `stats.Counter`).
 #[derive(Debug)]
 pub struct Counter {
@@ -46,6 +48,7 @@ pub enum GetStatError {
 #[derive(Debug, Default)]
 pub struct StatsRegistry {
     counters: RwLock<BTreeMap<String, Arc<Counter>>>,
+    online_maps: RwLock<BTreeMap<String, Arc<OnlineMap>>>,
 }
 
 impl StatsRegistry {
@@ -102,6 +105,51 @@ impl StatsRegistry {
             });
         }
         out
+    }
+
+    pub fn visit_counters<F>(&self, mut visitor: F)
+    where
+        F: FnMut(&str, &Counter) -> bool,
+    {
+        let guard = self.counters.read().expect("stats registry lock");
+        for (name, counter) in guard.iter() {
+            if !visitor(name, counter.as_ref()) {
+                break;
+            }
+        }
+    }
+
+    pub fn get_or_register_online_map(&self, name: &str) -> Arc<OnlineMap> {
+        let mut guard = self.online_maps.write().expect("stats registry lock");
+        guard
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(OnlineMap::new()))
+            .clone()
+    }
+
+    pub fn get_online_map(&self, name: &str) -> Option<Arc<OnlineMap>> {
+        let guard = self.online_maps.read().expect("stats registry lock");
+        guard.get(name).cloned()
+    }
+
+    pub fn visit_online_maps<F>(&self, mut visitor: F)
+    where
+        F: FnMut(&str, &OnlineMap) -> bool,
+    {
+        let guard = self.online_maps.read().expect("stats registry lock");
+        for (name, map) in guard.iter() {
+            if !visitor(name, map.as_ref()) {
+                break;
+            }
+        }
+    }
+
+    pub fn get_all_online_users(&self) -> Vec<String> {
+        let guard = self.online_maps.read().expect("stats registry lock");
+        guard
+            .iter()
+            .filter_map(|(name, map)| (map.count() > 0).then_some(name.clone()))
+            .collect()
     }
 }
 

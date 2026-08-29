@@ -60,4 +60,11 @@ impl InboundUserManagers {
         tags.sort();
         tags
     }
+
+    pub fn unregister_tag(&self, tag: &str) {
+        self.managers
+            .write()
+            .expect("inbound user managers lock")
+            .remove(tag);
+    }
 }

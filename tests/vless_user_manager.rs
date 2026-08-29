@@ -172,6 +172,33 @@ fn list_managed_users_includes_static_and_dynamic_entries() {
 }
 
 #[test]
+fn concurrent_duplicate_uuid_add_is_safe() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let manager = Arc::new(static_manager());
+    let mut handles = Vec::new();
+    for index in 0..2 {
+        let manager = Arc::clone(&manager);
+        handles.push(thread::spawn(move || {
+            manager.add_user(ManagedUser {
+                id: DYNAMIC_ID,
+                email: format!("dup{index}@example.test"),
+                flow: None,
+                level: None,
+                expiry_secs: None,
+            })
+        }));
+    }
+    let outcomes: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("join"))
+        .collect();
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(outcomes.iter().filter(|result| result.is_err()).count(), 1);
+}
+
+#[test]
 fn remove_missing_user_returns_error() {
     let manager = static_manager();
     let err = manager

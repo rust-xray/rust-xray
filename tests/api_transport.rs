@@ -11,7 +11,7 @@ use rust_xray::api::server::{
     resolve_api_transport_mode, serve_grpc_on, ApiService, ApiTransportContext, ApiTransportMode,
 };
 use rust_xray::config::{extract_api_inbound_tls_material, XrayConfig};
-use rust_xray::runtime::InboundUserManagers;
+use rust_xray::runtime::HandlerRuntime;
 use rust_xray::stats::StatsRegistry;
 use tempfile::tempdir;
 use tokio::net::TcpListener;
@@ -115,7 +115,8 @@ async fn start_stats_server(transport: ApiTransportMode) -> std::net::SocketAddr
     let addr = listener.local_addr().expect("addr");
     let registry = Arc::new(StatsRegistry::new());
     tokio::spawn(async move {
-        let inbound_users = Arc::new(InboundUserManagers::new());
+        let inbound_users =
+            HandlerRuntime::for_handler_tests(Arc::new(rust_xray::stats::StatsRegistry::new()));
         let _ = serve_grpc_on(
             listener,
             vec![ApiService::Stats],

@@ -13,6 +13,7 @@ fn probe_inbound(dest: &str, server_names: &[&str]) -> VlessRealityInbound {
         users: Vec::<VlessUser>::new(),
         transport: InboundTransportConfig::RawTcp,
         fallbacks: Vec::new(),
+        sniffing_enabled: false,
         reality: RealityServerConfig {
             dest_addr: dest.to_string(),
             private_key: "test".to_string(),

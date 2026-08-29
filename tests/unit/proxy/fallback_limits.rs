@@ -110,6 +110,7 @@ fn test_stats_setup() -> (StatsSession, Arc<StatsRegistry>) {
         "direct".to_string(),
         None,
         None,
+        None,
     );
     (session, registry)
 }

@@ -8,10 +8,10 @@ use crate::config::InboundTransportConfig;
 use crate::mux::MuxSessionTrace;
 use crate::protocol::structs::ClientHelloPayload;
 use crate::reality::Mldsa65Seed;
-use crate::stats::StatsState;
+use crate::routing::{RouteSocketMeta, RuntimeRouter};
+use crate::runtime::VlessInboundAuthContext;
 use crate::tls::{PrefixedStream, TlsClientHelloRecord};
 use crate::transport::{run_inbound_transport, AcceptedTransport, VlessHandler};
-use crate::vless::VlessUserManager;
 
 use super::decision::RealityAccepted;
 use super::handshake::{fetch_dest_handshake, prepare_reality_tls13_state};
@@ -31,10 +31,10 @@ pub async fn handle_accepted_reality_client(
     client_hello_payload: ClientHelloPayload,
     accepted: RealityAccepted,
     dest_addr: &str,
-    users: std::sync::Arc<VlessUserManager>,
+    auth: VlessInboundAuthContext,
     mldsa65_seed: Option<&Mldsa65Seed>,
-    stats_state: Option<&StatsState>,
     transport: &InboundTransportConfig,
+    source_ip: Option<std::net::IpAddr>,
 ) -> std::io::Result<()> {
     handle_accepted_reality_client_traced(
         client,
@@ -42,10 +42,14 @@ pub async fn handle_accepted_reality_client(
         client_hello_payload,
         accepted,
         dest_addr,
-        users,
+        auth,
         mldsa65_seed,
-        stats_state,
         transport,
+        None,
+        RouteSocketMeta {
+            source_ip,
+            ..Default::default()
+        },
         None,
     )
     .await
@@ -57,13 +61,15 @@ pub async fn handle_accepted_reality_client_traced(
     client_hello_payload: ClientHelloPayload,
     accepted: RealityAccepted,
     dest_addr: &str,
-    users: std::sync::Arc<VlessUserManager>,
+    auth: VlessInboundAuthContext,
     mldsa65_seed: Option<&Mldsa65Seed>,
-    stats_state: Option<&StatsState>,
     transport: &InboundTransportConfig,
     mux_trace: Option<MuxSessionTrace>,
+    socket_meta: RouteSocketMeta,
+    router: Option<std::sync::Arc<RuntimeRouter>>,
 ) -> std::io::Result<()> {
     let path_started = Instant::now();
+    let logical_inbound_count = auth.auth_set().manager_count();
     info!(
         conn_id = mux_trace.map(|trace| trace.conn_id),
         elapsed_ms_since_conn_start = mux_trace.map(|trace| trace.conn_started.elapsed().as_millis()),
@@ -72,7 +78,7 @@ pub async fn handle_accepted_reality_client_traced(
         client_version = ?accepted.client.client_version,
         unix_time = accepted.client.unix_time,
         short_id_len = short_id_prefix_len(&accepted.client.short_id),
-        vless_client_count = users.user_count(),
+        logical_inbound_count,
         client_hello_record_len = record.raw_record.len(),
         %dest_addr,
         "REALITY accepted path started"
@@ -158,7 +164,7 @@ pub async fn handle_accepted_reality_client_traced(
     );
 
     let accepted_transport = AcceptedTransport::from_inbound_transport_config(transport)?;
-    let vless_handler = VlessHandler::new(users, stats_state.cloned(), mux_trace);
+    let vless_handler = VlessHandler::new_with_auth_context(auth, mux_trace, socket_meta, router);
 
     run_inbound_transport(accepted_transport, tls_app_stream, &vless_handler).await?;
 

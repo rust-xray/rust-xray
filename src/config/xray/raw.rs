@@ -10,6 +10,12 @@ use super::LimitFallback;
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct LogConfig {
     pub loglevel: Option<String>,
+    #[serde(default)]
+    pub access: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(rename = "dnsLog", default)]
+    pub dns_log: bool,
 
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,

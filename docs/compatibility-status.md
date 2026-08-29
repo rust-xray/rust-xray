@@ -29,7 +29,8 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | REALITY `minClientVer` default | Working | Xray-core af7eb68 semantics: omitted or `""` → effective `26.3.27`; explicit value (including `"0.0.0"`) overrides. Does **not** imply every third-party REALITY client is accepted — see [README policy matrix](../README.md#reality-server-minclientver-xray-core-compatibility). Regression: `tests/upstream_compat_vectors.rs`. |
 | REALITY accepted path | Working | TLS 1.3 server handshake + application stream (live smoke) |
 | REALITY post-handshake record detection (Stage 5B) | Working | Proactive `dest × serverName × ALPN` probes; typed cache; post-client-Finished camouflage emission |
-| REALITY post-handshake CCS tolerance (Stage 5C) | Working | Proactive `dest × serverName × ALPN` CCS tolerance probes; typed cache; accepted-path `readClientFinished` + application-stream useless-record policy (`Finite(1/16/32)` / `Unlimited`; default `Finite(32)`) |
+| REALITY post-handshake CCS tolerance (Stage 5C) | Working | Proactive `dest × serverName × ALPN` CCS tolerance probes; typed cache; accepted-path `readClientFinished` + application-stream useless-record policy (`Finite(1/16/32)` / `Unlimited`; default `Finite(32)`). **Stage 5C timing parity gap:** Rust may install detected tolerance before client Finished; upstream default `32` during `readClientFinished`, detected limit after verified Finished. |
+| REALITY useless-record overflow TLS alert (Stage 7) | Working | On accepted TLS 1.3 path, consecutive useless-record overflow emits one encrypted fatal `unexpected_message` alert (best-effort) then returns `too many ignored records`. Covers `readClientFinished`, pre-VLESS parse, standard TCP relay, Vision TCP relay, and REALITY Mux (including Vision+Mux). **Partial:** general TLS alert parity outside this overflow case remains incomplete. |
 | REALITY fallback rate limits (Stage 6) | Working | `limitFallbackUpload` / `limitFallbackDownload` on pre-auth fallback relay only; juju/ratelimit v1.0.2-compatible token bucket. **Partial parity:** no upstream `MirrorConn` ClientHello mirroring timing; no upstream `s2cSaved` download prebuffer — limiter starts at post-initial relay boundary. Accepted REALITY/VLESS traffic is never rate-limited. |
 | TLS 1.3 accepted path | Working | AES128-GCM, AES256-GCM, CHACHA20-Poly1305 (CCM suites rejected) |
 | VLESS TCP inbound | Working | UUID auth, `decryption: "none"` |
@@ -43,7 +44,7 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | Fallback `xver=1` PROXY v1 | Working | Live smoke |
 | Fallback `xver=2` PROXY v2 | Working | Live smoke + golden vector |
 | Network alias `raw` / legacy `tcp` | Working | Same REALITY TCP runtime |
-| StatsService API (basic) | Working | `QueryStats`, `GetStats`, `GetSysStats` when `api` block present |
+| StatsService API | Working | All seven RPCs when `api` block present; atomic counter reset; OnlineMap refcount; seven policy flags default false until `policy` enables them; online IP from TCP peer through all transports including XHTTP; dynamic users use level policy automatically; `GetSysStats` Go-runtime fields N/A in Rust (Stage 8B) |
 | DNS engine core (cache, dedup, UDP/TCP) | Working | `DnsEngine` in-process; numeric IP servers; no system resolver on engine path |
 | Mux UDP DNS (Happ baseline) | Working | `DnsEngine` via `resolve_mux_udp_dns`; numeric `:53` (e.g. `1.1.1.1:53`) |
 
@@ -78,11 +79,16 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 
 | Area | Status | Notes |
 |------|--------|-------|
+| Xray gRPC API foundation (Stage 8A) | Working | Canonical protobuf/service registration, direct `api.listen`, optional reflection, plaintext default, shared runtime state wiring (`StatsRegistry`, `InboundUserManagers`) |
+| HandlerService (Stage 8E1) | Working | Full current `HandlerService` RPC surface: `AddInbound`, `RemoveInbound`, `AlterInbound`, `ListInbounds` (tags + full config), `GetInboundUsers`, `GetInboundUsersCount`, `AddOutbound`, `RemoveOutbound`, `AlterOutbound` (upstream-style failure for unknown ops), `ListOutbounds`. Runtime-backed via `RuntimeInboundManager` / `RuntimeOutboundManager`; dynamic VLESS+REALITY inbound, freedom/blackhole outbound; no `UNIMPLEMENTED` stubs. Unsupported Xray proxy protocols still rejected deterministically. Dynamic changes are runtime-only (no config file rewrite). |
+| RoutingService (Stage 8E2) | Working | All seven RPCs runtime-backed via `RuntimeRouter`; static JSON + dynamic `AddRule`/`RemoveRule` share one rule table; VLESS TCP dispatch uses same router; routing stats channel opt-in (disabled at startup like upstream `nil` registration). Webhook rules fire after route selection (non-blocking HTTP POST, headers, dedup, cleanup on RemoveRule/replace/shutdown). `RouteContext.protocol` is sniffed payload content (`tls`/`http`/empty), not inbound proxy protocol. Unsupported: attributes production extraction (no sniff/dispatcher metadata), remote-client process identity, IpOnDemand second-pass DNS, observatory-aware balancer health. Canonical protobuf `local_os` (field 23) compiled for `AddRule`/TestRoute; JSON `localOS` alias also supported. |
+| LoggerService (Stage 8E3) | Working | Canonical `RestartLogger` RPC on `xray.app.log.command.LoggerService`; runtime-backed `RuntimeLoggerController` closes then reopens configured error/access outputs from in-memory config (no config file reload). File rotation reopen proven via tonic E2E. Legacy `v2ray.core.app.log.command.LoggerService` alias deferred to Stage 8E5. |
+| RemnaNode 3.3.2 E2E (Stage 8D) | Partial | StatsService parity implemented; unix-abstract API tunnel integration pending Stage 8D |
 | Mux.Cool frame parser | Partial | `New` / `Keep` / `End` / `KeepAlive`; TCP and UDP frame metadata parsed |
 | Mux TCP substream | Partial | Single active TCP substream to freedom outbound (no parallel substreams) |
 | Mux UDP DNS (domain `:53`) | Partial | Domain `:53` mux targets still closed (numeric IP DNS works) |
-| Outbound routing / rules / balancers | Partial | `RoutingDnsRuntime` skeleton; freedom dial uses domain strategy only |
-| Remnawave / panel configs | Partial | Config load + API + REALITY inbound; full routing execution not implemented |
+| Outbound routing / rules / balancers | **Working (Stage 8E2)** | `RuntimeRouter` shared by VLESS data-plane + `RoutingService`; static + dynamic rules; balancers (random/roundRobin/leastPing/leastLoad selection); `TestRoute`, `AddRule`, `RemoveRule`, `ListRule`, `GetBalancerInfo`, `OverrideBalancerTarget`; `SubscribeRoutingStats` when routing stats channel enabled (disabled by default, matching upstream nil registration) |
+| Remnawave / panel configs | Partial | Config load + API + REALITY inbound + routing rule execution for supported conditions; geosite/geoip/process unsupported; attributes/process production metadata absent |
 | DNS engine — DoH / hostname servers | Partial | `https://` parsed; queries return explicit unsupported |
 | DNS engine — `protocol: "dns"` outbound | Partial | Config tolerated; placeholder only (see [dns-future.md](./dns-future.md)) |
 
@@ -98,7 +104,7 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | XUDP | Not implemented |
 | Full UDP mux relay (all destinations / parallel substreams) | Not implemented |
 | DNS UDP relay inside Mux (domain names without resolver) | Not implemented |
-| Full routing / rules / balancers | Not implemented |
+| Full routing / rules / balancers | Partial | Core routing + balancers via `RuntimeRouter`; geosite/geoip and observatory strategies not implemented |
 | Full outbound ecosystem | Not implemented |
 | FakeDNS | Not implemented |
 | DNS inbound / dokodemo-door hijack | Not implemented |

@@ -4,7 +4,7 @@ pub mod record;
 pub mod records;
 pub mod server_hello;
 
-pub use prefixed::PrefixedStream;
+pub use prefixed::{PrefixedReader, PrefixedStream};
 pub use record::{parse_client_hello_record_bytes, read_client_hello_record, TlsClientHelloRecord};
 pub use records::{
     build_application_data_record, build_change_cipher_spec_record, build_handshake_record,

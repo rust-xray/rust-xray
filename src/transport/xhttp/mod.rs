@@ -1,6 +1,7 @@
 //! XHTTP / SplitHTTP transport (server-side MVP).
 
 use std::io;
+use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
@@ -65,7 +66,7 @@ pub use stream_up::{
     shared_stream_up_manager, StreamUpLimits, StreamUpUploadError, StreamUpUploadHandle,
     XHttpStreamUpManager,
 };
-pub use transport::serve_xhttp_stream_one;
+pub use transport::{serve_xhttp_stream_one, serve_xhttp_stream_one_with_socket_meta};
 
 pub async fn run_xhttp_transport<S>(
     stream: S,
@@ -75,7 +76,10 @@ pub async fn run_xhttp_transport<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    ensure_xhttp_users_supported(handler.users())?;
+    let users = handler.users().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "xhttp handler missing users")
+    })?;
+    ensure_xhttp_users_supported(users.as_ref())?;
 
     info!(
         kind = "xhttp",
@@ -86,8 +90,15 @@ where
     );
 
     let settings = config.to_settings();
-    let result =
-        serve_xhttp_stream_one(stream, &settings, handler.users_arc(), handler.stats()).await;
+    let result = serve_xhttp_stream_one_with_socket_meta(
+        stream,
+        &settings,
+        Arc::clone(&users),
+        handler.stats().as_deref(),
+        handler.socket_meta().clone(),
+        handler.router().cloned(),
+    )
+    .await;
 
     if result.is_ok() {
         info!(

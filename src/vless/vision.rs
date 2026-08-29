@@ -479,6 +479,233 @@ fn random_padding_len(content_len: usize, long_padding: bool) -> usize {
     }
 }
 
+/// Vision uplink reader: unpads client-to-server plaintext before relay.
+pub struct VisionRelayReader<R> {
+    inner: R,
+    traffic: SharedTrafficState,
+    pending_read: Vec<u8>,
+}
+
+impl<R> VisionRelayReader<R> {
+    pub fn new(inner: R, traffic: SharedTrafficState) -> Self {
+        Self {
+            inner,
+            traffic,
+            pending_read: Vec::new(),
+        }
+    }
+}
+
+impl<R> AsyncRead for VisionRelayReader<R>
+where
+    R: AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        loop {
+            if !self.pending_read.is_empty() {
+                let to_copy = self.pending_read.len().min(buf.remaining());
+                buf.put_slice(&self.pending_read[..to_copy]);
+                self.pending_read.drain(..to_copy);
+                return Poll::Ready(Ok(()));
+            }
+
+            {
+                let (direct_copy, within) = {
+                    let traffic = self.traffic.lock().expect("vision traffic lock");
+                    (
+                        traffic.inbound.direct_copy,
+                        traffic.inbound.within_padding_buffers
+                            || traffic.number_of_packet_to_filter > 0,
+                    )
+                };
+                if direct_copy || !within {
+                    return Pin::new(&mut self.inner).poll_read(cx, buf);
+                }
+            }
+
+            let mut chunk = [0u8; 4096];
+            let mut read_buf = ReadBuf::new(&mut chunk);
+            match Pin::new(&mut self.inner).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) if read_buf.filled().is_empty() => return Poll::Ready(Ok(())),
+                Poll::Ready(Ok(())) => {
+                    let (unpadded, direct_started) = {
+                        let mut traffic = self.traffic.lock().expect("vision traffic lock");
+                        traffic.unpad_uplink_chunk_with_signal(read_buf.filled())?
+                    };
+                    if direct_started == Some(VisionDirectStarted) {
+                        info!("vision direct relay started");
+                    }
+                    if unpadded.is_empty() {
+                        continue;
+                    }
+                    let to_copy = unpadded.len().min(buf.remaining());
+                    buf.put_slice(&unpadded[..to_copy]);
+                    self.pending_read.extend_from_slice(&unpadded[to_copy..]);
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// Vision downlink writer: pads server-to-client plaintext before TLS encryption.
+pub struct VisionRelayWriter<W> {
+    inner: W,
+    traffic: SharedTrafficState,
+    write_once_uuid: Option<[u8; 16]>,
+    pending_write: Vec<u8>,
+    pending_original_len: Option<usize>,
+    direct_relay: Option<crate::reality::tls13::ApplicationStreamDirectRelay>,
+}
+
+impl<W> VisionRelayWriter<W> {
+    pub fn new(
+        inner: W,
+        traffic: SharedTrafficState,
+        user_uuid: [u8; 16],
+        direct_relay: Option<crate::reality::tls13::ApplicationStreamDirectRelay>,
+    ) -> Self {
+        Self {
+            inner,
+            traffic,
+            write_once_uuid: Some(user_uuid),
+            pending_write: Vec::new(),
+            pending_original_len: None,
+            direct_relay,
+        }
+    }
+
+    fn maybe_enable_downlink_writer_direct(&mut self) {
+        let pending = {
+            let mut traffic = self.traffic.lock().expect("vision traffic lock");
+            traffic.take_downlink_writer_direct_pending()
+        };
+        if pending {
+            if let Some(direct_relay) = self.direct_relay.as_ref() {
+                direct_relay.enable_writer();
+            }
+        }
+    }
+}
+
+impl<W> AsyncWrite for VisionRelayWriter<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        if !self.pending_write.is_empty() {
+            let original_len = self
+                .pending_original_len
+                .expect("pending original length while pending write buffer is non-empty");
+
+            let pending = self.pending_write.clone();
+            match Pin::new(&mut self.inner).poll_write(cx, &pending) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(Error::new(
+                        ErrorKind::WriteZero,
+                        "vision relay underlying write zero",
+                    )));
+                }
+                Poll::Ready(Ok(n)) => {
+                    let _ = self.pending_write.drain(..n);
+                    if self.pending_write.is_empty() {
+                        self.pending_original_len = None;
+                        return Poll::Ready(Ok(original_len));
+                    }
+                    return Poll::Pending;
+                }
+                Poll::Ready(Err(err)) => {
+                    self.pending_write.clear();
+                    self.pending_original_len = None;
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        self.maybe_enable_downlink_writer_direct();
+
+        let writer_direct = self
+            .direct_relay
+            .as_ref()
+            .is_some_and(|direct_relay| direct_relay.is_writer_enabled());
+        if writer_direct {
+            return Pin::new(&mut self.inner).poll_write(cx, buf);
+        }
+
+        let padded = {
+            let mut write_once = self.write_once_uuid;
+            let padded = {
+                let mut traffic = self.traffic.lock().expect("vision traffic lock");
+                traffic.pad_downlink_chunk(buf, &mut write_once)
+            };
+            self.write_once_uuid = write_once;
+            padded
+        };
+
+        self.pending_write = padded;
+        self.pending_original_len = Some(buf.len());
+
+        let original_len = self.pending_original_len.expect("pending original len");
+        let pending = self.pending_write.clone();
+        match Pin::new(&mut self.inner).poll_write(cx, &pending) {
+            Poll::Ready(Ok(0)) => Poll::Ready(Err(Error::new(
+                ErrorKind::WriteZero,
+                "vision relay underlying write zero",
+            ))),
+            Poll::Ready(Ok(n)) => {
+                let _ = self.pending_write.drain(..n);
+                if self.pending_write.is_empty() {
+                    self.pending_original_len = None;
+                    Poll::Ready(Ok(original_len))
+                } else {
+                    Poll::Pending
+                }
+            }
+            Poll::Ready(Err(err)) => {
+                self.pending_write.clear();
+                self.pending_original_len = None;
+                Poll::Ready(Err(err))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl<S> crate::reality::tls13::Tls13OverflowAlertWriter
+    for VisionRelayWriter<crate::reality::tls13::RealityTls13ClientWriter<S>>
+where
+    S: AsyncWrite + Unpin,
+{
+    fn send_useless_overflow_fatal_alert(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::io::Result<()>> {
+        self.inner.send_useless_overflow_fatal_alert()
+    }
+}
+
 /// Bidirectional Vision relay adapter: unpads reads, pads writes.
 pub struct VisionRelayStream<S> {
     inner: S,

@@ -12,12 +12,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tracing::{debug, warn};
 
 use crate::config::XHttpSettings;
+use crate::routing::{RouteSocketMeta, RuntimeRouter};
 use crate::stats::StatsState;
 use crate::tls::PrefixedStream;
 use crate::vless::VlessUserManager;
 
 use super::bridge::{
-    h2_send_chunk, run_h2_stream_one_bridge, run_http1_stream_one_bridge, write_http1_chunked_chunk,
+    h2_send_chunk, run_h2_stream_one_bridge_with_socket_meta,
+    run_http1_stream_one_bridge_with_socket_meta, write_http1_chunked_chunk,
 };
 use super::diagnostics::{
     build_request_shape, classify_request_leg, h2_content_length, h2_header_names,
@@ -44,6 +46,13 @@ use super::mode::{
 use super::packet_up::{shared_packet_up_manager, spawn_packet_up_bridge, PacketUpLimits};
 use super::session::XHttpSessionManager;
 use super::stream_up::{shared_stream_up_manager, spawn_stream_up_bridge, StreamUpLimits};
+
+#[derive(Clone)]
+struct XHttpInboundMeta {
+    stats_state: Option<StatsState>,
+    socket_meta: RouteSocketMeta,
+    router: Option<Arc<RuntimeRouter>>,
+}
 
 const MAX_HTTP_HEADER_SIZE: usize = 16 * 1024;
 const HTTP1_UPLOAD_READ_BUFFER: usize = 16 * 1024;
@@ -1169,7 +1178,7 @@ async fn handle_packet_up_h2_upload(
     inbound_tag: &str,
     conn_id: u64,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
     limits: PacketUpLimits,
 ) -> io::Result<()> {
     let manager = shared_packet_up_manager();
@@ -1200,9 +1209,11 @@ async fn handle_packet_up_h2_upload(
                         spawn_packet_up_bridge(
                             launch,
                             Arc::clone(&users),
-                            stats_state.clone(),
+                            meta.stats_state.clone(),
                             inbound_tag.to_string(),
                             conn_id,
+                            meta.socket_meta.clone(),
+                            meta.router.clone(),
                         );
                     }
                     Ok(None) => {}
@@ -1250,7 +1261,15 @@ async fn handle_packet_up_h2_upload(
     }
 
     if let Some(launch) = bridge_launch {
-        spawn_packet_up_bridge(launch, users, stats_state, inbound_tag.to_string(), conn_id);
+        spawn_packet_up_bridge(
+            launch,
+            users,
+            meta.stats_state.clone(),
+            inbound_tag.to_string(),
+            conn_id,
+            meta.socket_meta.clone(),
+            meta.router.clone(),
+        );
     }
 
     if let Some(err) = upload_error {
@@ -1283,7 +1302,7 @@ async fn handle_xhttp_h2_packet_up(
     settings: &XHttpSettings,
     inbound_tag: &str,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
     conn_id: u64,
 ) -> io::Result<()> {
     let method = request.method().as_str().to_string();
@@ -1361,7 +1380,7 @@ async fn handle_xhttp_h2_packet_up(
             inbound_tag,
             conn_id,
             users,
-            stats_state,
+            meta,
             PacketUpLimits::from_settings(settings),
         )
         .await;
@@ -1466,7 +1485,7 @@ async fn handle_stream_up_h2_upload(
     inbound_tag: &str,
     conn_id: u64,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
     limits: StreamUpLimits,
 ) -> io::Result<()> {
     let manager = shared_stream_up_manager();
@@ -1513,7 +1532,15 @@ async fn handle_stream_up_h2_upload(
         }
     };
     if let Some(launch) = bridge_launch {
-        spawn_stream_up_bridge(launch, users, stats_state, inbound_tag.to_string(), conn_id);
+        spawn_stream_up_bridge(
+            launch,
+            users,
+            meta.stats_state.clone(),
+            inbound_tag.to_string(),
+            conn_id,
+            meta.socket_meta.clone(),
+            meta.router.clone(),
+        );
     }
 
     let mut upload_error: Option<String> = None;
@@ -1581,7 +1608,7 @@ async fn handle_xhttp_h2_stream_up(
     settings: &XHttpSettings,
     inbound_tag: &str,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
     conn_id: u64,
 ) -> io::Result<()> {
     let method = request.method().as_str().to_string();
@@ -1644,7 +1671,7 @@ async fn handle_xhttp_h2_stream_up(
             inbound_tag,
             conn_id,
             users,
-            stats_state,
+            meta,
             StreamUpLimits::from_settings(settings),
         )
         .await;
@@ -1890,7 +1917,7 @@ async fn handle_packet_up_http1_upload<S: AsyncRead + AsyncWrite + Unpin>(
     inbound_tag: &str,
     conn_id: u64,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
     limits: PacketUpLimits,
 ) -> io::Result<()> {
     let manager = shared_packet_up_manager();
@@ -1976,7 +2003,15 @@ async fn handle_packet_up_http1_upload<S: AsyncRead + AsyncWrite + Unpin>(
     }
 
     if let Some(launch) = bridge_launch {
-        spawn_packet_up_bridge(launch, users, stats_state, inbound_tag.to_string(), conn_id);
+        spawn_packet_up_bridge(
+            launch,
+            users,
+            meta.stats_state.clone(),
+            inbound_tag.to_string(),
+            conn_id,
+            meta.socket_meta.clone(),
+            meta.router.clone(),
+        );
     }
 
     if let Some(err) = upload_error {
@@ -2082,7 +2117,7 @@ async fn handle_stream_up_http1_upload<S: AsyncRead + AsyncWrite + Unpin>(
     inbound_tag: &str,
     conn_id: u64,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
     limits: StreamUpLimits,
 ) -> io::Result<()> {
     let manager = shared_stream_up_manager();
@@ -2122,7 +2157,15 @@ async fn handle_stream_up_http1_upload<S: AsyncRead + AsyncWrite + Unpin>(
         }
     };
     if let Some(launch) = bridge_launch {
-        spawn_stream_up_bridge(launch, users, stats_state, inbound_tag.to_string(), conn_id);
+        spawn_stream_up_bridge(
+            launch,
+            users,
+            meta.stats_state.clone(),
+            inbound_tag.to_string(),
+            conn_id,
+            meta.socket_meta.clone(),
+            meta.router.clone(),
+        );
     }
 
     let mut upload_error: Option<String> = None;
@@ -2198,7 +2241,7 @@ async fn handle_xhttp_http1_stream_up<S>(
     inbound_tag: &str,
     conn_id: u64,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2232,7 +2275,7 @@ where
             inbound_tag,
             conn_id,
             users,
-            stats_state,
+            meta,
             StreamUpLimits::from_settings(settings),
         )
         .await;
@@ -2259,7 +2302,7 @@ async fn handle_xhttp_http1_packet_up<S>(
     inbound_tag: &str,
     conn_id: u64,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2300,7 +2343,7 @@ where
             inbound_tag,
             conn_id,
             users,
-            stats_state,
+            meta,
             PacketUpLimits::from_settings(settings),
         )
         .await;
@@ -2333,10 +2376,38 @@ async fn write_status<S: AsyncWrite + Unpin>(stream: &mut S, status: &str) -> st
 }
 
 pub async fn serve_xhttp_stream_one<S>(
+    stream: S,
+    settings: &XHttpSettings,
+    users: Arc<VlessUserManager>,
+    stats_state: Option<&StatsState>,
+    source_ip: Option<std::net::IpAddr>,
+    router: Option<Arc<RuntimeRouter>>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let socket_meta = RouteSocketMeta {
+        source_ip,
+        ..Default::default()
+    };
+    serve_xhttp_stream_one_with_socket_meta(
+        stream,
+        settings,
+        users,
+        stats_state,
+        socket_meta,
+        router,
+    )
+    .await
+}
+
+pub async fn serve_xhttp_stream_one_with_socket_meta<S>(
     mut stream: S,
     settings: &XHttpSettings,
     users: Arc<VlessUserManager>,
     stats_state: Option<&StatsState>,
+    socket_meta: RouteSocketMeta,
+    router: Option<Arc<RuntimeRouter>>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2360,6 +2431,11 @@ where
         }
         preface.push(byte[0]);
     }
+    let meta = XHttpInboundMeta {
+        stats_state: stats_state.cloned(),
+        socket_meta,
+        router,
+    };
     let prefixed = PrefixedStream::new(stream, preface.clone());
     if preface.as_slice() == HTTP2_PREFACE {
         return serve_xhttp_h2_stream_one(
@@ -2367,7 +2443,7 @@ where
             settings,
             &inbound_tag,
             users,
-            stats_state.cloned(),
+            meta,
             effective_mode,
         )
         .await;
@@ -2377,7 +2453,7 @@ where
         settings,
         &inbound_tag,
         users,
-        stats_state.cloned(),
+        meta,
         effective_mode,
     )
     .await
@@ -2388,7 +2464,7 @@ async fn serve_xhttp_http1_stream_one<S>(
     settings: &XHttpSettings,
     inbound_tag: &str,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
     effective_mode: EffectiveXHttpMode,
 ) -> std::io::Result<()>
 where
@@ -2448,7 +2524,7 @@ where
             inbound_tag,
             conn_id,
             users,
-            stats_state,
+            meta,
         )
         .await;
     }
@@ -2462,7 +2538,7 @@ where
             inbound_tag,
             conn_id,
             users,
-            stats_state,
+            meta,
         )
         .await;
     }
@@ -2513,7 +2589,7 @@ where
     }
 
     let content_length = request_content_length(&head)?;
-    run_http1_stream_one_bridge(
+    run_http1_stream_one_bridge_with_socket_meta(
         stream,
         Bytes::from(prebuffer),
         content_length,
@@ -2521,7 +2597,9 @@ where
         conn_id,
         started,
         users.as_ref(),
-        stats_state.as_ref(),
+        meta.stats_state.as_ref(),
+        &meta.socket_meta,
+        meta.router.as_ref(),
     )
     .await
 }
@@ -2531,7 +2609,7 @@ async fn serve_xhttp_h2_session_modes<S>(
     settings: &XHttpSettings,
     inbound_tag: &str,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
     conn_id: u64,
     effective_mode: EffectiveXHttpMode,
 ) -> io::Result<()>
@@ -2545,7 +2623,7 @@ where
         let settings = settings.clone();
         let inbound_tag = inbound_tag.to_string();
         let users = Arc::clone(&users);
-        let stats = stats_state.clone();
+        let session_meta = meta.clone();
         match effective_mode {
             EffectiveXHttpMode::PacketUp => {
                 tokio::spawn(async move {
@@ -2555,7 +2633,7 @@ where
                         &settings,
                         &inbound_tag,
                         users,
-                        stats,
+                        session_meta,
                         conn_id,
                     )
                     .await;
@@ -2569,7 +2647,7 @@ where
                         &settings,
                         &inbound_tag,
                         users,
-                        stats,
+                        session_meta,
                         conn_id,
                     )
                     .await;
@@ -2594,7 +2672,7 @@ async fn serve_xhttp_h2_stream_one<S>(
     settings: &XHttpSettings,
     inbound_tag: &str,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
     effective_mode: EffectiveXHttpMode,
 ) -> io::Result<()>
 where
@@ -2618,7 +2696,7 @@ where
             settings,
             inbound_tag,
             users,
-            stats_state,
+            meta,
             conn_id,
             effective_mode,
         )
@@ -2643,7 +2721,7 @@ where
         settings,
         inbound_tag,
         users,
-        stats_state,
+        meta,
         conn_id,
         started,
         effective_mode,
@@ -2659,7 +2737,7 @@ async fn handle_xhttp_h2_request(
     settings: &XHttpSettings,
     inbound_tag: &str,
     users: Arc<VlessUserManager>,
-    stats_state: Option<StatsState>,
+    meta: XHttpInboundMeta,
     conn_id: u64,
     started: Instant,
     effective_mode: EffectiveXHttpMode,
@@ -2726,7 +2804,7 @@ async fn handle_xhttp_h2_request(
             settings,
             inbound_tag,
             users,
-            stats_state,
+            meta,
             conn_id,
         )
         .await;
@@ -2739,7 +2817,7 @@ async fn handle_xhttp_h2_request(
             settings,
             inbound_tag,
             users,
-            stats_state,
+            meta,
             conn_id,
         )
         .await;
@@ -2785,14 +2863,16 @@ async fn handle_xhttp_h2_request(
         return Ok(());
     }
 
-    run_h2_stream_one_bridge(
+    run_h2_stream_one_bridge_with_socket_meta(
         request.into_body(),
         respond,
         inbound_tag,
         conn_id,
         started,
         users.as_ref(),
-        stats_state.as_ref(),
+        meta.stats_state.as_ref(),
+        &meta.socket_meta,
+        meta.router.as_ref(),
     )
     .await
 }

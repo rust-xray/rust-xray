@@ -1,19 +1,24 @@
 use std::future::Future;
 use std::io::ErrorKind;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use crate::mux::{handle_mux_cool_inbound, handle_mux_cool_inbound_traced, MuxSessionTrace};
+use crate::mux::{handle_mux_cool_inbound_with_env, MuxRouteEnv, MuxSessionTrace};
 use crate::outbound::freedom::{
     connect_tcp_destination, format_vless_destination, forward_tcp_initial_payload,
     relay_tcp_bidirectional,
 };
+use crate::outbound::runtime::OutboundConnectRuntime;
 use crate::reality::stages::{self, stage_error, RealityAcceptedStage};
 use crate::reality::tls13::{
-    ApplicationStreamDirectRelay, RealityTls13ApplicationStream, RealityTls13RelayClient,
-    RealityTls13RelaySplit,
+    relay_split_bidirectional_with_overflow_alert, relay_tls13_split_bidirectional,
+    useless_record_overflow_limit, ApplicationStreamDirectRelay, RealityTls13ApplicationStream,
+    RealityTls13RelaySplit, SplitMuxInbound,
 };
-use crate::stats::{StatsSession, StatsState};
+use crate::routing::{RouteSocketMeta, RuntimeRouter};
+use crate::runtime::VlessInboundAuthContext;
+use crate::stats::{StatsConnection, StatsState};
 use crate::tls::PrefixedStream;
 use crate::vless::protocol::{
     encode_vless_response_header, parse_vless_request, VlessCommand, VlessRequest,
@@ -25,8 +30,9 @@ use crate::vless::relay_debug::{
 use crate::vless::user_manager::{user_id_hint, VlessAuthenticatedClient, VlessUserManager};
 use crate::vless::vision::{
     is_vision_flow, new_shared_traffic_state, parse_vless_request_flow, SharedTrafficState,
-    VisionRelayStream, FLOW_XTLS_RPRX_VISION,
+    VisionRelayReader, VisionRelayStream, VisionRelayWriter, FLOW_XTLS_RPRX_VISION,
 };
+use std::net::IpAddr;
 use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -249,7 +255,7 @@ async fn relay_vless_tcp_bidirectional<S>(
     outbound: &mut tokio::net::TcpStream,
     vision: Option<(SharedTrafficState, [u8; 16])>,
     direct_relay: Option<ApplicationStreamDirectRelay>,
-    _stats: Option<&StatsSession>,
+    _stats: Option<&StatsConnection>,
 ) -> std::io::Result<(u64, u64)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -301,45 +307,206 @@ struct VlessMuxRelayPrepared<S> {
 enum VlessRelayPrepared<S> {
     Tcp(VlessTcpRelayPrepared<S>),
     Mux(VlessMuxRelayPrepared<S>),
+    Blackhole,
 }
 
-async fn prepare_vless_relay<S>(
-    stream: S,
-    users: &VlessUserManager,
-    stats_state: Option<&StatsState>,
-) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsSession>)>
+async fn prepare_reality_vless_relay<S>(
+    stream: RealityTls13ApplicationStream<S>,
+    auth_ctx: &VlessInboundAuthContext,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
+) -> std::io::Result<(
+    VlessRelayPrepared<RealityTls13ApplicationStream<S>>,
+    Option<StatsConnection>,
+)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    prepare_vless_relay_with_hook(stream, users, stats_state, || async { Ok(()) }).await
+    prepare_reality_vless_relay_with_hook(stream, auth_ctx, socket_meta, router, || async {
+        Ok(())
+    })
+    .await
+}
+
+async fn prepare_reality_vless_relay_with_hook<S, F, Fut>(
+    mut stream: RealityTls13ApplicationStream<S>,
+    auth_ctx: &VlessInboundAuthContext,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
+    on_ready_to_respond: F,
+) -> std::io::Result<(
+    VlessRelayPrepared<RealityTls13ApplicationStream<S>>,
+    Option<StatsConnection>,
+)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<()>>,
+{
+    let inbound = match read_vless_request(&mut stream).await {
+        Err(err) if useless_record_overflow_limit(&err).is_some() => {
+            let _ = stream.send_useless_overflow_fatal_alert().await;
+            return Err(stage_error(RealityAcceptedStage::Vless, err));
+        }
+        other => other.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?,
+    };
+
+    prepare_vless_relay_from_inbound(
+        stream,
+        Some(auth_ctx),
+        None,
+        None,
+        socket_meta,
+        router,
+        inbound,
+        on_ready_to_respond,
+    )
+    .await
+}
+
+async fn prepare_vless_relay_with_router<S>(
+    stream: S,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
+) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsConnection>)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    prepare_vless_relay_with_hook_and_router(
+        stream,
+        None,
+        Some(users),
+        stats_state,
+        socket_meta,
+        router,
+        || async { Ok(()) },
+    )
+    .await
 }
 
 async fn prepare_vless_relay_with_hook<S, F, Fut>(
-    mut stream: S,
+    stream: S,
     users: &VlessUserManager,
     stats_state: Option<&StatsState>,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
     on_ready_to_respond: F,
-) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsSession>)>
+) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsConnection>)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<()>>,
+{
+    prepare_vless_relay_with_hook_and_router(
+        stream,
+        None,
+        Some(users),
+        stats_state,
+        socket_meta,
+        router,
+        on_ready_to_respond,
+    )
+    .await
+}
+
+async fn prepare_vless_relay_with_hook_and_router<S, F, Fut>(
+    stream: S,
+    auth_ctx: Option<&VlessInboundAuthContext>,
+    users: Option<&VlessUserManager>,
+    stats_state: Option<&StatsState>,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
+    on_ready_to_respond: F,
+) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsConnection>)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<()>>,
+{
+    let mut stream = stream;
+    let inbound = read_vless_request(&mut stream)
+        .await
+        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
+    prepare_vless_relay_from_inbound(
+        stream,
+        auth_ctx,
+        users,
+        stats_state,
+        socket_meta,
+        router,
+        inbound,
+        on_ready_to_respond,
+    )
+    .await
+}
+
+async fn prepare_vless_relay_from_inbound<S, F, Fut>(
+    mut stream: S,
+    auth_ctx: Option<&VlessInboundAuthContext>,
+    users: Option<&VlessUserManager>,
+    legacy_stats: Option<&StatsState>,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
+    inbound: VlessInboundRequest,
+    on_ready_to_respond: F,
+) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsConnection>)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<()>>,
 {
     let vless_started = Instant::now();
-    let inbound = read_vless_request(&mut stream)
-        .await
-        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+    enum AuthenticatedUsers<'a> {
+        Shared(Arc<VlessUserManager>),
+        Local(&'a VlessUserManager),
+    }
 
-    let auth = authenticate_vless_client(&inbound.request, users)
-        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+    let (users, auth) = if let Some(auth_ctx) = auth_ctx {
+        let (manager, auth) = auth_ctx
+            .authenticate(&inbound.request)
+            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+        (AuthenticatedUsers::Shared(manager), auth)
+    } else {
+        let users = users.ok_or_else(|| {
+            stage_error(
+                RealityAcceptedStage::Vless,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "vless auth source missing",
+                ),
+            )
+        })?;
+        let auth = authenticate_vless_client(&inbound.request, users)
+            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+        (AuthenticatedUsers::Local(users), auth)
+    };
+
+    let users_ref: &VlessUserManager = match &users {
+        AuthenticatedUsers::Shared(manager) => manager.as_ref(),
+        AuthenticatedUsers::Local(manager) => manager,
+    };
+
+    let stats_state = if let Some(auth_ctx) = auth_ctx {
+        auth_ctx.stats_for(&auth.inbound_tag)
+    } else {
+        legacy_stats.cloned().map(Arc::new)
+    };
     debug!(
         stage = stages::VLESS_AUTH_OK,
         duration_ms = vless_started.elapsed().as_millis(),
         user_id = %auth.id,
+        inbound_tag = %auth.inbound_tag,
         command = ?inbound.request.command,
         "VLESS auth completed"
     );
-    let stats = stats_state.and_then(|state| state.session(auth.email.clone(), auth.level));
+    let stats = stats_state.as_ref().and_then(|state| {
+        state
+            .session(auth.email.clone(), auth.level, socket_meta.source_ip)
+            .map(StatsConnection::open)
+    });
     let destination = format_vless_destination(&inbound.request.destination);
 
     let request_flow = parse_vless_request_flow(&inbound.request.additional_info);
@@ -351,18 +518,14 @@ where
         warn!(
             request_flow = request_flow.as_deref().unwrap_or(""),
             account_flow = auth.flow.as_deref().unwrap_or(""),
-            inbound_tag = users.inbound_tag(),
+            inbound_tag = %auth.inbound_tag,
             user_lookup_result = "matched",
             user_id_hint = user_id_hint(&auth.id),
-            flow_distribution = %users.flow_distribution_log_label(),
+            flow_distribution = %users_ref.flow_distribution_log_label(),
             error = %err,
             "VLESS flow mismatch"
         );
         return Err(stage_error(RealityAcceptedStage::Vless, err));
-    }
-
-    if let Some(stats) = stats.as_ref() {
-        stats.ensure_registered();
     }
 
     let vision_enabled =
@@ -436,9 +599,58 @@ where
         ));
     }
 
-    let mut outbound = connect_tcp_destination(&inbound.request.destination)
-        .await
-        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+    let mut outbound = if let Some(router) = router {
+        let route_ctx = crate::routing::route_context_from_vless(
+            &auth.inbound_tag,
+            &auth,
+            &inbound.request.destination,
+            &initial_payload,
+            socket_meta,
+            users_ref.sniffing_enabled(),
+        );
+        match router.pick_route_with_default(route_ctx).await {
+            Ok(decision) => {
+                router.publish_route(&decision);
+                debug!(
+                    stage = stages::VLESS_AUTH_OK,
+                    outbound_tag = %decision.outbound_tag,
+                    rule_tag = %decision.rule_tag,
+                    %destination,
+                    "VLESS route selected"
+                );
+                match crate::routing::connect_routed_outbound(
+                    &decision.outbound_tag,
+                    &inbound.request.destination,
+                    router.outbound_manager(),
+                    OutboundConnectRuntime::shared(),
+                )
+                .await
+                {
+                    Ok(crate::routing::RoutedOutbound::Tcp(stream)) => stream,
+                    Ok(crate::routing::RoutedOutbound::Blackhole) => {
+                        on_ready_to_respond()
+                            .await
+                            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+                        prepare_vless_tcp_response(&mut stream, inbound.request.version)
+                            .await
+                            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+                        return Ok((VlessRelayPrepared::Blackhole, stats));
+                    }
+                    Err(err) => return Err(stage_error(RealityAcceptedStage::Vless, err)),
+                }
+            }
+            Err(err) => {
+                return Err(stage_error(
+                    RealityAcceptedStage::Vless,
+                    std::io::Error::other(err.to_string()),
+                ));
+            }
+        }
+    } else {
+        connect_tcp_destination(&inbound.request.destination)
+            .await
+            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?
+    };
 
     debug!(
         stage = stages::VLESS_OUTBOUND_CONNECTED,
@@ -491,7 +703,7 @@ struct VlessTcpRelayFinished {
 fn finish_vless_tcp_relay(
     finished: VlessTcpRelayFinished,
     relay_result: std::io::Result<(u64, u64)>,
-    stats: Option<&StatsSession>,
+    stats: Option<&StatsConnection>,
     relay_started: Instant,
 ) -> std::io::Result<()> {
     let (inbound_to_outbound, outbound_to_inbound) =
@@ -531,17 +743,109 @@ pub async fn handle_vless_tcp_inbound<S>(
     stream: S,
     users: &VlessUserManager,
     stats_state: Option<&StatsState>,
+    source_ip: Option<IpAddr>,
+    router: Option<&Arc<RuntimeRouter>>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (prepared, stats) = prepare_vless_relay(stream, users, stats_state).await?;
+    let socket_meta = RouteSocketMeta {
+        source_ip,
+        ..Default::default()
+    };
+    handle_vless_tcp_inbound_with_socket_meta(stream, users, stats_state, &socket_meta, router)
+        .await
+}
+
+pub async fn handle_vless_tcp_inbound_with_auth_context<S>(
+    stream: S,
+    auth_ctx: &VlessInboundAuthContext,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (prepared, stats) = prepare_vless_relay_with_hook_and_router(
+        stream,
+        Some(auth_ctx),
+        None,
+        None,
+        socket_meta,
+        router,
+        || async { Ok(()) },
+    )
+    .await?;
 
     let prepared = match prepared {
-        VlessRelayPrepared::Tcp(prepared) => prepared,
+        VlessRelayPrepared::Blackhole => return Ok(()),
         VlessRelayPrepared::Mux(prepared) => {
-            return run_prepared_mux_relay(prepared, None, stats.as_ref(), None).await;
+            let sniffing = auth_ctx
+                .auth_set()
+                .get_manager(&prepared.auth.inbound_tag)
+                .map(|manager| manager.sniffing_enabled())
+                .unwrap_or(false);
+            let route_env = mux_route_env(router, &prepared.auth, socket_meta, sniffing);
+            return run_prepared_mux_relay(prepared, None, stats.as_ref(), None, route_env).await;
         }
+        VlessRelayPrepared::Tcp(prepared) => prepared,
+    };
+
+    info!(
+        stage = stages::VLESS_RELAY_STARTED,
+        "VLESS TCP relay started"
+    );
+
+    let VlessTcpRelayPrepared {
+        stream,
+        mut outbound,
+        vision,
+        auth,
+        destination,
+        command,
+    } = prepared;
+
+    let relay_started = Instant::now();
+    let relay_result =
+        relay_vless_tcp_bidirectional(stream, &mut outbound, vision, None, stats.as_ref()).await;
+
+    finish_vless_tcp_relay(
+        VlessTcpRelayFinished {
+            auth,
+            destination,
+            command,
+        },
+        relay_result,
+        stats.as_ref(),
+        relay_started,
+    )
+}
+
+pub async fn handle_vless_tcp_inbound_with_socket_meta<S>(
+    stream: S,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (prepared, stats) =
+        prepare_vless_relay_with_router(stream, users, stats_state, socket_meta, router).await?;
+
+    let prepared = match prepared {
+        VlessRelayPrepared::Blackhole => return Ok(()),
+        VlessRelayPrepared::Mux(prepared) => {
+            let route_env = mux_route_env(
+                router,
+                &prepared.auth,
+                socket_meta,
+                users.sniffing_enabled(),
+            );
+            return run_prepared_mux_relay(prepared, None, stats.as_ref(), None, route_env).await;
+        }
+        VlessRelayPrepared::Tcp(prepared) => prepared,
     };
 
     info!(
@@ -578,6 +882,8 @@ pub async fn handle_vless_tcp_inbound_with_response_hook<S, F, Fut>(
     stream: S,
     users: &VlessUserManager,
     stats_state: Option<&StatsState>,
+    source_ip: Option<IpAddr>,
+    router: Option<&Arc<RuntimeRouter>>,
     on_ready_to_respond: F,
 ) -> std::io::Result<()>
 where
@@ -585,13 +891,55 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<()>>,
 {
-    let (prepared, stats) =
-        prepare_vless_relay_with_hook(stream, users, stats_state, on_ready_to_respond).await?;
+    let socket_meta = RouteSocketMeta {
+        source_ip,
+        ..Default::default()
+    };
+    handle_vless_tcp_inbound_with_socket_meta_and_response_hook(
+        stream,
+        users,
+        stats_state,
+        &socket_meta,
+        router,
+        on_ready_to_respond,
+    )
+    .await
+}
+
+pub async fn handle_vless_tcp_inbound_with_socket_meta_and_response_hook<S, F, Fut>(
+    stream: S,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
+    on_ready_to_respond: F,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<()>>,
+{
+    let (prepared, stats) = prepare_vless_relay_with_hook(
+        stream,
+        users,
+        stats_state,
+        socket_meta,
+        router,
+        on_ready_to_respond,
+    )
+    .await?;
 
     let prepared = match prepared {
+        VlessRelayPrepared::Blackhole => return Ok(()),
         VlessRelayPrepared::Tcp(prepared) => prepared,
         VlessRelayPrepared::Mux(prepared) => {
-            return run_prepared_mux_relay(prepared, None, stats.as_ref(), None).await;
+            let route_env = mux_route_env(
+                router,
+                &prepared.auth,
+                socket_meta,
+                users.sniffing_enabled(),
+            );
+            return run_prepared_mux_relay(prepared, None, stats.as_ref(), None, route_env).await;
         }
     };
 
@@ -625,6 +973,40 @@ where
     )
 }
 
+async fn prepare_reality_vless_relay_legacy<S>(
+    stream: RealityTls13ApplicationStream<S>,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
+) -> std::io::Result<(
+    VlessRelayPrepared<RealityTls13ApplicationStream<S>>,
+    Option<StatsConnection>,
+)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut stream = stream;
+    let inbound = match read_vless_request(&mut stream).await {
+        Err(err) if useless_record_overflow_limit(&err).is_some() => {
+            let _ = stream.send_useless_overflow_fatal_alert().await;
+            return Err(stage_error(RealityAcceptedStage::Vless, err));
+        }
+        other => other.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?,
+    };
+    prepare_vless_relay_from_inbound(
+        stream,
+        None,
+        Some(users),
+        stats_state,
+        socket_meta,
+        router,
+        inbound,
+        || async { Ok(()) },
+    )
+    .await
+}
+
 pub async fn handle_reality_vless_tcp_inbound<S>(
     stream: RealityTls13ApplicationStream<S>,
     users: &VlessUserManager,
@@ -633,24 +1015,66 @@ pub async fn handle_reality_vless_tcp_inbound<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_reality_vless_tcp_inbound_traced(stream, users, stats_state, None).await
+    handle_reality_vless_tcp_inbound_traced(
+        stream,
+        None,
+        Some(users),
+        stats_state,
+        None,
+        &RouteSocketMeta::default(),
+        None,
+    )
+    .await
 }
 
 pub async fn handle_reality_vless_tcp_inbound_traced<S>(
     stream: RealityTls13ApplicationStream<S>,
-    users: &VlessUserManager,
+    auth_ctx: Option<&VlessInboundAuthContext>,
+    users: Option<&VlessUserManager>,
     stats_state: Option<&StatsState>,
     mux_trace: Option<MuxSessionTrace>,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (prepared, stats) = prepare_vless_relay(stream, users, stats_state).await?;
+    let (prepared, stats) = if let Some(auth_ctx) = auth_ctx {
+        prepare_reality_vless_relay(stream, auth_ctx, socket_meta, router).await?
+    } else {
+        prepare_reality_vless_relay_legacy(
+            stream,
+            users.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "vless auth source missing",
+                )
+            })?,
+            stats_state,
+            socket_meta,
+            router,
+        )
+        .await?
+    };
 
     let prepared = match prepared {
+        VlessRelayPrepared::Blackhole => return Ok(()),
         VlessRelayPrepared::Tcp(prepared) => prepared,
         VlessRelayPrepared::Mux(prepared) => {
-            return run_prepared_mux_relay(prepared, None, stats.as_ref(), mux_trace).await;
+            let sniffing = if let Some(auth_ctx) = auth_ctx {
+                auth_ctx
+                    .auth_set()
+                    .get_manager(&prepared.auth.inbound_tag)
+                    .map(|manager| manager.sniffing_enabled())
+                    .unwrap_or(false)
+            } else {
+                users
+                    .map(VlessUserManager::sniffing_enabled)
+                    .unwrap_or(false)
+            };
+            let route_env = mux_route_env(router, &prepared.auth, socket_meta, sniffing);
+            return run_prepared_reality_mux_relay(prepared, stats.as_ref(), mux_trace, route_env)
+                .await;
         }
     };
 
@@ -661,7 +1085,7 @@ where
 
     let VlessTcpRelayPrepared {
         stream,
-        mut outbound,
+        outbound,
         vision,
         auth,
         destination,
@@ -673,16 +1097,15 @@ where
         writer,
         direct_relay,
     } = stream.split_for_relay()?;
-    let relay = RealityTls13RelayClient::new(reader, writer, direct_relay.clone());
     let relay_started = Instant::now();
-    let relay_result = relay_vless_tcp_bidirectional(
-        relay,
-        &mut outbound,
-        vision,
-        Some(direct_relay),
-        stats.as_ref(),
-    )
-    .await;
+    let relay_result = if let Some((traffic, user_uuid)) = vision {
+        let vision_reader = VisionRelayReader::new(reader, Arc::clone(&traffic));
+        let vision_writer =
+            VisionRelayWriter::new(writer, traffic, user_uuid, Some(direct_relay.clone()));
+        relay_split_bidirectional_with_overflow_alert(vision_reader, vision_writer, outbound).await
+    } else {
+        relay_tls13_split_bidirectional(reader, writer, outbound).await
+    };
 
     finish_vless_tcp_relay(
         VlessTcpRelayFinished {
@@ -696,11 +1119,95 @@ where
     )
 }
 
+async fn run_reality_split_mux_inbound<R, W>(
+    mux_stream: &mut SplitMuxInbound<R, W>,
+    mux_trace: Option<MuxSessionTrace>,
+    route_env: Option<MuxRouteEnv>,
+) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + crate::reality::tls13::Tls13OverflowAlertWriter,
+{
+    let result = handle_mux_cool_inbound_with_env(
+        mux_stream,
+        crate::dns::DnsEngine::shared(),
+        mux_trace,
+        route_env,
+    )
+    .await;
+    if let Err(err) = result {
+        if useless_record_overflow_limit(&err).is_some() {
+            let _ = mux_stream.send_useless_overflow_fatal_alert().await;
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
+async fn run_prepared_reality_mux_relay<S>(
+    prepared: VlessMuxRelayPrepared<RealityTls13ApplicationStream<S>>,
+    _stats: Option<&StatsConnection>,
+    mux_trace: Option<MuxSessionTrace>,
+    route_env: Option<MuxRouteEnv>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    info!(
+        stage = stages::VLESS_RELAY_STARTED,
+        email = prepared.auth.email.as_deref(),
+        flow = prepared.auth.flow.as_deref(),
+        command = ?VlessCommand::Mux,
+        version = prepared.version,
+        "VLESS mux relay started"
+    );
+
+    let mux_started = Instant::now();
+    let RealityTls13RelaySplit {
+        reader,
+        writer,
+        direct_relay,
+    } = prepared.stream.split_for_relay()?;
+
+    let mux_result = if let Some((traffic, user_uuid)) = prepared.vision {
+        let mut mux_stream = SplitMuxInbound::new(
+            VisionRelayReader::new(reader, Arc::clone(&traffic)),
+            VisionRelayWriter::new(writer, traffic, user_uuid, Some(direct_relay)),
+            prepared.initial_payload,
+        );
+        run_reality_split_mux_inbound(&mut mux_stream, mux_trace, route_env.clone()).await
+    } else {
+        let mut mux_stream = SplitMuxInbound::new(reader, writer, prepared.initial_payload);
+        run_reality_split_mux_inbound(&mut mux_stream, mux_trace, route_env).await
+    };
+
+    mux_result.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
+    debug!(
+        stage = stages::VLESS_RELAY_DONE,
+        email = prepared.auth.email.as_deref(),
+        flow = prepared.auth.flow.as_deref(),
+        command = ?VlessCommand::Mux,
+        duration_ms = mux_started.elapsed().as_millis(),
+        "vless mux relay completed"
+    );
+    info!(
+        stage = stages::VLESS_RELAY_DONE,
+        email = prepared.auth.email.as_deref(),
+        flow = prepared.auth.flow.as_deref(),
+        command = ?VlessCommand::Mux,
+        "VLESS mux relay completed"
+    );
+
+    Ok(())
+}
+
 async fn run_prepared_mux_relay<S>(
     prepared: VlessMuxRelayPrepared<S>,
     direct_relay: Option<ApplicationStreamDirectRelay>,
-    _stats: Option<&StatsSession>,
+    _stats: Option<&StatsConnection>,
     mux_trace: Option<MuxSessionTrace>,
+    route_env: Option<MuxRouteEnv>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -718,19 +1225,23 @@ where
     let result = if let Some((traffic, user_uuid)) = prepared.vision {
         let vision_stream =
             VisionRelayStream::new(prepared.stream, traffic, user_uuid, direct_relay);
-        let prefixed = PrefixedStream::new(vision_stream, prepared.initial_payload);
-        if let Some(trace) = mux_trace {
-            handle_mux_cool_inbound_traced(prefixed, trace).await
-        } else {
-            handle_mux_cool_inbound(prefixed).await
-        }
+        let mut prefixed = PrefixedStream::new(vision_stream, prepared.initial_payload);
+        handle_mux_cool_inbound_with_env(
+            &mut prefixed,
+            crate::dns::DnsEngine::shared(),
+            mux_trace,
+            route_env,
+        )
+        .await
     } else {
-        let prefixed = PrefixedStream::new(prepared.stream, prepared.initial_payload);
-        if let Some(trace) = mux_trace {
-            handle_mux_cool_inbound_traced(prefixed, trace).await
-        } else {
-            handle_mux_cool_inbound(prefixed).await
-        }
+        let mut prefixed = PrefixedStream::new(prepared.stream, prepared.initial_payload);
+        handle_mux_cool_inbound_with_env(
+            &mut prefixed,
+            crate::dns::DnsEngine::shared(),
+            mux_trace,
+            route_env,
+        )
+        .await
     };
 
     result.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
@@ -752,6 +1263,21 @@ where
     );
 
     Ok(())
+}
+
+fn mux_route_env(
+    router: Option<&Arc<RuntimeRouter>>,
+    auth: &VlessAuthenticatedClient,
+    socket_meta: &RouteSocketMeta,
+    sniffing_enabled: bool,
+) -> Option<MuxRouteEnv> {
+    router.map(|router| MuxRouteEnv {
+        router: Arc::clone(router),
+        inbound_tag: auth.inbound_tag.clone(),
+        auth: auth.clone(),
+        socket_meta: socket_meta.clone(),
+        sniffing_enabled,
+    })
 }
 
 /// Placeholder entry point for future VLESS inbound handling.

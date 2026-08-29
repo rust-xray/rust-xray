@@ -114,8 +114,9 @@ async fn run_post_with_outbound_probe(
         }],
     ));
     let (mut client, server) = tokio::io::duplex(64 * 1024);
-    let task =
-        tokio::spawn(async move { serve_xhttp_stream_one(server, &settings, users, None).await });
+    let task = tokio::spawn(async move {
+        serve_xhttp_stream_one(server, &settings, users, None, None, None).await
+    });
     client.write_all(&request_bytes).await.unwrap();
     client.shutdown().await.unwrap();
     let mut response = Vec::new();
@@ -470,8 +471,9 @@ async fn xhttp_duplex_writes_chunked_response() {
 async fn run_request(settings: XHttpSettings, request: impl AsRef<[u8]>) -> Vec<u8> {
     let (mut client, server) = tokio::io::duplex(2048);
     let users = Arc::new(VlessUserManager::new("xhttp-test", Vec::new()));
-    let task =
-        tokio::spawn(async move { serve_xhttp_stream_one(server, &settings, users, None).await });
+    let task = tokio::spawn(async move {
+        serve_xhttp_stream_one(server, &settings, users, None, None, None).await
+    });
     client.write_all(request.as_ref()).await.unwrap();
     client.shutdown().await.unwrap();
     let mut response = Vec::new();
@@ -483,8 +485,9 @@ async fn run_request(settings: XHttpSettings, request: impl AsRef<[u8]>) -> Vec<
 async fn run_partial_request(settings: XHttpSettings, request: impl AsRef<[u8]>) -> Vec<u8> {
     let (mut client, server) = tokio::io::duplex(2048);
     let users = Arc::new(VlessUserManager::new("xhttp-test", Vec::new()));
-    let task =
-        tokio::spawn(async move { serve_xhttp_stream_one(server, &settings, users, None).await });
+    let task = tokio::spawn(async move {
+        serve_xhttp_stream_one(server, &settings, users, None, None, None).await
+    });
     client.write_all(request.as_ref()).await.unwrap();
     client.shutdown().await.unwrap();
     let mut response = Vec::new();
@@ -551,8 +554,9 @@ async fn run_accepted_post(settings: XHttpSettings, request_target: &str, host: 
         }],
     ));
     let (mut client, server) = tokio::io::duplex(64 * 1024);
-    let task =
-        tokio::spawn(async move { serve_xhttp_stream_one(server, &settings, users, None).await });
+    let task = tokio::spawn(async move {
+        serve_xhttp_stream_one(server, &settings, users, None, None, None).await
+    });
     client.write_all(&request_bytes).await.unwrap();
     client.shutdown().await.unwrap();
     let mut response = Vec::new();

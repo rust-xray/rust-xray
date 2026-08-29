@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,12 +8,16 @@ use crate::api::diagnostics::{log_rpc_call, log_rpc_err, log_rpc_ok, rpc_remote_
 use crate::api::proto::app::stats::command::{
     stats_service_server::StatsService, GetAllOnlineUsersRequest, GetAllOnlineUsersResponse,
     GetStatsOnlineIpListResponse, GetStatsRequest, GetStatsResponse, GetUsersStatsRequest,
-    GetUsersStatsResponse, QueryStatsRequest, QueryStatsResponse, Stat, SysStatsRequest,
-    SysStatsResponse,
+    GetUsersStatsResponse, OnlineIpEntry, QueryStatsRequest, QueryStatsResponse, Stat,
+    SysStatsRequest, SysStatsResponse, TrafficUserStat, UserStat,
 };
-use crate::stats::{GetStatError, StatsRegistry};
+use crate::stats::{parse_user_online_email, GetStatError, StatsRegistry};
 
 const SERVICE: &str = "StatsService";
+
+const USER_TRAFFIC_PREFIX: &str = "user>>>";
+const USER_UPLINK_SUFFIX: &str = ">>>traffic>>>uplink";
+const USER_DOWNLINK_SUFFIX: &str = ">>>traffic>>>downlink";
 
 #[derive(Debug)]
 pub struct StatsServiceImpl {
@@ -29,11 +34,20 @@ impl StatsServiceImpl {
     }
 }
 
-fn unimplemented(method: &str, remote: &str) -> Status {
-    log_rpc_err(SERVICE, method, remote, "UNIMPLEMENTED");
-    Status::unimplemented(format!(
-        "StatsService.{method} is not implemented in rust-xray"
-    ))
+fn not_found(name: &str) -> Status {
+    Status::new(Code::NotFound, format!("{name} not found."))
+}
+
+fn parse_user_traffic_counter(name: &str) -> Option<(String, bool)> {
+    if let Some(email) = name
+        .strip_prefix(USER_TRAFFIC_PREFIX)
+        .and_then(|rest| rest.strip_suffix(USER_UPLINK_SUFFIX))
+    {
+        return Some((email.to_string(), true));
+    }
+    name.strip_prefix(USER_TRAFFIC_PREFIX)
+        .and_then(|rest| rest.strip_suffix(USER_DOWNLINK_SUFFIX))
+        .map(|email| (email.to_string(), false))
 }
 
 #[tonic::async_trait]
@@ -62,10 +76,7 @@ impl StatsService for StatsServiceImpl {
             }
             Err(GetStatError::NotFound) => {
                 log_rpc_err(SERVICE, "GetStats", &remote, "not found");
-                Err(Status::new(
-                    Code::NotFound,
-                    format!("{} not found.", request.name),
-                ))
+                Err(not_found(&request.name))
             }
         }
     }
@@ -74,7 +85,26 @@ impl StatsService for StatsServiceImpl {
         &self,
         request: Request<GetStatsRequest>,
     ) -> Result<Response<GetStatsResponse>, Status> {
-        Err(unimplemented("GetStatsOnline", &rpc_remote_addr(&request)))
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "GetStatsOnline", &remote);
+        let request = request.into_inner();
+        let Some(map) = self.registry.get_online_map(&request.name) else {
+            log_rpc_err(SERVICE, "GetStatsOnline", &remote, "not found");
+            return Err(not_found(&request.name));
+        };
+        let value = map.count();
+        log_rpc_ok(
+            SERVICE,
+            "GetStatsOnline",
+            &remote,
+            &format!("name={} value={value}", request.name),
+        );
+        Ok(Response::new(GetStatsResponse {
+            stat: Some(Stat {
+                name: request.name,
+                value,
+            }),
+        }))
     }
 
     async fn query_stats(
@@ -122,12 +152,7 @@ impl StatsService for StatsServiceImpl {
             pause_total_ns: 0,
             uptime,
         };
-        log_rpc_ok(
-            SERVICE,
-            "GetSysStats",
-            &remote,
-            &format!("uptime={uptime} alloc=0 sys=0"),
-        );
+        log_rpc_ok(SERVICE, "GetSysStats", &remote, &format!("uptime={uptime}"));
         Ok(Response::new(response))
     }
 
@@ -135,26 +160,107 @@ impl StatsService for StatsServiceImpl {
         &self,
         request: Request<GetStatsRequest>,
     ) -> Result<Response<GetStatsOnlineIpListResponse>, Status> {
-        Err(unimplemented(
-            "GetStatsOnlineIpList",
-            &rpc_remote_addr(&request),
-        ))
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "GetStatsOnlineIpList", &remote);
+        let request = request.into_inner();
+        let Some(map) = self.registry.get_online_map(&request.name) else {
+            log_rpc_err(SERVICE, "GetStatsOnlineIpList", &remote, "not found");
+            return Err(not_found(&request.name));
+        };
+        let mut ips = HashMap::new();
+        map.for_each(|ip, last_seen| {
+            ips.insert(ip.to_string(), last_seen);
+            true
+        });
+        Ok(Response::new(GetStatsOnlineIpListResponse {
+            name: request.name,
+            ips,
+        }))
     }
 
     async fn get_all_online_users(
         &self,
         request: Request<GetAllOnlineUsersRequest>,
     ) -> Result<Response<GetAllOnlineUsersResponse>, Status> {
-        Err(unimplemented(
-            "GetAllOnlineUsers",
-            &rpc_remote_addr(&request),
-        ))
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "GetAllOnlineUsers", &remote);
+        let _ = request.into_inner();
+        Ok(Response::new(GetAllOnlineUsersResponse {
+            users: self.registry.get_all_online_users(),
+        }))
     }
 
     async fn get_users_stats(
         &self,
         request: Request<GetUsersStatsRequest>,
     ) -> Result<Response<GetUsersStatsResponse>, Status> {
-        Err(unimplemented("GetUsersStats", &rpc_remote_addr(&request)))
+        let remote = rpc_remote_addr(&request);
+        log_rpc_call(SERVICE, "GetUsersStats", &remote);
+        let request = request.into_inner();
+        let mut user_map: HashMap<String, UserStat> = HashMap::new();
+
+        self.registry.visit_online_maps(|name, map| {
+            if map.count() == 0 {
+                return true;
+            }
+            let Some(email) = parse_user_online_email(name) else {
+                return true;
+            };
+            let mut user = UserStat {
+                email: email.to_string(),
+                ips: Vec::new(),
+                traffic: None,
+            };
+            map.for_each(|ip, last_seen| {
+                user.ips.push(OnlineIpEntry {
+                    ip: ip.to_string(),
+                    last_seen,
+                });
+                true
+            });
+            if !user.ips.is_empty() {
+                user_map.insert(email.to_string(), user);
+            }
+            true
+        });
+
+        if request.include_traffic {
+            for user in user_map.values_mut() {
+                user.traffic = Some(TrafficUserStat {
+                    uplink: 0,
+                    downlink: 0,
+                });
+            }
+            self.registry.visit_counters(|name, counter| {
+                let Some((email, is_uplink)) = parse_user_traffic_counter(name) else {
+                    return true;
+                };
+                let Some(user) = user_map.get_mut(&email) else {
+                    return true;
+                };
+                let Some(traffic) = user.traffic.as_mut() else {
+                    return true;
+                };
+                let value = if request.reset {
+                    counter.reset()
+                } else {
+                    counter.value()
+                };
+                if is_uplink {
+                    traffic.uplink = value;
+                } else {
+                    traffic.downlink = value;
+                }
+                true
+            });
+        }
+
+        Ok(Response::new(GetUsersStatsResponse {
+            users: user_map.into_values().collect(),
+        }))
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/api/stats.rs"]
+mod tests;

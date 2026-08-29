@@ -30,9 +30,12 @@ where
 
     let result = handle_reality_vless_tcp_inbound_traced(
         stream,
-        handler.users(),
-        handler.stats(),
+        Some(handler.auth_context()),
+        None,
+        None,
         handler.mux_trace(),
+        handler.socket_meta(),
+        handler.router(),
     )
     .await;
 

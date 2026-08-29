@@ -11,41 +11,55 @@ use crate::dns::DnsEngine;
 use crate::mux::encoder::encode_mux_end;
 use crate::mux::frame::{MuxCommand, MuxFrame, MuxSessionTrace};
 use crate::mux::parser::read_mux_frame;
+use crate::mux::route_env::MuxRouteEnv;
 use crate::mux::state::{mux_actions, write_mux_out_frames, MuxFrameActions, MuxOutTx};
 use crate::mux::tcp;
 use crate::mux::udp_dns;
 
-pub async fn handle_mux_cool_inbound<S>(stream: S) -> std::io::Result<()>
+pub async fn handle_mux_cool_inbound<S>(stream: &mut S) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_mux_cool_inbound_with_dns(stream, DnsEngine::shared()).await
+    handle_mux_cool_inbound_with_dns_and_trace(stream, DnsEngine::shared(), None, None).await
 }
 
 pub async fn handle_mux_cool_inbound_traced<S>(
-    stream: S,
+    stream: &mut S,
     trace: MuxSessionTrace,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_mux_cool_inbound_with_dns_and_trace(stream, DnsEngine::shared(), Some(trace)).await
+    handle_mux_cool_inbound_with_dns_and_trace(stream, DnsEngine::shared(), Some(trace), None).await
 }
 
 pub async fn handle_mux_cool_inbound_with_dns<S>(
-    stream: S,
+    stream: &mut S,
     dns: Arc<DnsEngine>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_mux_cool_inbound_with_dns_and_trace(stream, dns, None).await
+    handle_mux_cool_inbound_with_dns_and_trace(stream, dns, None, None).await
+}
+
+pub async fn handle_mux_cool_inbound_with_env<S>(
+    stream: &mut S,
+    dns: Arc<DnsEngine>,
+    trace: Option<MuxSessionTrace>,
+    route_env: Option<MuxRouteEnv>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    handle_mux_cool_inbound_with_dns_and_trace(stream, dns, trace, route_env).await
 }
 
 pub async fn handle_mux_cool_inbound_with_dns_and_trace<S>(
-    mut stream: S,
+    mut stream: &mut S,
     dns: Arc<DnsEngine>,
     trace: Option<MuxSessionTrace>,
+    route_env: Option<MuxRouteEnv>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -71,7 +85,7 @@ where
                         elapsed_ms_since_conn_start = trace.map(|trace| trace.conn_started.elapsed().as_millis()),
                         "first/next mux frame received"
                     );
-                    let actions = handle_client_frame(&mut active, &dns, frame, trace, udp_tx.clone()).await?;
+                    let actions = handle_client_frame(&mut active, &dns, frame, trace, udp_tx.clone(), route_env.as_ref()).await?;
                     write_mux_out_frames(&mut stream, &actions).await?;
                 }
                 Some(actions) = udp_rx.recv() => {
@@ -111,7 +125,7 @@ where
                                     trace.map(|trace| trace.conn_started.elapsed().as_millis()),
                                 "first/next mux frame received"
                             );
-                            let actions = handle_client_frame(&mut active, &dns, frame, trace, udp_tx.clone()).await?;
+                            let actions = handle_client_frame(&mut active, &dns, frame, trace, udp_tx.clone(), route_env.as_ref()).await?;
                             write_mux_out_frames(&mut stream, &actions).await?;
                         }
                         Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
@@ -140,6 +154,7 @@ async fn handle_client_frame(
     frame: MuxFrame,
     trace: Option<MuxSessionTrace>,
     udp_tx: MuxOutTx,
+    route_env: Option<&MuxRouteEnv>,
 ) -> std::io::Result<MuxFrameActions> {
     let id = frame.mux_id;
     match frame.command {
@@ -151,6 +166,6 @@ async fn handle_client_frame(
             udp_dns::handle_udp_mux_packet(id, destination.destination, packet, dns, trace, udp_tx)
                 .await
         }
-        _ => tcp::handle_mux_tcp_command(active, frame).await,
+        _ => tcp::handle_mux_tcp_command(active, frame, route_env).await,
     }
 }

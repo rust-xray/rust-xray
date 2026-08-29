@@ -94,6 +94,8 @@ async fn run_http1_bridge_request(
             Instant::now(),
             &users,
             None,
+            None,
+            None,
         )
         .await
     };
@@ -199,6 +201,8 @@ async fn vless_auth_failure_does_not_send_http_ok_or_leak_details() {
             Instant::now(),
             &users,
             None,
+            None,
+            None,
         )
         .await
     });
@@ -232,6 +236,8 @@ async fn client_disconnect_aborts_bridge_cleanly() {
             3,
             Instant::now(),
             &users,
+            None,
+            None,
             None,
         )
         .await

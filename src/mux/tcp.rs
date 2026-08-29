@@ -9,13 +9,17 @@ use crate::dns::DnsEngineOptions;
 use crate::mux::encoder::mux_udp_send_close_after_response_enabled;
 use crate::mux::encoder::{encode_mux_end, encode_mux_udp_packet};
 use crate::mux::frame::{MuxCommand, MuxFrame, MuxSessionTrace, MAX_MUX_DATA_LEN};
+use crate::mux::route_env::MuxRouteEnv;
 use crate::mux::state::{mux_actions, MuxFrameActions, MuxOutTx};
 use crate::mux::udp_dns::udp_socket_addr_without_dns;
 use crate::outbound::freedom::{connect_tcp_destination, format_vless_destination};
+use crate::outbound::runtime::OutboundConnectRuntime;
+use crate::routing::{connect_routed_outbound, route_context_from_vless, RoutedOutbound};
 
 pub(crate) async fn handle_mux_tcp_command(
     active: &mut Option<(u16, TcpStream)>,
     frame: MuxFrame,
+    route_env: Option<&MuxRouteEnv>,
 ) -> std::io::Result<MuxFrameActions> {
     let id = frame.mux_id;
     match frame.command {
@@ -40,7 +44,42 @@ pub(crate) async fn handle_mux_tcp_command(
                 destination = %destination_label,
                 "mux substream destination parsed"
             );
-            let mut outbound = connect_tcp_destination(&destination.destination).await?;
+            let mut outbound = if let Some(env) = route_env {
+                let route_ctx = route_context_from_vless(
+                    &env.inbound_tag,
+                    &env.auth,
+                    &destination.destination,
+                    &initial_payload,
+                    &env.socket_meta,
+                    env.sniffing_enabled,
+                );
+                let decision = env
+                    .router
+                    .pick_route_with_default(route_ctx)
+                    .await
+                    .map_err(|err| Error::other(err.to_string()))?;
+                env.router.publish_route(&decision);
+                match connect_routed_outbound(
+                    &decision.outbound_tag,
+                    &destination.destination,
+                    env.router.outbound_manager(),
+                    OutboundConnectRuntime::shared(),
+                )
+                .await?
+                {
+                    RoutedOutbound::Tcp(stream) => stream,
+                    RoutedOutbound::Blackhole => {
+                        debug!(
+                            mux_id = id,
+                            destination = %destination_label,
+                            "mux substream routed to blackhole outbound"
+                        );
+                        return Ok(mux_actions(vec![encode_mux_end(id)]));
+                    }
+                }
+            } else {
+                connect_tcp_destination(&destination.destination).await?
+            };
             if !initial_payload.is_empty() {
                 outbound.write_all(&initial_payload).await?;
             }

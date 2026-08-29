@@ -28,6 +28,8 @@ async fn xhttp_transport_reads_http_preface_not_vless() {
         std::sync::Arc::new(VlessUserManager::new("xhttp-test", Vec::new())),
         None,
         None,
+        None,
+        None,
     );
 
     let client_task = tokio::spawn(async move {

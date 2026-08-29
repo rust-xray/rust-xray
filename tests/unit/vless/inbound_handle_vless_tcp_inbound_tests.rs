@@ -61,7 +61,14 @@ fn handle_vless_tcp_inbound_udp_command_is_unsupported() {
     let data = build_vless_request_bytes(&USER_ID, 0x02, 443);
     let cursor = std::io::Cursor::new(data);
 
-    let err = block_on(handle_vless_tcp_inbound(cursor, &test_users(), None)).unwrap_err();
+    let err = block_on(handle_vless_tcp_inbound(
+        cursor,
+        &test_users(),
+        None,
+        None,
+        None,
+    ))
+    .unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert!(err.to_string().contains("UDP unsupported"));
@@ -82,7 +89,14 @@ fn handle_vless_tcp_inbound_mux_command_is_not_rejected_as_unsupported() {
     let data = build_vless_mux_request_bytes(&USER_ID, &[]);
     let cursor = std::io::Cursor::new(data);
 
-    block_on(handle_vless_tcp_inbound(cursor, &test_users(), None)).unwrap();
+    block_on(handle_vless_tcp_inbound(
+        cursor,
+        &test_users(),
+        None,
+        None,
+        None,
+    ))
+    .unwrap();
 }
 
 #[test]
@@ -121,8 +135,9 @@ fn handle_vless_tcp_inbound_mux_single_tcp_substream_roundtrip() {
             .expect("send mux vless request");
 
         let users = test_users();
-        let handle =
-            tokio::spawn(async move { handle_vless_tcp_inbound(server_io, &users, None).await });
+        let handle = tokio::spawn(async move {
+            handle_vless_tcp_inbound(server_io, &users, None, None, None).await
+        });
 
         let mut response_header = [0u8; 2];
         client_io
@@ -172,7 +187,14 @@ fn handle_vless_tcp_inbound_xudp_marker_addons_are_rejected() {
     let data = build_vless_request_with_addons(&USER_ID, b"xudp", 0x02, 443);
     let cursor = std::io::Cursor::new(data);
 
-    let err = block_on(handle_vless_tcp_inbound(cursor, &test_users(), None)).unwrap_err();
+    let err = block_on(handle_vless_tcp_inbound(
+        cursor,
+        &test_users(),
+        None,
+        None,
+        None,
+    ))
+    .unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert!(err.to_string().contains("XUDP unsupported"));
@@ -183,7 +205,14 @@ fn handle_vless_tcp_inbound_unknown_client_is_permission_denied() {
     let data = build_vless_request_bytes(&UNKNOWN_USER_ID, 0x01, 443);
     let cursor = std::io::Cursor::new(data);
 
-    let err = block_on(handle_vless_tcp_inbound(cursor, &test_users(), None)).unwrap_err();
+    let err = block_on(handle_vless_tcp_inbound(
+        cursor,
+        &test_users(),
+        None,
+        None,
+        None,
+    ))
+    .unwrap_err();
 
     assert_eq!(err.kind(), ErrorKind::PermissionDenied);
 }
@@ -213,8 +242,9 @@ fn handle_vless_tcp_inbound_writes_response_header_before_outbound_bytes() {
             .expect("send vless request");
 
         let users = test_users();
-        let handle =
-            tokio::spawn(async move { handle_vless_tcp_inbound(server_io, &users, None).await });
+        let handle = tokio::spawn(async move {
+            handle_vless_tcp_inbound(server_io, &users, None, None, None).await
+        });
 
         let mut received = [0u8; 16];
         let read = client_io
@@ -314,8 +344,9 @@ fn handle_vless_tcp_inbound_unpads_vision_initial_payload() {
             }],
         );
 
-        let handle =
-            tokio::spawn(async move { handle_vless_tcp_inbound(server_io, &users, None).await });
+        let handle = tokio::spawn(async move {
+            handle_vless_tcp_inbound(server_io, &users, None, None, None).await
+        });
 
         let mut received = [0u8; 32];
         let read = client_io
@@ -355,10 +386,9 @@ fn empty_flow_existing_smoke_path_not_changed() {
             .await
             .expect("send vless request");
 
-        let handle =
-            tokio::spawn(
-                async move { handle_vless_tcp_inbound(server_io, &test_users(), None).await },
-            );
+        let handle = tokio::spawn(async move {
+            handle_vless_tcp_inbound(server_io, &test_users(), None, None, None).await
+        });
 
         let mut received = [0u8; 8];
         let read = client_io.read(&mut received).await.expect("read response");
@@ -405,10 +435,9 @@ fn handle_vless_tcp_inbound_forwards_initial_payload_once_after_response_header(
             .await
             .expect("send vless request");
 
-        let handle =
-            tokio::spawn(
-                async move { handle_vless_tcp_inbound(server_io, &test_users(), None).await },
-            );
+        let handle = tokio::spawn(async move {
+            handle_vless_tcp_inbound(server_io, &test_users(), None, None, None).await
+        });
 
         let mut received = [0u8; 32];
         let read = client_io

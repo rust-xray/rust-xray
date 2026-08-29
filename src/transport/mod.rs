@@ -4,6 +4,7 @@ pub mod raw;
 pub mod xhttp;
 
 use std::io;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -26,6 +27,8 @@ pub use xhttp::mode::{
 use crate::config::{InboundTransportConfig, TransportNetwork, XHttpSettings};
 use crate::mux::MuxSessionTrace;
 use crate::reality::tls13::RealityTls13ApplicationStream;
+use crate::routing::{RouteSocketMeta, RuntimeRouter};
+use crate::runtime::VlessInboundAuthContext;
 use crate::stats::StatsState;
 use crate::vless::VlessUserManager;
 
@@ -75,46 +78,120 @@ impl AcceptedTransport {
 /// VLESS inbound handler context shared by all transport adapters.
 #[derive(Clone)]
 pub struct VlessHandler {
-    users: Arc<VlessUserManager>,
-    stats: Option<StatsState>,
+    auth: VlessInboundAuthContext,
     mux_trace: Option<MuxSessionTrace>,
+    socket_meta: RouteSocketMeta,
+    router: Option<Arc<RuntimeRouter>>,
 }
 
 impl VlessHandler {
+    pub fn new_with_auth_context(
+        auth: VlessInboundAuthContext,
+        mux_trace: Option<MuxSessionTrace>,
+        socket_meta: RouteSocketMeta,
+        router: Option<Arc<RuntimeRouter>>,
+    ) -> Self {
+        Self {
+            auth,
+            mux_trace,
+            socket_meta,
+            router,
+        }
+    }
+
     pub fn new(
         users: Arc<VlessUserManager>,
         stats: Option<StatsState>,
         mux_trace: Option<MuxSessionTrace>,
+        source_ip: Option<IpAddr>,
+        router: Option<Arc<RuntimeRouter>>,
     ) -> Self {
-        Self {
+        Self::new_with_socket_meta(
             users,
             stats,
             mux_trace,
-        }
+            RouteSocketMeta {
+                source_ip,
+                ..Default::default()
+            },
+            router,
+        )
     }
 
-    pub fn users(&self) -> &VlessUserManager {
-        &self.users
+    pub fn new_with_socket_meta(
+        users: Arc<VlessUserManager>,
+        stats: Option<StatsState>,
+        mux_trace: Option<MuxSessionTrace>,
+        socket_meta: RouteSocketMeta,
+        router: Option<Arc<RuntimeRouter>>,
+    ) -> Self {
+        Self::new_with_auth_context(
+            VlessInboundAuthContext::from_single_manager(users, stats.map(Arc::new)),
+            mux_trace,
+            socket_meta,
+            router,
+        )
     }
 
-    pub fn users_arc(&self) -> Arc<VlessUserManager> {
-        Arc::clone(&self.users)
+    pub fn auth_context(&self) -> &VlessInboundAuthContext {
+        &self.auth
     }
 
-    pub fn stats(&self) -> Option<&StatsState> {
-        self.stats.as_ref()
+    pub fn users(&self) -> Option<Arc<VlessUserManager>> {
+        self.auth
+            .auth_set()
+            .tags()
+            .first()
+            .and_then(|tag| self.auth.auth_set().get_manager(tag))
+    }
+
+    pub fn users_arc(&self) -> Option<Arc<VlessUserManager>> {
+        self.users()
+    }
+
+    pub fn stats(&self) -> Option<Arc<StatsState>> {
+        self.auth
+            .auth_set()
+            .tags()
+            .first()
+            .and_then(|tag| self.auth.stats_for(tag))
     }
 
     pub fn mux_trace(&self) -> Option<MuxSessionTrace> {
         self.mux_trace
     }
 
-    pub fn inbound_tag(&self) -> &str {
-        self.users.inbound_tag()
+    pub fn source_ip(&self) -> Option<IpAddr> {
+        self.socket_meta.source_ip
+    }
+
+    pub fn socket_meta(&self) -> &RouteSocketMeta {
+        &self.socket_meta
+    }
+
+    pub fn router(&self) -> Option<&Arc<RuntimeRouter>> {
+        self.router.as_ref()
+    }
+
+    pub fn inbound_tag(&self) -> String {
+        self.auth
+            .auth_set()
+            .tags()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "reality-in".to_string())
     }
 
     pub fn user_count(&self) -> usize {
-        self.users.user_count()
+        self.auth.auth_set().tags().iter().fold(0, |count, tag| {
+            count
+                + self
+                    .auth
+                    .auth_set()
+                    .get_manager(tag)
+                    .map(|manager| manager.user_count())
+                    .unwrap_or(0)
+        })
     }
 }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::HandlerRuntime;
 use crate::vless::{build_fallback_context, resolve_fallback_selection, FallbackContext};
 
 const VLESS_REALITY_CONFIG: &str = r#"{
@@ -75,9 +76,20 @@ fn runtime_config_from_xray_builds_vless_clients() {
     let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
     let config = runtime_config_from_xray(&xray).expect("build runtime config");
 
-    assert_eq!(config.user_manager.user_count(), 1);
+    assert_eq!(
+        config
+            .auth
+            .auth_set()
+            .get_manager("reality-in")
+            .expect("manager")
+            .user_count(),
+        1
+    );
     assert!(config
-        .user_manager
+        .auth
+        .auth_set()
+        .get_manager("reality-in")
+        .expect("manager")
         .contains_id(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()));
     assert_eq!(config.inbound.tag.as_deref(), Some("reality-in"));
     assert!(config.inbound.fallbacks.is_empty());
@@ -127,7 +139,14 @@ fn runtime_config_uses_normalized_raw_tcp_transport() {
 
     assert_eq!(config.inbound.transport, InboundTransportConfig::RawTcp);
     assert_eq!(
-        config.user_manager.list_managed_users()[0].flow.as_deref(),
+        config
+            .auth
+            .auth_set()
+            .get_manager("reality-in")
+            .expect("manager")
+            .list_managed_users()[0]
+            .flow
+            .as_deref(),
         Some("xtls-rprx-vision")
     );
 }
@@ -143,7 +162,16 @@ fn runtime_config_uses_normalized_xhttp_transport_for_empty_flow() {
         config.inbound.transport,
         InboundTransportConfig::XHttp(_)
     ));
-    assert_eq!(config.user_manager.list_managed_users()[0].flow, None);
+    assert_eq!(
+        config
+            .auth
+            .auth_set()
+            .get_manager("reality-in")
+            .expect("manager")
+            .list_managed_users()[0]
+            .flow,
+        None
+    );
 }
 
 #[test]
@@ -451,7 +479,8 @@ fn pick_free_port() -> u16 {
 #[tokio::test]
 async fn start_xray_api_server_skipped_without_api_block() {
     let xray: XrayConfig = serde_json::from_str(VLESS_REALITY_CONFIG).expect("parse config");
-    let inbound_users = Arc::new(InboundUserManagers::new());
+    let inbound_users =
+        HandlerRuntime::for_handler_tests(Arc::new(crate::stats::StatsRegistry::new()));
     let stats_registry = Arc::new(StatsRegistry::new());
 
     let handle = start_xray_api_server("", &xray, inbound_users, stats_registry)
@@ -477,7 +506,8 @@ async fn start_xray_api_server_spawned_with_api_block() {
             }}"#
     );
     let xray: XrayConfig = serde_json::from_str(&config_json).expect("parse config");
-    let inbound_users = Arc::new(InboundUserManagers::new());
+    let inbound_users =
+        HandlerRuntime::for_handler_tests(Arc::new(crate::stats::StatsRegistry::new()));
     let stats_registry = Arc::new(StatsRegistry::new());
 
     let handle = start_xray_api_server(

@@ -52,6 +52,7 @@ pub const TLS13_SERVER_ENCRYPTED_HANDSHAKE_BUILT: &str =
 pub const TLS13_SERVER_ENCRYPTED_HANDSHAKE_SENT: &str =
     "reality.tls13.server_encrypted_handshake.sent";
 pub const TLS13_CLIENT_FINISHED_READ: &str = "reality.tls13.client_finished.read";
+pub const TLS13_USELESS_RECORD_OVERFLOW_ALERT: &str = "reality.tls13.useless_record.overflow_alert";
 pub const TLS13_CLIENT_FINISHED_VERIFIED: &str = "reality.tls13.client_finished.verified";
 pub const TLS13_APPLICATION_SECRETS_DERIVED: &str = "reality.tls13.application_secrets.derived";
 pub const TLS13_APPLICATION_STREAM_READY: &str = "reality.tls13.application_stream.ready";

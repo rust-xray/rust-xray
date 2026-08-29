@@ -14,7 +14,7 @@ use crate::vless::protocol::VlessDestination;
 
 use super::config::{DnsConfig, DnsServerConfig, DnsServerTransport};
 use super::question::parse_dns_question_for_log;
-use super::routing::{DnsRouter, DnsRoutingContext};
+use super::routing::{DnsOutboundSelector, DnsRoutingContext};
 use super::tcp_codec::{read_dns_tcp_response, write_dns_tcp_query, DNS_TCP_MAX_FRAME_LEN};
 
 pub const DNS_DIAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -128,14 +128,14 @@ impl OutboundManager for StandardOutboundManager {
 
 pub struct DnsClient {
     config: DnsConfig,
-    router: Arc<DnsRouter>,
+    router: Arc<DnsOutboundSelector>,
     outbound_manager: Arc<dyn OutboundManager>,
 }
 
 impl DnsClient {
     pub fn new(
         config: DnsConfig,
-        router: Arc<DnsRouter>,
+        router: Arc<DnsOutboundSelector>,
         outbound_manager: Arc<dyn OutboundManager>,
     ) -> Self {
         Self {
@@ -171,7 +171,7 @@ impl DnsClient {
             inbound_tag: inbound_tag.map(str::to_string),
             protocol: Some("dns".to_string()),
         };
-        let outbound_tag = self.router.select_outbound_tag(&ctx);
+        let outbound_tag = self.router.select_outbound_tag(&ctx).await;
         debug!(
             transport = "tcp",
             dns_server = %format!("{}:{}", server.host, server.port),

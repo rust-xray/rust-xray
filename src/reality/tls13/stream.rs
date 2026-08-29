@@ -11,6 +11,7 @@
 //! - Handles encrypted TLS alerts on the application stream (close_notify, fatal).
 //! - Wired into VLESS through the accepted transport boundary on the REALITY accepted path.
 
+use std::fmt;
 use std::fmt::Write as _;
 use std::io::{self, Error, ErrorKind};
 use std::pin::Pin;
@@ -40,7 +41,8 @@ use super::record_crypto::{
 };
 use super::useless_records::{
     classify_record_before_client_finished, classify_record_on_application_stream,
-    UselessRecordCounter,
+    too_many_ignored_records_error, useless_record_overflow_limit, UselessRecordCounter,
+    UselessRecordOverflow,
 };
 use crate::reality::post_handshake::UselessRecordTolerance;
 
@@ -570,6 +572,80 @@ fn client_finished_read_error(kind: ErrorKind, message: impl Into<String>) -> Er
     )
 }
 
+/// Error from [`read_client_finished_tls_record_from_stream`].
+#[derive(Debug)]
+pub enum ClientFinishedReadError {
+    Io(Error),
+    UselessOverflow(UselessRecordOverflow),
+}
+
+impl ClientFinishedReadError {
+    pub fn into_io_error(self) -> Error {
+        match self {
+            Self::Io(err) => err,
+            Self::UselessOverflow(overflow) => too_many_ignored_records_error(overflow.limit),
+        }
+    }
+}
+
+impl fmt::Display for ClientFinishedReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "{err}"),
+            Self::UselessOverflow(overflow) => write!(f, "{overflow}"),
+        }
+    }
+}
+
+impl std::error::Error for ClientFinishedReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::UselessOverflow(overflow) => Some(overflow),
+        }
+    }
+}
+
+impl From<Error> for ClientFinishedReadError {
+    fn from(err: Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+/// Writes at most one encrypted fatal `unexpected_message` alert (best-effort).
+pub(crate) async fn write_fatal_useless_overflow_alert<W>(
+    stream: &mut W,
+    encryptor: &mut Tls13RecordEncryptor,
+    alert_sent: &mut bool,
+) where
+    W: AsyncWrite + Unpin,
+{
+    if *alert_sent {
+        return;
+    }
+    *alert_sent = true;
+
+    let record = match encryptor.encrypt_fatal_unexpected_message_alert() {
+        Ok(record) => record,
+        Err(err) => {
+            warn!(
+                stage = stages::TLS13_USELESS_RECORD_OVERFLOW_ALERT,
+                error = %err,
+                "failed to encrypt TLS fatal useless-record overflow alert"
+            );
+            return;
+        }
+    };
+
+    if let Err(err) = stream.write_all(&record).await {
+        warn!(
+            stage = stages::TLS13_USELESS_RECORD_OVERFLOW_ALERT,
+            error = %err,
+            "failed to write TLS fatal useless-record overflow alert"
+        );
+    }
+}
+
 /// Reads the encrypted client Finished record, skipping permitted non-advancing TLS 1.3 records.
 ///
 /// Dummy compatibility CCS records are not part of the TLS 1.3 transcript and must not affect
@@ -578,7 +654,7 @@ fn client_finished_read_error(kind: ErrorKind, message: impl Into<String>) -> Er
 pub(crate) async fn read_client_finished_tls_record_from_stream<S>(
     stream: &mut S,
     tolerance: UselessRecordTolerance,
-) -> io::Result<TlsRecord>
+) -> Result<TlsRecord, ClientFinishedReadError>
 where
     S: AsyncRead + Unpin,
 {
@@ -587,20 +663,20 @@ where
     loop {
         let record = read_tls_record_from_stream(stream).await.map_err(|err| {
             if err.kind() == ErrorKind::UnexpectedEof {
-                client_finished_read_error(
+                ClientFinishedReadError::Io(client_finished_read_error(
                     ErrorKind::UnexpectedEof,
                     format!("client closed connection before client Finished ({err})"),
-                )
+                ))
             } else {
-                err
+                ClientFinishedReadError::Io(err)
             }
         })?;
 
         match classify_record_before_client_finished(&record) {
             Ok(true) => {
-                counter
-                    .observe_useless()
-                    .map_err(|err| client_finished_read_error(err.kind(), err.to_string()))?;
+                if let Err(overflow) = counter.observe_useless() {
+                    return Err(ClientFinishedReadError::UselessOverflow(overflow));
+                }
 
                 if record.content_type == TlsRecordContentType::ChangeCipherSpec {
                     debug!(
@@ -641,7 +717,10 @@ where
                         "client sent TLS alert before Finished"
                     );
                 }
-                return Err(client_finished_read_error(err.kind(), err.to_string()));
+                return Err(ClientFinishedReadError::Io(client_finished_read_error(
+                    err.kind(),
+                    err.to_string(),
+                )));
             }
         }
     }
@@ -805,8 +884,8 @@ impl Tls13ClientReadState {
 
             match classify_record_on_application_stream(&record) {
                 Ok(true) => {
-                    if let Err(err) = self.useless_counter.observe_useless() {
-                        return Poll::Ready(Err(Error::new(err.kind(), err.to_string())));
+                    if let Err(overflow) = self.useless_counter.observe_useless() {
+                        return Poll::Ready(Err(too_many_ignored_records_error(overflow.limit)));
                     }
                     debug!(
                         stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
@@ -927,6 +1006,7 @@ struct Tls13ClientWriteState {
     ciphertext_write_buf: BytesMut,
     pending_write_plaintext_len: Option<usize>,
     server_key_update_requested: Arc<AtomicBool>,
+    fatal_useless_overflow_alert_sent: bool,
 }
 
 impl Tls13ClientWriteState {
@@ -939,7 +1019,37 @@ impl Tls13ClientWriteState {
             ciphertext_write_buf: BytesMut::new(),
             pending_write_plaintext_len: None,
             server_key_update_requested,
+            fatal_useless_overflow_alert_sent: false,
         }
+    }
+
+    async fn flush_pending_ciphertext_async<S>(&mut self, inner: &mut S) -> io::Result<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        while !self.ciphertext_write_buf.is_empty() {
+            inner.write_all(&self.ciphertext_write_buf).await?;
+            self.ciphertext_write_buf.clear();
+        }
+        self.pending_write_plaintext_len = None;
+        Ok(())
+    }
+
+    async fn send_useless_overflow_fatal_alert<S>(&mut self, inner: &mut S) -> io::Result<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        if self.fatal_useless_overflow_alert_sent {
+            return Ok(());
+        }
+        self.flush_pending_ciphertext_async(inner).await?;
+        write_fatal_useless_overflow_alert(
+            inner,
+            &mut self.write_encryptor,
+            &mut self.fatal_useless_overflow_alert_sent,
+        )
+        .await;
+        Ok(())
     }
 
     fn encrypt_sequence(&self) -> u64 {
@@ -1162,6 +1272,16 @@ impl<S> RealityTls13ClientWriter<S> {
     pub fn inner_mut(&mut self) -> &mut S {
         &mut self.inner
     }
+
+    /// Sends at most one encrypted fatal alert for useless-record tolerance overflow.
+    pub(crate) async fn send_useless_overflow_fatal_alert(&mut self) -> io::Result<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        self.write
+            .send_useless_overflow_fatal_alert(&mut self.inner)
+            .await
+    }
 }
 
 impl<S> AsyncWrite for RealityTls13ClientWriter<S>
@@ -1342,6 +1462,16 @@ impl<S> RealityTls13ApplicationStream<S> {
         self.inner
     }
 
+    /// Sends at most one encrypted fatal alert for useless-record tolerance overflow.
+    pub(crate) async fn send_useless_overflow_fatal_alert(&mut self) -> io::Result<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        self.write
+            .send_useless_overflow_fatal_alert(&mut self.inner)
+            .await
+    }
+
     /// Splits into exclusive reader/writer halves for bidirectional relay.
     ///
     /// Decrypt state moves into the reader; encrypt state moves into the writer.
@@ -1465,6 +1595,148 @@ where
     }
 }
 
+/// Writer side capable of emitting the useless-record overflow fatal alert.
+pub trait Tls13OverflowAlertWriter {
+    fn send_useless_overflow_fatal_alert(
+        &mut self,
+    ) -> impl std::future::Future<Output = io::Result<()>>;
+}
+
+impl<S> Tls13OverflowAlertWriter for RealityTls13ClientWriter<S>
+where
+    S: AsyncWrite + Unpin,
+{
+    fn send_useless_overflow_fatal_alert(
+        &mut self,
+    ) -> impl std::future::Future<Output = io::Result<()>> {
+        RealityTls13ClientWriter::send_useless_overflow_fatal_alert(self)
+    }
+}
+
+/// Bidirectional relay for split TLS 1.3 halves with useless-record overflow alert handling.
+///
+/// The writer remains the sole owner of outbound TLS encrypt state. When the reader side
+/// returns a useless-record overflow error, this function emits one fatal alert via the writer
+/// before propagating the original overflow error.
+pub async fn relay_tls13_split_bidirectional<S>(
+    reader: RealityTls13ClientReader<ReadHalf<S>>,
+    writer: RealityTls13ClientWriter<WriteHalf<S>>,
+    outbound: tokio::net::TcpStream,
+) -> io::Result<(u64, u64)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    relay_split_bidirectional_with_overflow_alert(reader, writer, outbound).await
+}
+
+/// Split reader/writer relay with useless-record overflow alert emission on the alert writer.
+pub async fn relay_split_bidirectional_with_overflow_alert<R, W>(
+    mut reader: R,
+    mut writer: W,
+    outbound: tokio::net::TcpStream,
+) -> io::Result<(u64, u64)>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Tls13OverflowAlertWriter,
+{
+    let (mut outbound_reader, mut outbound_writer) = tokio::io::split(outbound);
+
+    tokio::select! {
+        res = tokio::io::copy(&mut reader, &mut outbound_writer) => {
+            let client_to_dest = match res {
+                Ok(bytes) => bytes,
+                Err(err) => return handle_split_relay_reader_overflow(&mut writer, err).await,
+            };
+            let dest_to_client = tokio::io::copy(&mut outbound_reader, &mut writer)
+                .await
+                .unwrap_or(0);
+            Ok((client_to_dest, dest_to_client))
+        }
+        res = tokio::io::copy(&mut outbound_reader, &mut writer) => {
+            let dest_to_client = res?;
+            let client_to_dest = match tokio::io::copy(&mut reader, &mut outbound_writer).await {
+                Ok(bytes) => bytes,
+                Err(err) => return handle_split_relay_reader_overflow(&mut writer, err).await,
+            };
+            Ok((client_to_dest, dest_to_client))
+        }
+    }
+}
+
+/// Mux/control-plane inbound over split TLS halves (prefix served on read path only).
+pub struct SplitMuxInbound<R, W> {
+    reader: crate::tls::PrefixedReader<R>,
+    writer: W,
+}
+
+impl<R, W> SplitMuxInbound<R, W> {
+    pub fn new(reader: R, writer: W, initial_payload: Vec<u8>) -> Self {
+        Self {
+            reader: crate::tls::PrefixedReader::new(reader, initial_payload),
+            writer,
+        }
+    }
+}
+
+impl<R, W> SplitMuxInbound<R, W>
+where
+    W: Tls13OverflowAlertWriter,
+{
+    /// Sends at most one encrypted fatal alert for useless-record tolerance overflow.
+    pub async fn send_useless_overflow_fatal_alert(&mut self) -> io::Result<()> {
+        self.writer.send_useless_overflow_fatal_alert().await
+    }
+}
+
+impl<R, W> AsyncRead for SplitMuxInbound<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.as_mut().get_mut().reader).poll_read(cx, buf)
+    }
+}
+
+impl<R, W> AsyncWrite for SplitMuxInbound<R, W>
+where
+    W: AsyncWrite + Unpin,
+    R: Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.as_mut().get_mut().writer).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.as_mut().get_mut().writer).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.as_mut().get_mut().writer).poll_shutdown(cx)
+    }
+}
+
+async fn handle_split_relay_reader_overflow<W>(
+    writer: &mut W,
+    err: io::Error,
+) -> io::Result<(u64, u64)>
+where
+    W: Tls13OverflowAlertWriter,
+{
+    if useless_record_overflow_limit(&err).is_some() {
+        let _ = writer.send_useless_overflow_fatal_alert().await;
+    }
+    Err(err)
+}
+
 fn try_take_tls_record(buf: &mut BytesMut) -> io::Result<Option<TlsRecord>> {
     if buf.len() < TLS_RECORD_HEADER_LEN {
         return Ok(None);
@@ -1526,3 +1798,7 @@ where
 #[cfg(test)]
 #[path = "../../../tests/unit/reality/tls13/stream.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../../tests/unit/reality/tls13/useless_overflow_alert.rs"]
+mod useless_overflow_alert_tests;

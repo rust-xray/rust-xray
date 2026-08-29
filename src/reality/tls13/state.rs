@@ -47,8 +47,12 @@ use super::record_crypto::{
     parse_tls13_handshake_inner_plaintext, tls13_inner_plaintext_body,
     tls13_inner_plaintext_content_type, Tls13RecordDecryptor, Tls13RecordEncryptor,
 };
-use super::stream::{read_client_finished_tls_record_from_stream, RealityTls13ApplicationStream};
+use super::stream::{
+    read_client_finished_tls_record_from_stream, write_fatal_useless_overflow_alert,
+    ClientFinishedReadError, RealityTls13ApplicationStream,
+};
 use super::transcript::TranscriptHash;
+use super::useless_records::too_many_ignored_records_error;
 
 const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 0x01;
 
@@ -386,6 +390,32 @@ impl RealityTls13ServerState {
         Ok(Some(record))
     }
 
+    fn server_application_alert_encryptor(&self) -> std::io::Result<Tls13RecordEncryptor> {
+        let handshake_secret = self
+            .handshake_secrets
+            .as_ref()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "TLS 1.3 useless-record overflow alert requires derived handshake secrets",
+                )
+            })?
+            .handshake_secret
+            .clone();
+        let transcript_hash = self.transcript.digest();
+        let server_application_traffic_secret =
+            derive_application_traffic_secrets(self.suite, &handshake_secret, &transcript_hash)?
+                .server_application_traffic_secret;
+        let traffic_keys = derive_traffic_key(self.suite, &server_application_traffic_secret)?;
+        let mut encryptor = Tls13RecordEncryptor::with_traffic_secret(
+            self.suite,
+            traffic_keys,
+            server_application_traffic_secret,
+        )?;
+        encryptor.sequence = self.server_application_write_sequence;
+        Ok(encryptor)
+    }
+
     fn encrypt_observed_handshake_record(
         &self,
         encryptor: &mut Tls13RecordEncryptor,
@@ -615,10 +645,32 @@ where
         client_hello_payload,
     );
     let useless_tolerance = resolve_ccs_tolerance(&probe_key).await;
+    let mut overflow_alert_sent = false;
+    let mut overflow_alert_encryptor = state.server_application_alert_encryptor()?;
     let client_finished_record =
-        read_client_finished_tls_record_from_stream(&mut stream, useless_tolerance)
-            .await
-            .map_err(|err| stage_error(RealityAcceptedStage::ClientFinishedRead, err))?;
+        match read_client_finished_tls_record_from_stream(&mut stream, useless_tolerance).await {
+            Err(ClientFinishedReadError::UselessOverflow(overflow)) => {
+                write_fatal_useless_overflow_alert(
+                    &mut stream,
+                    &mut overflow_alert_encryptor,
+                    &mut overflow_alert_sent,
+                )
+                .await;
+                state.server_application_write_sequence = overflow_alert_encryptor.sequence;
+                return Err(stage_error(
+                    RealityAcceptedStage::ClientFinishedRead,
+                    too_many_ignored_records_error(overflow.limit),
+                ));
+            }
+            Err(other) => {
+                return Err(stage_error(
+                    RealityAcceptedStage::ClientFinishedRead,
+                    other.into_io_error(),
+                ));
+            }
+            Ok(record) => record,
+        };
+    state.server_application_write_sequence = overflow_alert_encryptor.sequence;
 
     let client_handshake_traffic_secret = state
         .handshake_secrets

@@ -1,5 +1,6 @@
 use std::future::poll_fn;
 use std::io;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,9 +14,11 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::timeout;
 use tracing::{debug, trace, warn};
 
+use crate::routing::{RouteSocketMeta, RuntimeRouter};
 use crate::stats::StatsState;
 use crate::vless::{
-    handle_vless_tcp_inbound, handle_vless_tcp_inbound_with_response_hook, VlessUserManager,
+    handle_vless_tcp_inbound_with_socket_meta,
+    handle_vless_tcp_inbound_with_socket_meta_and_response_hook, VlessUserManager,
 };
 
 pub const XHTTP_BRIDGE_CHANNEL_CAPACITY: usize = 16;
@@ -60,6 +63,42 @@ pub async fn run_http1_stream_one_bridge<S>(
     started: Instant,
     users: &VlessUserManager,
     stats_state: Option<&StatsState>,
+    source_ip: Option<IpAddr>,
+    router: Option<&Arc<RuntimeRouter>>,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let socket_meta = RouteSocketMeta {
+        source_ip,
+        ..Default::default()
+    };
+    run_http1_stream_one_bridge_with_socket_meta(
+        stream,
+        prebuffer,
+        content_length,
+        inbound_tag,
+        conn_id,
+        started,
+        users,
+        stats_state,
+        &socket_meta,
+        router,
+    )
+    .await
+}
+
+pub async fn run_http1_stream_one_bridge_with_socket_meta<S>(
+    stream: S,
+    prebuffer: Bytes,
+    content_length: Option<u64>,
+    inbound_tag: &str,
+    conn_id: u64,
+    started: Instant,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -107,10 +146,12 @@ where
 
     let hook_started = Arc::clone(&http_response_started);
     let hook_writer = Arc::clone(&writer);
-    let result = handle_vless_tcp_inbound_with_response_hook(
+    let result = handle_vless_tcp_inbound_with_socket_meta_and_response_hook(
         bridge,
         users,
         stats_state,
+        socket_meta,
+        router,
         move || async move {
             let mut writer = hook_writer.lock().await;
             writer
@@ -144,12 +185,43 @@ where
 
 pub async fn run_h2_stream_one_bridge(
     recv: h2::RecvStream,
+    respond: h2::server::SendResponse<Bytes>,
+    inbound_tag: &str,
+    conn_id: u64,
+    started: Instant,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+    source_ip: Option<IpAddr>,
+    router: Option<&Arc<RuntimeRouter>>,
+) -> io::Result<()> {
+    let socket_meta = RouteSocketMeta {
+        source_ip,
+        ..Default::default()
+    };
+    run_h2_stream_one_bridge_with_socket_meta(
+        recv,
+        respond,
+        inbound_tag,
+        conn_id,
+        started,
+        users,
+        stats_state,
+        &socket_meta,
+        router,
+    )
+    .await
+}
+
+pub async fn run_h2_stream_one_bridge_with_socket_meta(
+    recv: h2::RecvStream,
     mut respond: h2::server::SendResponse<Bytes>,
     inbound_tag: &str,
     conn_id: u64,
     started: Instant,
     users: &VlessUserManager,
     stats_state: Option<&StatsState>,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
 ) -> io::Result<()> {
     debug!(inbound_tag, conn_id, "xhttp bridge started");
 
@@ -185,10 +257,12 @@ pub async fn run_h2_stream_one_bridge(
     };
 
     let hook_started = Arc::clone(&http_response_started);
-    let result = handle_vless_tcp_inbound_with_response_hook(
+    let result = handle_vless_tcp_inbound_with_socket_meta_and_response_hook(
         bridge,
         users,
         stats_state,
+        socket_meta,
+        router,
         move || async move {
             let response = Response::builder()
                 .status(StatusCode::OK)
@@ -302,6 +376,41 @@ pub async fn run_packet_up_bridge<R, F>(
     session_id: &str,
     users: &VlessUserManager,
     stats_state: Option<&StatsState>,
+    source_ip: Option<IpAddr>,
+    router: Option<&Arc<RuntimeRouter>>,
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    F: FnMut(Bytes) + Send + 'static,
+{
+    let socket_meta = RouteSocketMeta {
+        source_ip,
+        ..Default::default()
+    };
+    run_packet_up_bridge_with_socket_meta(
+        upload,
+        on_download,
+        inbound_tag,
+        conn_id,
+        session_id,
+        users,
+        stats_state,
+        &socket_meta,
+        router,
+    )
+    .await
+}
+
+pub async fn run_packet_up_bridge_with_socket_meta<R, F>(
+    upload: R,
+    on_download: F,
+    inbound_tag: &str,
+    conn_id: u64,
+    session_id: &str,
+    users: &VlessUserManager,
+    stats_state: Option<&StatsState>,
+    socket_meta: &RouteSocketMeta,
+    router: Option<&Arc<RuntimeRouter>>,
 ) -> io::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -321,7 +430,9 @@ where
         },
     };
 
-    let result = handle_vless_tcp_inbound(bridge, users, stats_state).await;
+    let result =
+        handle_vless_tcp_inbound_with_socket_meta(bridge, users, stats_state, socket_meta, router)
+            .await;
 
     match result {
         Ok(()) => {

@@ -1,6 +1,10 @@
 use super::*;
 use crate::config::XrayConfig;
+use crate::dns::engine::DnsEngine;
+use crate::dns::routing::DnsOutboundSelector;
 use crate::dns::tcp_codec::{decode_dns_tcp_frame, encode_dns_tcp_frame};
+use crate::routing::RuntimeRouter;
+use crate::runtime::RuntimeOutboundManager;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -51,13 +55,26 @@ async fn dns_client_uses_selected_proxy_outbound_and_returns_raw_response() {
     let config: XrayConfig = serde_json::from_str(
             r#"{
               "dns": {"servers":["tcp://1.1.1.1:53"],"queryStrategy":"UseIPv4"},
-              "outbounds": [{"tag":"direct","protocol":"freedom"},{"tag":"proxy","protocol":"vless"}],
+              "outbounds": [{"tag":"direct","protocol":"freedom"},{"tag":"proxy","protocol":"freedom"}],
               "routing": {"rules": [{"type":"field","port":53,"network":"tcp","outboundTag":"proxy"}]}
             }"#,
         )
         .unwrap();
     let dns = config.dns.clone().unwrap();
-    let router = Arc::new(DnsRouter::new(config.routing, config.outbounds));
+    let outbound = RuntimeOutboundManager::new();
+    for ob in &config.outbounds {
+        outbound.register_startup_outbound(&ob).unwrap();
+    }
+    let router = Arc::new(DnsOutboundSelector::new(
+        RuntimeRouter::new(
+            config.routing.as_ref(),
+            Arc::clone(&outbound),
+            Arc::new(DnsEngine::with_mux_defaults()),
+            false,
+            None,
+        )
+        .unwrap(),
+    ));
     let fake = Arc::new(FakeOutboundManager {
         captured: Arc::new(Mutex::new(Vec::new())),
         response: vec![0x12, 0x34, 0x81, 0x80],
@@ -84,7 +101,16 @@ async fn unsupported_doh_is_explicit() {
             r#"{"dns":{"servers":["https://dns.google/dns-query"]},"outbounds":[{"tag":"proxy","protocol":"vless"}]}"#,
         )
         .unwrap();
-    let router = Arc::new(DnsRouter::new(config.routing, config.outbounds));
+    let router = Arc::new(DnsOutboundSelector::new(
+        RuntimeRouter::new(
+            config.routing.as_ref(),
+            RuntimeOutboundManager::new(),
+            Arc::new(DnsEngine::with_mux_defaults()),
+            false,
+            None,
+        )
+        .unwrap(),
+    ));
     let fake = Arc::new(FakeOutboundManager::default());
     let client = DnsClient::new(config.dns.unwrap(), router, fake);
 

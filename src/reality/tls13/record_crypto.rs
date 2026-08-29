@@ -7,13 +7,16 @@ use aes_gcm::{
 use chacha20poly1305::{ChaCha20Poly1305, Nonce as ChaChaNonce};
 
 use crate::tls::records::{
-    build_tls_record, TlsRecordContentType, TLS_LEGACY_VERSION_1_2, TLS_RECORD_APPLICATION_DATA,
-    TLS_RECORD_HANDSHAKE, TLS_RECORD_HEADER_LEN,
+    build_tls_record, TlsRecordContentType, TLS_LEGACY_VERSION_1_2, TLS_RECORD_ALERT,
+    TLS_RECORD_APPLICATION_DATA, TLS_RECORD_HANDSHAKE, TLS_RECORD_HEADER_LEN,
 };
 
 use super::cipher_suite::{Tls13AeadAlgorithm, Tls13CipherSuite};
 use super::key_schedule::{derive_traffic_key, update_traffic_secret, Tls13TrafficKeys};
 use super::messages::{build_key_update_message, KEY_UPDATE_NOT_REQUESTED};
+
+pub(crate) const TLS_ALERT_LEVEL_FATAL: u8 = 2;
+pub(crate) const TLS_ALERT_UNEXPECTED_MESSAGE: u8 = 10;
 
 const TLS13_IV_LEN: usize = 12;
 
@@ -802,59 +805,21 @@ impl Tls13RecordEncryptor {
         Ok(record)
     }
 
-    #[cfg(test)]
+    /// Encrypts a TLS 1.3 record carrying arbitrary inner content type (no camouflage padding).
     pub(crate) fn encrypt_application_record_with_inner_content_type(
         &mut self,
         body: &[u8],
         inner_content_type: u8,
     ) -> std::io::Result<Vec<u8>> {
-        let nonce_bytes = tls13_record_nonce(&self.keys.iv, self.sequence)?;
+        self.encrypt_application_inner_plaintext(body, inner_content_type, 0)
+    }
 
-        let mut inner_plaintext = Vec::with_capacity(body.len() + 1);
-        inner_plaintext.extend_from_slice(body);
-        inner_plaintext.push(inner_content_type);
-
-        let ciphertext_len = u16::try_from(inner_plaintext.len() + self.suite.aead_tag_len())
-            .map_err(|_| {
-                Error::new(
-                    ErrorKind::InvalidInput,
-                    "TLS 1.3 encrypted application data record exceeds u16 payload limit",
-                )
-            })?;
-        let aad = build_record_aad(TLS_LEGACY_VERSION_1_2, ciphertext_len);
-
-        let ciphertext = match self.suite.aead {
-            Tls13AeadAlgorithm::Aes128Gcm => {
-                encrypt_aes128_gcm(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
-            }
-            Tls13AeadAlgorithm::Aes256Gcm => {
-                encrypt_aes256_gcm(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
-            }
-            Tls13AeadAlgorithm::ChaCha20Poly1305 => {
-                encrypt_chacha20_poly1305(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
-            }
-        };
-
-        if ciphertext.len() != ciphertext_len as usize {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "TLS 1.3 encrypted payload length mismatch: expected {}, got {}",
-                    ciphertext_len,
-                    ciphertext.len()
-                ),
-            ));
-        }
-
-        let record = build_tls_record(
-            TLS_RECORD_APPLICATION_DATA,
-            TLS_LEGACY_VERSION_1_2,
-            &ciphertext,
-        )?;
-
-        self.sequence = increment_sequence(self.sequence)?;
-
-        Ok(record)
+    /// Encrypts a fatal `unexpected_message` TLS alert under the current application traffic keys.
+    pub(crate) fn encrypt_fatal_unexpected_message_alert(&mut self) -> std::io::Result<Vec<u8>> {
+        self.encrypt_application_record_with_inner_content_type(
+            &[TLS_ALERT_LEVEL_FATAL, TLS_ALERT_UNEXPECTED_MESSAGE],
+            TLS_RECORD_ALERT,
+        )
     }
 }
 

@@ -8,7 +8,7 @@ use rust_xray::api::server::{
     ApiTransportMode,
 };
 use rust_xray::config::{api_listen_addr, load_xray_config_from_file};
-use rust_xray::runtime::InboundUserManagers;
+use rust_xray::runtime::HandlerRuntime;
 use rust_xray::stats::StatsRegistry;
 use tokio::net::TcpListener;
 use tonic::transport::Endpoint;
@@ -45,7 +45,8 @@ async fn get_sys_stats_on_plaintext_api_listen() {
     let addr = listener.local_addr().expect("local addr");
     let services = parse_enabled_services(&["StatsService".to_string()]).expect("services");
     let registry = Arc::new(StatsRegistry::new());
-    let inbound_users = Arc::new(InboundUserManagers::new());
+    let inbound_users =
+        HandlerRuntime::for_handler_tests(Arc::new(rust_xray::stats::StatsRegistry::new()));
     tokio::spawn(async move {
         let _ = serve_grpc_on(
             listener,

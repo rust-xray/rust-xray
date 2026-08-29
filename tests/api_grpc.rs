@@ -3,7 +3,7 @@ use rust_xray::api::proto::app::proxyman::command::AlterInboundRequest;
 use rust_xray::api::proto::app::stats::command::stats_service_client::StatsServiceClient;
 use rust_xray::api::proto::app::stats::command::{GetStatsRequest, SysStatsRequest};
 use rust_xray::api::server::{parse_enabled_services, serve_grpc_on, ApiService, ApiTransportMode};
-use rust_xray::runtime::InboundUserManagers;
+use rust_xray::runtime::HandlerRuntime;
 use rust_xray::stats::StatsRegistry;
 use tokio::net::TcpListener;
 use tonic::transport::Endpoint;
@@ -16,7 +16,9 @@ async fn grpc_stats_get_stats_returns_not_found_for_missing_counter() {
 
     let services = vec![ApiService::Stats];
     let registry = std::sync::Arc::new(StatsRegistry::new());
-    let inbound_users = std::sync::Arc::new(InboundUserManagers::new());
+    let inbound_users = HandlerRuntime::for_handler_tests(std::sync::Arc::new(
+        rust_xray::stats::StatsRegistry::new(),
+    ));
     tokio::spawn(async move {
         let _ = serve_grpc_on(
             listener,
@@ -51,7 +53,9 @@ async fn grpc_stats_get_sys_stats_returns_minimal_response() {
 
     let services = vec![ApiService::Stats];
     let registry = std::sync::Arc::new(StatsRegistry::new());
-    let inbound_users = std::sync::Arc::new(InboundUserManagers::new());
+    let inbound_users = HandlerRuntime::for_handler_tests(std::sync::Arc::new(
+        rust_xray::stats::StatsRegistry::new(),
+    ));
     tokio::spawn(async move {
         let _ = serve_grpc_on(
             listener,
@@ -104,7 +108,9 @@ async fn grpc_api_server_mounts_reflection_stats_and_handler() {
         ApiService::Handler,
     ];
     let registry = std::sync::Arc::new(StatsRegistry::new());
-    let inbound_users = std::sync::Arc::new(InboundUserManagers::new());
+    let inbound_users = HandlerRuntime::for_handler_tests(std::sync::Arc::new(
+        rust_xray::stats::StatsRegistry::new(),
+    ));
     tokio::spawn(async move {
         let _ = serve_grpc_on(
             listener,

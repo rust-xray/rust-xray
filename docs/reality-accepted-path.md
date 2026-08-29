@@ -132,9 +132,21 @@ into two independent mechanisms:
 - Runtime policy: consecutive non-advancing records (exact compatibility CCS,
   warning alerts, TLS 1.3 `user_canceled`, empty ApplicationData before Finished)
   increment a counter; `counter > effective_limit` closes the TLS connection
-  (**no fallback** after REALITY accept). Malformed CCS is an immediate error and
-  does not consume tolerance budget. The same tolerance applies to outer useless
-  records on the post-handshake application stream reader.
+  (**no fallback** after REALITY accept). On overflow the server emits one
+  encrypted TLS 1.3 fatal `unexpected_message` alert (best-effort) before
+  returning `too many ignored records` (Stage 7). Malformed CCS is an immediate
+  error and does not consume tolerance budget. The same tolerance applies to outer
+  useless records on the post-handshake application stream reader.
+- **Stage 7 alert routing (Rust vs upstream):** upstream keeps reader/writer on one
+  TLS connection object; rust-xray splits the accepted socket for bidirectional relay.
+  Useless-record overflow is detected on the reader; one encrypted fatal
+  `unexpected_message` is emitted through the sole writer half before the terminal
+  error propagates. Production bridges: combined stream (`prepare_reality_vless_relay`
+  pre-VLESS read), `relay_tls13_split_bidirectional` / `relay_split_bidirectional_with_overflow_alert`
+  (TCP relay, including Vision via split `VisionRelayReader`/`VisionRelayWriter`),
+  and `run_reality_split_mux_inbound` (`SplitMuxInbound` for Mux, including Vision+Mux).
+  `UselessRecordOverflow` stays typed until the writer owner handles it; `fatal_useless_overflow_alert_sent`
+  suppresses duplicate alerts.
 - Outgoing rustls coalesced writes and inbound alert observation use record-boundary
   framing (`OutgoingTlsRecordBuffer`, `InboundAlertObserver`) — no bare
   `buf[0] == 0x15` scans.
