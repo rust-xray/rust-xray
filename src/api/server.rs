@@ -17,6 +17,10 @@ use crate::runtime::{CommanderOutboundListener, InternalCommanderHandle};
 use tracing::info;
 
 use crate::api::handler::HandlerServiceImpl;
+use crate::api::legacy_alias::{
+    LegacyHandlerServiceAlias, LegacyLoggerServiceAlias, LegacyRoutingServiceAlias,
+    LegacyStatsServiceAlias,
+};
 use crate::api::logger::LoggerServiceImpl;
 use crate::api::observatory::ObservatoryServiceImpl;
 use crate::api::proto::app::log::command::logger_service_server::LoggerServiceServer;
@@ -24,7 +28,7 @@ use crate::api::proto::app::observatory::command::observatory_service_server::Ob
 use crate::api::proto::app::proxyman::command::handler_service_server::HandlerServiceServer;
 use crate::api::proto::app::router::command::routing_service_server::RoutingServiceServer;
 use crate::api::proto::app::stats::command::stats_service_server::StatsServiceServer;
-use crate::api::proto::FILE_DESCRIPTOR_SET;
+use crate::api::reflection::{build_api_reflection_v1, build_api_reflection_v1alpha};
 use crate::api::routing::RoutingServiceImpl;
 use crate::api::stats::StatsServiceImpl;
 use crate::config::{
@@ -467,45 +471,70 @@ impl GrpcBuildState {
     fn add_service(
         self,
         service: ApiService,
+        all_enabled: &[ApiService],
         stats_registry: &Arc<StatsRegistry>,
         handler_runtime: &Arc<HandlerRuntime>,
     ) -> std::io::Result<Self> {
         let add = |mut builder: Server| -> std::io::Result<Router> {
             Ok(match service {
                 ApiService::Reflection => {
-                    let reflection = tonic_reflection::server::Builder::configure()
-                        .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
-                        .build_v1()
-                        .map_err(std::io::Error::other)?;
-                    builder.add_service(reflection)
+                    let reflection_v1 =
+                        build_api_reflection_v1(all_enabled).map_err(std::io::Error::other)?;
+                    let reflection_v1alpha =
+                        build_api_reflection_v1alpha(all_enabled).map_err(std::io::Error::other)?;
+                    builder
+                        .add_service(reflection_v1)
+                        .add_service(reflection_v1alpha)
                 }
-                ApiService::Stats => builder.add_service(StatsServiceServer::new(
-                    StatsServiceImpl::new(Arc::clone(stats_registry)),
-                )),
-                ApiService::Handler => builder.add_service(HandlerServiceServer::new(
-                    HandlerServiceImpl::new(Arc::clone(handler_runtime)),
-                )),
+                ApiService::Stats => {
+                    let stats = Arc::new(StatsServiceImpl::new(Arc::clone(stats_registry)));
+                    builder
+                        .add_service(StatsServiceServer::from_arc(Arc::clone(&stats)))
+                        .add_service(LegacyStatsServiceAlias::new(StatsServiceServer::from_arc(
+                            stats,
+                        )))
+                }
+                ApiService::Handler => {
+                    let handler = Arc::new(HandlerServiceImpl::new(Arc::clone(handler_runtime)));
+                    builder
+                        .add_service(HandlerServiceServer::from_arc(Arc::clone(&handler)))
+                        .add_service(LegacyHandlerServiceAlias::new(
+                            HandlerServiceServer::from_arc(handler),
+                        ))
+                }
                 ApiService::Logger => {
-                    let logger = LoggerServiceImpl::from_global().map_err(|err| {
+                    let logger = Arc::new(LoggerServiceImpl::from_global().map_err(|err| {
                         std::io::Error::other(format!(
                             "LoggerService unavailable: {}",
                             err.message()
                         ))
-                    })?;
-                    builder.add_service(LoggerServiceServer::new(logger))
+                    })?);
+                    builder
+                        .add_service(LoggerServiceServer::from_arc(Arc::clone(&logger)))
+                        .add_service(LegacyLoggerServiceAlias::new(
+                            LoggerServiceServer::from_arc(logger),
+                        ))
                 }
-                ApiService::Routing => builder.add_service(RoutingServiceServer::new(
-                    RoutingServiceImpl::new(Arc::clone(handler_runtime)),
-                )),
+                ApiService::Routing => {
+                    let routing = Arc::new(RoutingServiceImpl::new(Arc::clone(handler_runtime)));
+                    builder
+                        .add_service(RoutingServiceServer::from_arc(Arc::clone(&routing)))
+                        .add_service(LegacyRoutingServiceAlias::new(
+                            RoutingServiceServer::from_arc(routing),
+                        ))
+                }
                 ApiService::Observatory => {
-                    let observatory = ObservatoryServiceImpl::new(Arc::clone(handler_runtime))
-                        .map_err(|err| {
-                            std::io::Error::other(format!(
-                                "ObservatoryService unavailable: {}",
-                                err.message()
-                            ))
-                        })?;
-                    builder.add_service(ObservatoryServiceServer::new(observatory))
+                    let observatory = Arc::new(
+                        ObservatoryServiceImpl::new(Arc::clone(handler_runtime)).map_err(
+                            |err| {
+                                std::io::Error::other(format!(
+                                    "ObservatoryService unavailable: {}",
+                                    err.message()
+                                ))
+                            },
+                        )?,
+                    );
+                    builder.add_service(ObservatoryServiceServer::from_arc(observatory))
                 }
             })
         };
@@ -514,39 +543,63 @@ impl GrpcBuildState {
             Self::Server(builder) => add(builder).map(Self::Router),
             Self::Router(router) => Ok(Self::Router(match service {
                 ApiService::Reflection => {
-                    let reflection = tonic_reflection::server::Builder::configure()
-                        .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
-                        .build_v1()
-                        .map_err(std::io::Error::other)?;
-                    router.add_service(reflection)
+                    let reflection_v1 =
+                        build_api_reflection_v1(all_enabled).map_err(std::io::Error::other)?;
+                    let reflection_v1alpha =
+                        build_api_reflection_v1alpha(all_enabled).map_err(std::io::Error::other)?;
+                    router
+                        .add_service(reflection_v1)
+                        .add_service(reflection_v1alpha)
                 }
-                ApiService::Stats => router.add_service(StatsServiceServer::new(
-                    StatsServiceImpl::new(Arc::clone(stats_registry)),
-                )),
-                ApiService::Handler => router.add_service(HandlerServiceServer::new(
-                    HandlerServiceImpl::new(Arc::clone(handler_runtime)),
-                )),
+                ApiService::Stats => {
+                    let stats = Arc::new(StatsServiceImpl::new(Arc::clone(stats_registry)));
+                    router
+                        .add_service(StatsServiceServer::from_arc(Arc::clone(&stats)))
+                        .add_service(LegacyStatsServiceAlias::new(StatsServiceServer::from_arc(
+                            stats,
+                        )))
+                }
+                ApiService::Handler => {
+                    let handler = Arc::new(HandlerServiceImpl::new(Arc::clone(handler_runtime)));
+                    router
+                        .add_service(HandlerServiceServer::from_arc(Arc::clone(&handler)))
+                        .add_service(LegacyHandlerServiceAlias::new(
+                            HandlerServiceServer::from_arc(handler),
+                        ))
+                }
                 ApiService::Logger => {
-                    let logger = LoggerServiceImpl::from_global().map_err(|err| {
+                    let logger = Arc::new(LoggerServiceImpl::from_global().map_err(|err| {
                         std::io::Error::other(format!(
                             "LoggerService unavailable: {}",
                             err.message()
                         ))
-                    })?;
-                    router.add_service(LoggerServiceServer::new(logger))
+                    })?);
+                    router
+                        .add_service(LoggerServiceServer::from_arc(Arc::clone(&logger)))
+                        .add_service(LegacyLoggerServiceAlias::new(
+                            LoggerServiceServer::from_arc(logger),
+                        ))
                 }
-                ApiService::Routing => router.add_service(RoutingServiceServer::new(
-                    RoutingServiceImpl::new(Arc::clone(handler_runtime)),
-                )),
+                ApiService::Routing => {
+                    let routing = Arc::new(RoutingServiceImpl::new(Arc::clone(handler_runtime)));
+                    router
+                        .add_service(RoutingServiceServer::from_arc(Arc::clone(&routing)))
+                        .add_service(LegacyRoutingServiceAlias::new(
+                            RoutingServiceServer::from_arc(routing),
+                        ))
+                }
                 ApiService::Observatory => {
-                    let observatory = ObservatoryServiceImpl::new(Arc::clone(handler_runtime))
-                        .map_err(|err| {
-                            std::io::Error::other(format!(
-                                "ObservatoryService unavailable: {}",
-                                err.message()
-                            ))
-                        })?;
-                    router.add_service(ObservatoryServiceServer::new(observatory))
+                    let observatory = Arc::new(
+                        ObservatoryServiceImpl::new(Arc::clone(handler_runtime)).map_err(
+                            |err| {
+                                std::io::Error::other(format!(
+                                    "ObservatoryService unavailable: {}",
+                                    err.message()
+                                ))
+                            },
+                        )?,
+                    );
+                    router.add_service(ObservatoryServiceServer::from_arc(observatory))
                 }
             })),
         }
@@ -561,7 +614,7 @@ fn build_grpc_router(
 ) -> std::io::Result<Option<Router>> {
     let mut state = GrpcBuildState::Server(server_builder);
     for service in services {
-        state = state.add_service(*service, stats_registry, handler_runtime)?;
+        state = state.add_service(*service, services, stats_registry, handler_runtime)?;
     }
     match state {
         GrpcBuildState::Server(_) => Ok(None),

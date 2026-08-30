@@ -49,6 +49,7 @@ getrandom = "0.2"
 subtle = "2"
 tonic = { version = "0.12", features = ["transport", "tls"] }
 prost = "0.13"
+prost-types = "0.13"
 tonic-reflection = "0.12"
 tokio-stream = "0.1"
 tracing-appender = "0.2"
