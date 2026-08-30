@@ -143,6 +143,59 @@ fn validate_flow_empty_regression_unchanged() {
     validate_vless_flow_for_command(Some(""), Some(""), VlessCommand::Tcp).unwrap();
 }
 
+#[tokio::test]
+async fn mux_route_environment_keeps_authenticated_connection_stats() {
+    let registry = Arc::new(crate::stats::StatsRegistry::new());
+    let session = crate::stats::StatsSession::new(
+        registry,
+        crate::stats::StatsPolicy {
+            user_uplink: true,
+            user_downlink: true,
+            user_online: false,
+            inbound_uplink: true,
+            inbound_downlink: true,
+            outbound_uplink: true,
+            outbound_downlink: true,
+        },
+        None,
+        "test-in".to_string(),
+        "direct".to_string(),
+        Some("user@example.com".to_string()),
+        None,
+        None,
+    );
+    let stats = StatsConnection::open(session);
+    let outbound = crate::runtime::RuntimeOutboundManager::new();
+    outbound
+        .register_startup_outbound(&crate::config::xray::raw::OutboundObject {
+            tag: Some("direct".to_string()),
+            protocol: Some("freedom".to_string()),
+            extra: Default::default(),
+        })
+        .expect("freedom outbound");
+    let router = RuntimeRouter::new(None, outbound, crate::dns::DnsEngine::shared(), false, None)
+        .expect("router");
+    let auth = VlessAuthenticatedClient {
+        id: USER_ID,
+        email: Some("user@example.com".to_string()),
+        flow: None,
+        level: None,
+        inbound_tag: "test-in".to_string(),
+    };
+
+    let env = mux_route_env(
+        Some(&router),
+        &auth,
+        false,
+        Some(&stats),
+        &RouteSocketMeta::default(),
+        false,
+    )
+    .expect("mux route env");
+
+    assert!(env.stats.is_some());
+}
+
 #[test]
 fn flow_matching_selects_user_by_uuid_not_first() {
     use crate::vless::vision::encode_vision_flow_addons_protobuf;

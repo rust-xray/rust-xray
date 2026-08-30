@@ -1636,8 +1636,9 @@ fn mux_route_env(
         socket_meta: socket_meta.clone(),
         sniffing_enabled,
         vision_mux_udp_only,
-        stats: None,
+        stats: stats.map(|connection| connection.session().clone()),
         xudp: XudpManager::shared(),
+        #[cfg(test)]
         test_dispatch_counter: None,
     })
 }

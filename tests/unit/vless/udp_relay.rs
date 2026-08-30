@@ -12,7 +12,7 @@ use crate::vless::udp_relay::relay_vless_udp_bidirectional;
 use crate::vless::udp_session::VlessUdpRelayOptions;
 
 fn test_relay_options() -> VlessUdpRelayOptions {
-    VlessUdpRelayOptions::for_test(Duration::from_millis(50), Duration::from_millis(50))
+    VlessUdpRelayOptions::for_test(Duration::from_millis(50))
 }
 
 async fn echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -158,7 +158,6 @@ async fn stream_eof_terminates_association() {
 async fn dns_timeout_does_not_control_udp_association_lifetime() {
     std::env::set_var("RUST_XRAY_DNS_TIMEOUT_MS", "60000");
     std::env::set_var("RUST_XRAY_VLESS_UDP_DOWNLINK_GRACE_MS", "50");
-    std::env::set_var("RUST_XRAY_VLESS_UDP_RECV_POLL_MS", "50");
 
     let options = VlessUdpRelayOptions::from_env();
     assert_eq!(

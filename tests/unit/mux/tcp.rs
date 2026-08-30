@@ -29,19 +29,6 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .expect("env test lock")
 }
 
-fn set_mux_udp_timeout_for_test(value: &str) -> Option<String> {
-    let previous = std::env::var(crate::dns::options::ENV_MUX_DNS_TIMEOUT_MS).ok();
-    std::env::set_var(crate::dns::options::ENV_MUX_DNS_TIMEOUT_MS, value);
-    previous
-}
-
-fn restore_mux_udp_timeout_for_test(previous: Option<String>) {
-    match previous {
-        Some(value) => std::env::set_var(crate::dns::options::ENV_MUX_DNS_TIMEOUT_MS, value),
-        None => std::env::remove_var(crate::dns::options::ENV_MUX_DNS_TIMEOUT_MS),
-    }
-}
-
 fn set_mux_udp_close_after_response_for_test(value: &str) -> Option<String> {
     let previous = std::env::var(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE).ok();
     std::env::set_var(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE, value);

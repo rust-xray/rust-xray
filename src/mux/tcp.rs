@@ -4,8 +4,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
-use crate::mux::encoder::{encode_mux_end, encode_mux_keep_data};
-use crate::mux::frame::{MuxCommand, MuxFrame, MuxSessionTrace};
+use crate::mux::encoder::encode_mux_end;
+use crate::mux::frame::{MuxCommand, MuxFrame};
 use crate::mux::route_env::MuxRouteEnv;
 use crate::mux::state::{mux_actions, MuxFrameActions};
 use crate::outbound::freedom::{connect_tcp_destination, format_vless_destination};

@@ -1,5 +1,7 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 
 use crate::mux::xudp::XudpManager;
 use crate::routing::{RouteSocketMeta, RuntimeRouter};
@@ -18,6 +20,7 @@ pub struct MuxRouteEnv {
     pub vision_mux_udp_only: bool,
     pub stats: Option<StatsSession>,
     pub xudp: Arc<XudpManager>,
-    /// Test-only counter incremented on each XUDP routed outbound dispatch.
+    /// Test-only counter incremented on each routed Mux UDP dispatch.
+    #[cfg(test)]
     pub test_dispatch_counter: Option<Arc<AtomicUsize>>,
 }

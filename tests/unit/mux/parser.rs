@@ -171,7 +171,6 @@ fn mux_parser_zero_global_id_is_generic_udp() {
 
 #[test]
 fn mux_parser_truncated_global_id_is_generic_udp() {
-    let destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 9999);
     let mut metadata = Vec::new();
     metadata.extend_from_slice(&5u16.to_be_bytes());
     metadata.push(MuxStatus::New.as_wire());

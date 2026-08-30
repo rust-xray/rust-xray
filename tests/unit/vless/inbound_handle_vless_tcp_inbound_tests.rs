@@ -63,7 +63,6 @@ fn test_users() -> VlessUserManager {
 fn handle_vless_tcp_inbound_udp_command_is_accepted() {
     block_on(async {
         std::env::set_var("RUST_XRAY_VLESS_UDP_DOWNLINK_GRACE_MS", "50");
-        std::env::set_var("RUST_XRAY_VLESS_UDP_RECV_POLL_MS", "50");
         let (echo_addr, echo_task) = echo_server_for_inbound_test().await;
         let mut data = build_vless_request_bytes(&USER_ID, 0x02, echo_addr.port());
         data.extend(encode_vless_udp_packet(b"udp-native").expect("frame"));

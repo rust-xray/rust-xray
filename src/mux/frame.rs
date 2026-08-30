@@ -15,6 +15,7 @@ pub(crate) const MAX_MUX_DATA_LEN: usize = 65_535;
 /// Server-side mux/XUDP packet acceptance bound (upstream `buf.Size` / PacketReader limit).
 pub(crate) const XUDP_MAX_PACKET_LEN: usize = 8192;
 /// Upstream XUDP client PacketWriter skips payload when `length + 666 > buf.Size`.
+#[cfg(test)]
 pub(crate) const XUDP_UPSTREAM_CLIENT_MAX_PAYLOAD: usize = XUDP_MAX_PACKET_LEN - 666;
 pub(crate) const XUDP_GLOBAL_ID_LEN: usize = 8;
 

@@ -120,10 +120,7 @@ fn native_vless_udp_relay_overflow_emits_encrypted_fatal_alert() {
 
         let (echo_addr, echo_task) = echo_server().await;
         let client_socket = UdpSocket::bind("127.0.0.1:0").await.expect("client bind");
-        let options = VlessUdpRelayOptions::for_test(
-            std::time::Duration::from_millis(50),
-            std::time::Duration::from_millis(50),
-        );
+        let options = VlessUdpRelayOptions::for_test(std::time::Duration::from_millis(50));
 
         let relay_task = tokio::spawn(async move {
             relay_vless_udp_split_with_overflow_alert(
@@ -191,10 +188,7 @@ fn native_vless_udp_alert_uses_current_application_write_sequence() {
 
         let (echo_addr, echo_task) = echo_server().await;
         let client_socket = UdpSocket::bind("127.0.0.1:0").await.expect("client bind");
-        let options = VlessUdpRelayOptions::for_test(
-            std::time::Duration::from_millis(50),
-            std::time::Duration::from_millis(50),
-        );
+        let options = VlessUdpRelayOptions::for_test(std::time::Duration::from_millis(50));
 
         let relay_task = tokio::spawn(async move {
             relay_vless_udp_split_with_overflow_alert(

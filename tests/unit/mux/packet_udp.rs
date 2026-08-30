@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,10 +15,10 @@ use crate::mux::encoder::{
 use crate::mux::parser::read_mux_frame;
 use crate::mux::route_env::MuxRouteEnv;
 use crate::mux::session::{handle_mux_cool_inbound, handle_mux_cool_inbound_with_env};
-use crate::mux::tcp;
 use crate::mux::xudp::{XudpManager, XudpManagerConfig};
 use crate::routing::{route_context_from_vless, NetworkKind, RouteSocketMeta, RuntimeRouter};
 use crate::runtime::RuntimeOutboundManager;
+use crate::stats::{StatsPolicy, StatsRegistry, StatsSession};
 use crate::vless::protocol::VlessDestination;
 use crate::vless::user_manager::VlessAuthenticatedClient;
 
@@ -209,6 +209,61 @@ async fn generic_mux_udp_multiple_async_downstream_responses() {
     assert_eq!(second.id(), 3);
     drop(client);
     let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn generic_mux_udp_stats_count_payload_once_in_each_direction() {
+    let registry = Arc::new(StatsRegistry::new());
+    let stats = StatsSession::new(
+        Arc::clone(&registry),
+        StatsPolicy {
+            user_uplink: false,
+            user_downlink: false,
+            user_online: false,
+            inbound_uplink: true,
+            inbound_downlink: true,
+            outbound_uplink: false,
+            outbound_downlink: false,
+        },
+        None,
+        "vless-in".to_string(),
+        "direct".to_string(),
+        None,
+        None,
+        None,
+    );
+    let mut route_env = test_route_env(freedom_router(), None);
+    route_env.stats = Some(stats);
+    let echo = bind_echo_udp().await;
+    let destination = VlessDestination::Ip(echo.ip(), echo.port());
+    let payload = b"payload-only";
+    let (mut client, mut server) = duplex(8192);
+    let server_task = tokio::spawn(async move {
+        handle_mux_cool_inbound_with_env(&mut server, DnsEngine::shared(), None, Some(route_env))
+            .await
+    });
+
+    client
+        .write_all(&encode_mux_new_udp(32, &destination, payload))
+        .await
+        .expect("new");
+    read_mux_frame(&mut client).await.expect("response");
+
+    assert_eq!(
+        registry
+            .get("inbound>>>vless-in>>>traffic>>>uplink", false)
+            .expect("uplink stat"),
+        payload.len() as i64
+    );
+    assert_eq!(
+        registry
+            .get("inbound>>>vless-in>>>traffic>>>downlink", false)
+            .expect("downlink stat"),
+        payload.len() as i64
+    );
+
+    drop(client);
+    server_task.await.expect("join").expect("mux relay");
 }
 
 #[tokio::test]

@@ -14,7 +14,7 @@ use crate::mux::encoder::{
 use crate::mux::frame::{
     MuxSessionTrace, MuxUdpDnsLatencyTrace, ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE,
 };
-use crate::mux::state::{mux_actions, mux_dns_actions, MuxFrameActions, MuxOutTx};
+use crate::mux::state::{mux_actions, mux_dns_actions, MuxFrameActions};
 use crate::outbound::freedom::format_vless_destination;
 use crate::vless::protocol::VlessDestination;
 
@@ -31,7 +31,6 @@ pub(crate) async fn handle_udp_mux_dns_new(
     data: Vec<u8>,
     dns: &Arc<DnsEngine>,
     trace: Option<MuxSessionTrace>,
-    udp_tx: MuxOutTx,
 ) -> std::io::Result<MuxFrameActions> {
     let received_at = Instant::now();
     let destination_label = format_vless_destination(&destination);

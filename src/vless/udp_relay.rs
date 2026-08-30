@@ -96,7 +96,6 @@ where
 {
     let _stats = stats;
     let downlink_grace = options.downlink_grace_after_uplink_eof;
-    let udp_recv_poll = options.udp_recv_poll_interval;
     let (downlink_tx, mut downlink_rx) = mpsc::channel(DOWNLINK_QUEUE_CAPACITY);
     let mut decoder = VlessUdpPacketDecoder::new();
     decoder.push(&initial_payload);
@@ -114,21 +113,21 @@ where
             let socket = udp_for_recv.expect("udp socket");
             let mut buf = vec![0u8; VLESS_UDP_MAX_PACKET_LEN];
             loop {
-                let recv = tokio::time::timeout(udp_recv_poll, socket.recv_from(&mut buf)).await;
-                match recv {
-                    Ok(Ok((len, _peer))) => {
+                match socket.recv_from(&mut buf).await {
+                    Ok((len, _peer)) => {
                         if len == 0 {
                             continue;
                         }
-                        if downlink_tx.send(buf[..len].to_vec()).await.is_err() {
+                        if downlink_tx.send(Ok(buf[..len].to_vec())).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Err(err)) => return Err(err),
-                    Err(_) => continue,
+                    Err(err) => {
+                        let _ = downlink_tx.send(Err(err)).await;
+                        break;
+                    }
                 }
             }
-            Ok::<(), std::io::Error>(())
         }))
     } else {
         None
@@ -183,16 +182,15 @@ where
                 }
                 packet = async {
                     if uplink_eof {
-                        match tokio::time::timeout(downlink_grace, downlink_rx.recv()).await {
-                            Ok(packet) => packet,
-                            Err(_) => None,
-                        }
+                        tokio::time::timeout(downlink_grace, downlink_rx.recv())
+                            .await
+                            .unwrap_or_default()
                     } else {
                         downlink_rx.recv().await
                     }
                 }, if downlink_open => {
                     match packet {
-                        Some(payload) => {
+                        Some(Ok(payload)) => {
                             let framed = encode_vless_udp_packet(&payload)?;
                             if framed.is_empty() {
                                 continue;
@@ -201,6 +199,7 @@ where
                             writer.flush().await?;
                             downlink_bytes += payload.len() as u64;
                         }
+                        Some(Err(err)) => return Err(err),
                         None => {
                             downlink_open = false;
                         }

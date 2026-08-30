@@ -1,9 +1,6 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
@@ -11,17 +8,10 @@ use tracing::{debug, warn};
 use crate::mux::encoder::encode_mux_udp_packet;
 use crate::mux::frame::XUDP_MAX_PACKET_LEN;
 use crate::mux::route_env::MuxRouteEnv;
+use crate::mux::routed_udp::{RoutedUdpAssociation, MUX_UDP_ASSOCIATION_QUEUE_CAPACITY};
 use crate::mux::state::{mux_actions, MuxFrameActions, MuxOutTx};
-use crate::outbound::freedom::resolve_udp_target;
-use crate::outbound::runtime::OutboundConnectRuntime;
-use crate::routing::{
-    connect_routed_outbound, route_context_from_vless, NetworkKind, RoutedOutbound,
-};
 use crate::stats::StatsSession;
 use crate::vless::protocol::VlessDestination;
-
-const UPLINK_QUEUE: usize = 64;
-const DOWNLINK_QUEUE: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MuxUdpSessionStatus {
@@ -34,18 +24,10 @@ struct UdpPacket {
     payload: Vec<u8>,
 }
 
-enum PacketOutbound {
-    Freedom {
-        socket: Arc<UdpSocket>,
-        runtime: Arc<OutboundConnectRuntime>,
-    },
-    Blackhole,
-}
-
 struct MuxUdpSession {
     mux_id: u16,
     status: Mutex<MuxUdpSessionStatus>,
-    outbound: Mutex<Option<PacketOutbound>>,
+    outbound: Mutex<Option<RoutedUdpAssociation>>,
     uplink_tx: Mutex<mpsc::Sender<UdpPacket>>,
     downlink_tx: Mutex<mpsc::Sender<(VlessDestination, Vec<u8>)>>,
     tasks: Mutex<SessionTaskHandles>,
@@ -69,10 +51,6 @@ impl MuxUdpSessionManager {
         }
     }
 
-    pub async fn contains(&self, mux_id: u16) -> bool {
-        self.sessions.lock().await.contains_key(&mux_id)
-    }
-
     pub async fn handle_new(
         &self,
         mux_id: u16,
@@ -92,8 +70,8 @@ impl MuxUdpSessionManager {
             self.close_session(mux_id).await;
         }
 
-        let (uplink_tx, uplink_rx) = mpsc::channel(UPLINK_QUEUE);
-        let (downlink_tx, downlink_rx) = mpsc::channel(DOWNLINK_QUEUE);
+        let (uplink_tx, uplink_rx) = mpsc::channel(MUX_UDP_ASSOCIATION_QUEUE_CAPACITY);
+        let (downlink_tx, downlink_rx) = mpsc::channel(MUX_UDP_ASSOCIATION_QUEUE_CAPACITY);
         let session = Arc::new(MuxUdpSession {
             mux_id,
             status: Mutex::new(MuxUdpSessionStatus::Active),
@@ -107,9 +85,9 @@ impl MuxUdpSessionManager {
             }),
             stats: route_env.and_then(|env| env.stats.clone()),
         });
-        start_session_workers(&session, uplink_rx, downlink_rx, udp_tx).await;
         self.create_outbound(&session, &destination, route_env)
             .await?;
+        start_session_workers(&session, uplink_rx, downlink_rx, udp_tx).await;
         if !packet.is_empty() {
             forward_packet(&session, &destination, &packet).await;
         }
@@ -157,11 +135,6 @@ impl MuxUdpSessionManager {
         }
     }
 
-    #[cfg(test)]
-    pub async fn session_count(&self) -> usize {
-        self.sessions.lock().await.len()
-    }
-
     async fn close_session(&self, mux_id: u16) -> bool {
         let session = {
             let mut map = self.sessions.lock().await;
@@ -185,63 +158,8 @@ impl MuxUdpSessionManager {
         destination: &VlessDestination,
         route_env: Option<&MuxRouteEnv>,
     ) -> std::io::Result<()> {
-        let outbound = if let Some(route_env) = route_env {
-            let route_ctx = route_context_from_vless(
-                &route_env.inbound_tag,
-                &route_env.auth,
-                destination,
-                &[],
-                &route_env.socket_meta,
-                route_env.sniffing_enabled,
-                NetworkKind::Udp,
-            );
-            let decision = route_env
-                .router
-                .pick_route_with_default(route_ctx)
-                .await
-                .map_err(|err| std::io::Error::other(err.to_string()))?;
-            route_env.router.publish_route(&decision);
-
-            if let Some(counter) = &route_env.test_dispatch_counter {
-                counter.fetch_add(1, Ordering::SeqCst);
-            }
-
-            let runtime = OutboundConnectRuntime::shared();
-            match connect_routed_outbound(
-                &decision.outbound_tag,
-                destination,
-                route_env.router.outbound_manager(),
-                Arc::clone(&runtime),
-                NetworkKind::Udp,
-            )
-            .await?
-            {
-                RoutedOutbound::Udp { socket, .. } => PacketOutbound::Freedom {
-                    socket: Arc::new(socket),
-                    runtime,
-                },
-                RoutedOutbound::Blackhole => PacketOutbound::Blackhole,
-                RoutedOutbound::Tcp(_) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "mux udp session cannot use freedom TCP outbound",
-                    ));
-                }
-            }
-        } else {
-            let runtime = OutboundConnectRuntime::shared();
-            let (socket, _) = crate::outbound::freedom::connect_udp_destination_with_runtime(
-                destination,
-                runtime.clone(),
-            )
-            .await?;
-            PacketOutbound::Freedom {
-                socket: Arc::new(socket),
-                runtime,
-            }
-        };
-
-        let spawn_downlink = matches!(outbound, PacketOutbound::Freedom { .. });
+        let outbound = RoutedUdpAssociation::connect(destination, route_env).await?;
+        let spawn_downlink = outbound.has_downlink();
         *session.outbound.lock().await = Some(outbound);
         if spawn_downlink {
             ensure_downlink_task(session).await;
@@ -283,29 +201,20 @@ async fn start_session_workers(
             let Some(outbound) = outbound else {
                 continue;
             };
-            match outbound {
-                PacketOutbound::Blackhole => {
+            match outbound.send_to(&packet.destination, &packet.payload).await {
+                Ok(()) => {
                     if let Some(stats) = uplink_session.stats.as_ref() {
                         stats.record_uplink(packet.payload.len() as u64);
                     }
                 }
-                PacketOutbound::Freedom { socket, runtime } => {
-                    match resolve_udp_target(&packet.destination, Arc::clone(&runtime)).await {
-                        Ok(target) => {
-                            if socket.send_to(&packet.payload, target).await.is_ok() {
-                                if let Some(stats) = uplink_session.stats.as_ref() {
-                                    stats.record_uplink(packet.payload.len() as u64);
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            warn!(
-                                mux_id = uplink_session.mux_id,
-                                error = %err,
-                                "generic mux udp uplink resolve failed"
-                            );
-                        }
-                    }
+                Err(err) => {
+                    *uplink_session.status.lock().await = MuxUdpSessionStatus::Closing;
+                    warn!(
+                        mux_id = uplink_session.mux_id,
+                        destination = ?packet.destination,
+                        error = %err,
+                        "generic mux udp uplink send failed"
+                    );
                 }
             }
         }
@@ -329,10 +238,21 @@ async fn start_session_workers(
                     continue;
                 }
             };
-            if let Some(stats) = response_session.stats.as_ref() {
-                stats.record_downlink(payload.len() as u64);
+            match udp_tx.send(mux_actions(vec![frame])).await {
+                Ok(()) => {
+                    if let Some(stats) = response_session.stats.as_ref() {
+                        stats.record_downlink(payload.len() as u64);
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        mux_id = response_session.mux_id,
+                        error = %err,
+                        "generic mux udp response queue unavailable"
+                    );
+                    break;
+                }
             }
-            let _ = udp_tx.send(mux_actions(vec![frame]));
         }
     });
 
@@ -347,7 +267,7 @@ async fn ensure_downlink_task(session: &Arc<MuxUdpSession>) {
         return;
     }
     let outbound = session.outbound.lock().await.clone();
-    let Some(PacketOutbound::Freedom { socket, .. }) = outbound else {
+    let Some(outbound) = outbound.filter(RoutedUdpAssociation::has_downlink) else {
         return;
     };
     let downlink_tx = session.downlink_tx.lock().await.clone();
@@ -359,16 +279,17 @@ async fn ensure_downlink_task(session: &Arc<MuxUdpSession>) {
             if *status.status.lock().await != MuxUdpSessionStatus::Active {
                 break;
             }
-            match socket.recv_from(&mut buf).await {
-                Ok((len, peer)) => {
-                    let destination = socket_addr_to_vless(peer);
+            match outbound.recv_from(&mut buf).await {
+                Ok(Some((len, destination))) => {
                     let payload = buf[..len].to_vec();
-                    if downlink_tx.try_send((destination, payload)).is_err() {
+                    if downlink_tx.send((destination, payload)).await.is_err() {
                         break;
                     }
                 }
+                Ok(None) => break,
                 Err(err) => {
                     warn!(mux_id, error = %err, "generic mux udp downlink recv failed");
+                    *status.status.lock().await = MuxUdpSessionStatus::Closing;
                     break;
                 }
             }
@@ -378,35 +299,23 @@ async fn ensure_downlink_task(session: &Arc<MuxUdpSession>) {
 }
 
 async fn abort_session_tasks(session: &Arc<MuxUdpSession>) {
-    let mut tasks = session.tasks.lock().await;
-    if let Some(task) = tasks.uplink.take() {
+    let handles = {
+        let mut tasks = session.tasks.lock().await;
+        [
+            tasks.uplink.take(),
+            tasks.downlink.take(),
+            tasks.response.take(),
+        ]
+    };
+    for task in handles.iter().flatten() {
         task.abort();
     }
-    if let Some(task) = tasks.downlink.take() {
-        task.abort();
-    }
-    if let Some(task) = tasks.response.take() {
-        task.abort();
+    for task in handles.into_iter().flatten() {
+        let _ = task.await;
     }
     let (tx, rx) = mpsc::channel(1);
     drop(rx);
     *session.uplink_tx.lock().await = tx;
-}
-
-fn socket_addr_to_vless(addr: SocketAddr) -> VlessDestination {
-    VlessDestination::Ip(addr.ip(), addr.port())
-}
-
-impl Clone for PacketOutbound {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Freedom { socket, runtime } => Self::Freedom {
-                socket: Arc::clone(socket),
-                runtime: Arc::clone(runtime),
-            },
-            Self::Blackhole => Self::Blackhole,
-        }
-    }
 }
 
 #[cfg(test)]

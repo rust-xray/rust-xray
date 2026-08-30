@@ -5,8 +5,13 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::mux::frame::MuxUdpDnsLatencyTrace;
+use crate::mux::routed_udp::MUX_UDP_RESPONSE_QUEUE_CAPACITY;
 
-pub(crate) type MuxOutTx = mpsc::UnboundedSender<MuxFrameActions>;
+pub(crate) type MuxOutTx = mpsc::Sender<MuxFrameActions>;
+
+pub(crate) fn mux_response_channel() -> (MuxOutTx, mpsc::Receiver<MuxFrameActions>) {
+    mpsc::channel(MUX_UDP_RESPONSE_QUEUE_CAPACITY)
+}
 
 /// Outbound mux frames plus optional first-DNS latency trace for DEBUG diagnostics.
 pub(crate) struct MuxFrameActions {

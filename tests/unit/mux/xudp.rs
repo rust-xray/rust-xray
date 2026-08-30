@@ -21,6 +21,7 @@ use crate::mux::tcp;
 use crate::mux::xudp::{XudpManager, XudpManagerConfig, XudpStatus};
 use crate::routing::{route_context_from_vless, NetworkKind, RouteSocketMeta, RuntimeRouter};
 use crate::runtime::RuntimeOutboundManager;
+use crate::stats::{StatsPolicy, StatsRegistry, StatsSession};
 use crate::vless::protocol::VlessDestination;
 use crate::vless::user_manager::VlessAuthenticatedClient;
 
@@ -73,6 +74,17 @@ fn blackhole_router() -> Arc<RuntimeRouter> {
     RuntimeRouter::new(
         None,
         outbound,
+        Arc::new(DnsEngine::with_mux_defaults()),
+        false,
+        None,
+    )
+    .expect("router")
+}
+
+fn router_without_outbound() -> Arc<RuntimeRouter> {
+    RuntimeRouter::new(
+        None,
+        RuntimeOutboundManager::new(),
         Arc::new(DnsEngine::with_mux_defaults()),
         false,
         None,
@@ -146,7 +158,7 @@ async fn xudp_first_global_id_creates_one_association() {
     let target = bind_echo_udp().await;
     let global_id = [9, 8, 7, 6, 5, 4, 3, 2];
     let destination = VlessDestination::Ip(target.ip(), target.port());
-    let (udp_tx, _udp_rx) = mpsc::unbounded_channel();
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
     manager
         .handle_new(
             global_id,
@@ -170,7 +182,7 @@ async fn xudp_same_global_id_reuse_does_not_create_second_association() {
     let target = bind_echo_udp().await;
     let global_id = [1, 1, 2, 2, 3, 3, 4, 4];
     let destination = VlessDestination::Ip(target.ip(), target.port());
-    let (udp_tx, _udp_rx) = mpsc::unbounded_channel();
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
     manager
         .handle_new(
             global_id,
@@ -196,7 +208,7 @@ async fn xudp_different_global_ids_create_independent_associations() {
     let route_env = test_route_env(router, Arc::clone(&manager), false);
     let target = bind_echo_udp().await;
     let destination = VlessDestination::Ip(target.ip(), target.port());
-    let (udp_tx, _udp_rx) = mpsc::unbounded_channel();
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
     manager
         .handle_new(
             [1, 0, 0, 0, 0, 0, 0, 1],
@@ -230,7 +242,7 @@ async fn xudp_detach_marks_expiring_and_sweep_removes() {
     let target = bind_echo_udp().await;
     let global_id = [4, 4, 4, 4, 4, 4, 4, 4];
     let destination = VlessDestination::Ip(target.ip(), target.port());
-    let (udp_tx, _udp_rx) = mpsc::unbounded_channel();
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
     manager
         .handle_new(global_id, 7, destination, b"x".to_vec(), &route_env, udp_tx)
         .await
@@ -253,7 +265,7 @@ async fn xudp_reattach_before_expiry_restores_active() {
     let target = bind_echo_udp().await;
     let global_id = [5, 5, 5, 5, 5, 5, 5, 5];
     let destination = VlessDestination::Ip(target.ip(), target.port());
-    let (udp_tx, _udp_rx) = mpsc::unbounded_channel();
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
     manager
         .handle_new(
             global_id,
@@ -274,13 +286,76 @@ async fn xudp_reattach_before_expiry_restores_active() {
 }
 
 #[tokio::test]
+async fn xudp_stale_expiry_candidate_cannot_remove_reactivated_association() {
+    let manager = short_expiry_manager();
+    let router = freedom_router();
+    let route_env = test_route_env(router, Arc::clone(&manager), false);
+    let target = bind_echo_udp().await;
+    let global_id = [15, 15, 15, 15, 15, 15, 15, 15];
+    let destination = VlessDestination::Ip(target.ip(), target.port());
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
+
+    manager
+        .handle_new(
+            global_id,
+            1,
+            destination.clone(),
+            b"first".to_vec(),
+            &route_env,
+            udp_tx.clone(),
+        )
+        .await
+        .expect("new");
+    manager.detach(global_id, 1).await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    manager
+        .handle_new(
+            global_id,
+            2,
+            destination,
+            b"reattach".to_vec(),
+            &route_env,
+            udp_tx,
+        )
+        .await
+        .expect("reattach");
+    manager.remove_expired_candidate_for_test(global_id).await;
+
+    assert_eq!(manager.association_count().await, 1);
+    assert_eq!(manager.status_of(global_id).await, Some(XudpStatus::Active));
+}
+
+#[tokio::test]
+async fn xudp_failed_initial_route_does_not_leave_initializing_association() {
+    let manager = short_expiry_manager();
+    let route_env = test_route_env(router_without_outbound(), Arc::clone(&manager), false);
+    let destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 9);
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
+
+    let result = manager
+        .handle_new(
+            [16, 16, 16, 16, 16, 16, 16, 16],
+            1,
+            destination,
+            b"fail".to_vec(),
+            &route_env,
+            udp_tx,
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(manager.association_count().await, 0);
+}
+
+#[tokio::test]
 async fn xudp_blackhole_does_not_require_external_udp_peer() {
     let manager = short_expiry_manager();
     let router = blackhole_router();
     let route_env = test_route_env(router, Arc::clone(&manager), false);
     let global_id = [6, 6, 6, 6, 6, 6, 6, 6];
     let destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)), 53);
-    let (udp_tx, _udp_rx) = mpsc::unbounded_channel();
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
     manager
         .handle_new(
             global_id,
@@ -375,7 +450,7 @@ async fn xudp_multiple_downstream_datagrams_emit_multiple_keep_frames() {
     });
     let global_id = [8, 8, 8, 8, 8, 8, 8, 8];
     let destination = VlessDestination::Ip(target.ip(), target.port());
-    let (udp_tx, mut udp_rx) = mpsc::unbounded_channel();
+    let (udp_tx, mut udp_rx) = mpsc::channel(64);
     manager
         .handle_new(
             global_id,
@@ -402,6 +477,65 @@ async fn xudp_multiple_downstream_datagrams_emit_multiple_keep_frames() {
 }
 
 #[tokio::test]
+async fn xudp_stats_count_payload_once_in_each_direction() {
+    let registry = Arc::new(StatsRegistry::new());
+    let stats = StatsSession::new(
+        Arc::clone(&registry),
+        StatsPolicy {
+            user_uplink: false,
+            user_downlink: false,
+            user_online: false,
+            inbound_uplink: true,
+            inbound_downlink: true,
+            outbound_uplink: false,
+            outbound_downlink: false,
+        },
+        None,
+        "vless-in".to_string(),
+        "direct".to_string(),
+        None,
+        None,
+        None,
+    );
+    let manager = short_expiry_manager();
+    let mut route_env = test_route_env(freedom_router(), Arc::clone(&manager), false);
+    route_env.stats = Some(stats);
+    let target = bind_echo_udp().await;
+    let destination = VlessDestination::Ip(target.ip(), target.port());
+    let payload = b"xudp-payload";
+    let (udp_tx, mut udp_rx) = mpsc::channel(64);
+
+    manager
+        .handle_new(
+            [19, 19, 19, 19, 19, 19, 19, 19],
+            19,
+            destination,
+            payload.to_vec(),
+            &route_env,
+            udp_tx,
+        )
+        .await
+        .expect("new");
+    tokio::time::timeout(Duration::from_secs(1), udp_rx.recv())
+        .await
+        .expect("response timeout")
+        .expect("response");
+
+    assert_eq!(
+        registry
+            .get("inbound>>>vless-in>>>traffic>>>uplink", false)
+            .expect("uplink stat"),
+        payload.len() as i64
+    );
+    assert_eq!(
+        registry
+            .get("inbound>>>vless-in>>>traffic>>>downlink", false)
+            .expect("downlink stat"),
+        payload.len() as i64
+    );
+}
+
+#[tokio::test]
 async fn xudp_keep_carries_per_packet_destination_metadata() {
     let manager = short_expiry_manager();
     let router = freedom_router();
@@ -409,7 +543,7 @@ async fn xudp_keep_carries_per_packet_destination_metadata() {
     let target = bind_echo_udp().await;
     let global_id = [9, 9, 9, 9, 9, 9, 9, 9];
     let destination = VlessDestination::Ip(target.ip(), target.port());
-    let (udp_tx, _udp_rx) = mpsc::unbounded_channel();
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
     manager
         .handle_new(
             global_id,
@@ -500,7 +634,48 @@ async fn xudp_cross_parent_reattach_reuses_association() {
     );
     drop(client_b);
     let _ = server_b_task.await;
-    assert_eq!(manager.status_of(global_id).await, Some(XudpStatus::Active));
+    assert_eq!(
+        manager.status_of(global_id).await,
+        Some(XudpStatus::Expiring),
+        "implicit parent shutdown detaches the reattached association"
+    );
+}
+
+#[tokio::test]
+async fn xudp_reused_mux_id_detaches_previous_global_id() {
+    let manager = short_expiry_manager();
+    let route_env = test_route_env(freedom_router(), Arc::clone(&manager), false);
+    let target = bind_echo_udp().await;
+    let destination = VlessDestination::Ip(target.ip(), target.port());
+    let global_a = [17, 17, 17, 17, 17, 17, 17, 17];
+    let global_b = [18, 18, 18, 18, 18, 18, 18, 18];
+    let (mut client, mut server) = duplex(8192);
+    let server_task = tokio::spawn(async move {
+        handle_mux_cool_inbound_with_env(&mut server, DnsEngine::shared(), None, Some(route_env))
+            .await
+    });
+
+    client
+        .write_all(&encode_mux_new_udp_xudp(17, &destination, &global_a, b"a"))
+        .await
+        .expect("first new");
+    read_mux_frame(&mut client).await.expect("first response");
+    client
+        .write_all(&encode_mux_new_udp_xudp(17, &destination, &global_b, b"b"))
+        .await
+        .expect("replacement new");
+    read_mux_frame(&mut client)
+        .await
+        .expect("replacement response");
+
+    assert_eq!(
+        manager.status_of(global_a).await,
+        Some(XudpStatus::Expiring)
+    );
+    assert_eq!(manager.status_of(global_b).await, Some(XudpStatus::Active));
+
+    drop(client);
+    server_task.await.expect("join").expect("mux relay");
 }
 
 #[tokio::test]
@@ -511,7 +686,7 @@ async fn xudp_initializing_collision_does_not_duplicate_association() {
     let target = bind_echo_udp().await;
     let global_id = [3, 3, 3, 3, 3, 3, 3, 3];
     let destination = VlessDestination::Ip(target.ip(), target.port());
-    let (udp_tx, _udp_rx) = mpsc::unbounded_channel();
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
     manager
         .handle_new(
             global_id,
@@ -568,7 +743,7 @@ async fn xudp_broken_association_recreate_dispatches_twice() {
     let global_id = [11, 11, 11, 11, 11, 11, 11, 11];
     let destination = VlessDestination::Ip(target.ip(), target.port());
 
-    let (udp_tx_a, _udp_rx_a) = mpsc::unbounded_channel();
+    let (udp_tx_a, _udp_rx_a) = mpsc::channel(64);
     manager
         .handle_new(
             global_id,
@@ -582,7 +757,7 @@ async fn xudp_broken_association_recreate_dispatches_twice() {
         .expect("initial new");
     assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
 
-    let (udp_tx_b, _udp_rx_b) = mpsc::unbounded_channel();
+    let (udp_tx_b, _udp_rx_b) = mpsc::channel(64);
     manager
         .handle_new(
             global_id,
@@ -598,7 +773,7 @@ async fn xudp_broken_association_recreate_dispatches_twice() {
 
     manager.break_uplink_for_test(global_id).await;
 
-    let (udp_tx_c, mut udp_rx_c) = mpsc::unbounded_channel();
+    let (udp_tx_c, mut udp_rx_c) = mpsc::channel(64);
     manager
         .handle_new(
             global_id,
@@ -697,7 +872,6 @@ async fn xudp_domain_initial_destination_routes_and_reuses_association() {
 fn xudp_packet_size_semantics_document_upstream_client_and_server_bounds() {
     assert_eq!(XUDP_MAX_PACKET_LEN, 8192);
     assert_eq!(XUDP_UPSTREAM_CLIENT_MAX_PAYLOAD, 7526);
-    assert!(7526 <= XUDP_MAX_PACKET_LEN);
 }
 
 #[tokio::test]
@@ -709,7 +883,7 @@ async fn xudp_server_accepts_packet_at_server_capacity() {
     let global_id = [13, 13, 13, 13, 13, 13, 13, 13];
     let destination = VlessDestination::Ip(target.ip(), target.port());
     let payload = vec![0xAB; XUDP_MAX_PACKET_LEN];
-    let (udp_tx, _udp_rx) = mpsc::unbounded_channel();
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
     manager
         .handle_new(global_id, 21, destination, payload, &route_env, udp_tx)
         .await
@@ -725,7 +899,7 @@ async fn xudp_server_rejects_packet_larger_than_server_capacity() {
     let global_id = [14, 14, 14, 14, 14, 14, 14, 14];
     let destination = VlessDestination::Ip(target.ip(), target.port());
     let payload = vec![0u8; XUDP_MAX_PACKET_LEN + 1];
-    let (udp_tx, _udp_rx) = mpsc::unbounded_channel();
+    let (udp_tx, _udp_rx) = mpsc::channel(64);
     let result = manager
         .handle_new(global_id, 22, destination, payload, &route_env, udp_tx)
         .await;

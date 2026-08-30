@@ -3,6 +3,7 @@ mod frame;
 mod packet_udp;
 mod parser;
 mod route_env;
+mod routed_udp;
 mod session;
 mod state;
 mod tcp;
