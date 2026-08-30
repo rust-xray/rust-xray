@@ -140,6 +140,66 @@ pub fn encode_mux_new_tcp(id: u16, destination: &VlessDestination, data: &[u8]) 
 }
 
 #[cfg(test)]
+pub(crate) fn encode_mux_new_udp_xudp(
+    id: u16,
+    destination: &VlessDestination,
+    global_id: &[u8; 8],
+    data: &[u8],
+) -> Vec<u8> {
+    let mut metadata = Vec::new();
+    metadata.extend_from_slice(&id.to_be_bytes());
+    metadata.push(MuxStatus::New.as_wire());
+    metadata.push(
+        MuxOption {
+            has_data: !data.is_empty(),
+        }
+        .as_wire(),
+    );
+    metadata.push(MUX_NETWORK_UDP);
+    write_mux_destination_metadata(&mut metadata, destination).unwrap();
+    metadata.extend_from_slice(global_id);
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(metadata.len() as u16).to_be_bytes());
+    frame.extend_from_slice(&metadata);
+    if !data.is_empty() {
+        frame.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        frame.extend_from_slice(data);
+    }
+    frame
+}
+
+#[cfg(test)]
+pub(crate) fn encode_mux_new_udp_xudp_with_trailing(
+    id: u16,
+    destination: &VlessDestination,
+    global_id: &[u8; 8],
+    extra_trailing: &[u8],
+    data: &[u8],
+) -> Vec<u8> {
+    let mut metadata = Vec::new();
+    metadata.extend_from_slice(&id.to_be_bytes());
+    metadata.push(MuxStatus::New.as_wire());
+    metadata.push(
+        MuxOption {
+            has_data: !data.is_empty(),
+        }
+        .as_wire(),
+    );
+    metadata.push(MUX_NETWORK_UDP);
+    write_mux_destination_metadata(&mut metadata, destination).unwrap();
+    metadata.extend_from_slice(global_id);
+    metadata.extend_from_slice(extra_trailing);
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(metadata.len() as u16).to_be_bytes());
+    frame.extend_from_slice(&metadata);
+    if !data.is_empty() {
+        frame.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        frame.extend_from_slice(data);
+    }
+    frame
+}
+
+#[cfg(test)]
 pub(crate) fn encode_mux_new_udp(id: u16, destination: &VlessDestination, data: &[u8]) -> Vec<u8> {
     encode_mux_new(MuxNetwork::Udp, id, destination, data)
 }

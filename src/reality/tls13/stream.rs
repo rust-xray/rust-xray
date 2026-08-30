@@ -1724,7 +1724,7 @@ where
     }
 }
 
-async fn handle_split_relay_reader_overflow<W>(
+pub(crate) async fn handle_split_relay_reader_overflow<W>(
     writer: &mut W,
     err: io::Error,
 ) -> io::Result<(u64, u64)>

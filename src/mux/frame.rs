@@ -12,6 +12,17 @@ pub(crate) const MUX_NETWORK_TCP: u8 = 0x01;
 pub(crate) const MUX_NETWORK_UDP: u8 = 0x02;
 pub(crate) const MAX_MUX_METADATA_LEN: usize = 512;
 pub(crate) const MAX_MUX_DATA_LEN: usize = 65_535;
+/// Server-side mux/XUDP packet acceptance bound (upstream `buf.Size` / PacketReader limit).
+pub(crate) const XUDP_MAX_PACKET_LEN: usize = 8192;
+/// Upstream XUDP client PacketWriter skips payload when `length + 666 > buf.Size`.
+pub(crate) const XUDP_UPSTREAM_CLIENT_MAX_PAYLOAD: usize = XUDP_MAX_PACKET_LEN - 666;
+pub(crate) const XUDP_GLOBAL_ID_LEN: usize = 8;
+
+pub type MuxGlobalId = [u8; XUDP_GLOBAL_ID_LEN];
+
+pub fn is_xudp_global_id(id: &MuxGlobalId) -> bool {
+    id.iter().any(|byte| *byte != 0)
+}
 pub(crate) const ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE: &str =
     "RUST_XRAY_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE";
 
@@ -126,6 +137,8 @@ pub enum MuxCommand {
     Udp {
         destination: MuxDestination,
         packet: Vec<u8>,
+        /// Parsed from trailing New+UDP metadata when exactly 8 bytes remain and any byte is non-zero.
+        global_id: Option<MuxGlobalId>,
     },
     Data {
         payload: Vec<u8>,

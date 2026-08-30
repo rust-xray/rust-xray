@@ -1,20 +1,18 @@
 use std::io::{Error, ErrorKind};
-use std::time::Instant;
 
 use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
-use crate::dns::DnsEngineOptions;
-use crate::mux::encoder::mux_udp_send_close_after_response_enabled;
-use crate::mux::encoder::{encode_mux_end, encode_mux_udp_packet};
-use crate::mux::frame::{MuxCommand, MuxFrame, MuxSessionTrace, MAX_MUX_DATA_LEN};
+use crate::mux::encoder::{encode_mux_end, encode_mux_keep_data};
+use crate::mux::frame::{MuxCommand, MuxFrame, MuxSessionTrace};
 use crate::mux::route_env::MuxRouteEnv;
-use crate::mux::state::{mux_actions, MuxFrameActions, MuxOutTx};
-use crate::mux::udp_dns::udp_socket_addr_without_dns;
+use crate::mux::state::{mux_actions, MuxFrameActions};
 use crate::outbound::freedom::{connect_tcp_destination, format_vless_destination};
 use crate::outbound::runtime::OutboundConnectRuntime;
-use crate::routing::{connect_routed_outbound, route_context_from_vless, RoutedOutbound};
+use crate::routing::{
+    connect_routed_outbound, route_context_from_vless, NetworkKind, RoutedOutbound,
+};
 
 pub(crate) async fn handle_mux_tcp_command(
     active: &mut Option<(u16, TcpStream)>,
@@ -27,6 +25,12 @@ pub(crate) async fn handle_mux_tcp_command(
             destination,
             initial_payload,
         } => {
+            if route_env.is_some_and(|env| env.vision_mux_udp_only) {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "vision mux accepts only udp child substreams",
+                ));
+            }
             if active.is_some() {
                 warn!(
                     mux_id = id,
@@ -52,6 +56,7 @@ pub(crate) async fn handle_mux_tcp_command(
                     &initial_payload,
                     &env.socket_meta,
                     env.sniffing_enabled,
+                    NetworkKind::Tcp,
                 );
                 let decision = env
                     .router
@@ -64,6 +69,7 @@ pub(crate) async fn handle_mux_tcp_command(
                     &destination.destination,
                     env.router.outbound_manager(),
                     OutboundConnectRuntime::shared(),
+                    NetworkKind::Tcp,
                 )
                 .await?
                 {
@@ -75,6 +81,12 @@ pub(crate) async fn handle_mux_tcp_command(
                             "mux substream routed to blackhole outbound"
                         );
                         return Ok(mux_actions(vec![encode_mux_end(id)]));
+                    }
+                    RoutedOutbound::Udp { .. } => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidInput,
+                            "mux TCP substream cannot use freedom UDP outbound",
+                        ));
                     }
                 }
             } else {
@@ -139,117 +151,6 @@ pub(crate) async fn handle_mux_tcp_command(
         }
     }
     Ok(mux_actions(Vec::new()))
-}
-
-pub(crate) fn spawn_generic_udp_relay(
-    id: u16,
-    destination: crate::vless::protocol::VlessDestination,
-    data: Vec<u8>,
-    trace: Option<MuxSessionTrace>,
-    received_at: Instant,
-    udp_tx: MuxOutTx,
-) {
-    tokio::spawn(async move {
-        let destination_label = format_vless_destination(&destination);
-        let actions =
-            match relay_generic_udp_packet(id, &destination, &data, trace, received_at).await {
-                Ok(actions) => actions,
-                Err(err) => {
-                    warn!(
-                        mux_id = id,
-                        destination = %destination_label,
-                        error = %err,
-                        "mux generic udp relay error; closing substream"
-                    );
-                    mux_actions(vec![encode_mux_end(id)])
-                }
-            };
-        if udp_tx.send(actions).is_err() {
-            debug!(
-                mux_id = id,
-                destination = %destination_label,
-                "mux generic udp response dropped because session writer is closed"
-            );
-        }
-    });
-}
-
-async fn relay_generic_udp_packet(
-    id: u16,
-    destination: &crate::vless::protocol::VlessDestination,
-    data: &[u8],
-    trace: Option<MuxSessionTrace>,
-    received_at: Instant,
-) -> std::io::Result<MuxFrameActions> {
-    let destination_label = format_vless_destination(destination);
-    let Some(target) = udp_socket_addr_without_dns(destination) else {
-        warn!(
-            mux_id = id,
-            network = "udp",
-            destination = %destination_label,
-            payload_len = data.len(),
-            "UDP mux domain destination requires resolver support; closing substream"
-        );
-        return Ok(mux_actions(vec![encode_mux_end(id)]));
-    };
-
-    let timeout = DnsEngineOptions::from_env().mux_udp_dns_timeout;
-    let bind_addr = if target.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
-    let socket = UdpSocket::bind(bind_addr).await?;
-    socket.connect(target).await?;
-    socket.send(data).await?;
-    debug!(
-        conn_id = trace.map(|trace| trace.conn_id),
-        mux_id = id,
-        %target,
-        destination = %destination_label,
-        payload_len = data.len(),
-        timeout_ms = timeout.as_millis(),
-        elapsed_ms_since_conn_start = trace.map(|trace| trace.conn_started.elapsed().as_millis()),
-        "mux generic udp packet sent"
-    );
-
-    let mut buf = vec![0u8; MAX_MUX_DATA_LEN];
-    let read = match tokio::time::timeout(timeout, socket.recv(&mut buf)).await {
-        Ok(Ok(read)) => read,
-        Ok(Err(err)) => return Err(err),
-        Err(_) => {
-            debug!(
-                conn_id = trace.map(|trace| trace.conn_id),
-                mux_id = id,
-                %target,
-                destination = %destination_label,
-                timeout_ms = timeout.as_millis(),
-                total_latency_ms = received_at.elapsed().as_millis(),
-                elapsed_ms_since_conn_start =
-                    trace.map(|trace| trace.conn_started.elapsed().as_millis()),
-                "mux generic udp response timeout"
-            );
-            return Ok(mux_actions(vec![encode_mux_end(id)]));
-        }
-    };
-    buf.truncate(read);
-    let frame = encode_mux_udp_packet(id, destination, &buf)?;
-    let close_frame = mux_udp_send_close_after_response_enabled().then(|| encode_mux_end(id));
-    debug!(
-        conn_id = trace.map(|trace| trace.conn_id),
-        mux_id = id,
-        %target,
-        destination = %destination_label,
-        response_len = buf.len(),
-        total_latency_ms = received_at.elapsed().as_millis(),
-        elapsed_ms_since_conn_start = trace.map(|trace| trace.conn_started.elapsed().as_millis()),
-        "mux generic udp response frame encoded"
-    );
-    let mut frames = vec![frame];
-    if let Some(close_frame) = close_frame {
-        frames.push(close_frame);
-    }
-    Ok(mux_actions(frames))
 }
 
 #[cfg(test)]

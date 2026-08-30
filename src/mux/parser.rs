@@ -5,8 +5,9 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, trace};
 
 use crate::mux::frame::{
-    MuxCommand, MuxDestination, MuxFrame, MuxNetwork, MuxOption, MuxStatus, MAX_MUX_DATA_LEN,
-    MAX_MUX_METADATA_LEN, MUX_NETWORK_TCP, MUX_NETWORK_UDP, MUX_OPT_DATA,
+    is_xudp_global_id, MuxCommand, MuxDestination, MuxFrame, MuxGlobalId, MuxNetwork, MuxOption,
+    MuxStatus, MAX_MUX_DATA_LEN, MAX_MUX_METADATA_LEN, MUX_NETWORK_TCP, MUX_NETWORK_UDP,
+    MUX_OPT_DATA, XUDP_GLOBAL_ID_LEN,
 };
 use crate::outbound::freedom::format_vless_destination;
 use crate::vless::protocol::VlessDestination;
@@ -31,10 +32,12 @@ pub fn parse_mux_frame(metadata: &[u8], extra: &[u8]) -> std::io::Result<MuxFram
     let command = match status {
         MuxStatus::New => {
             let (destination, consumed) = parse_mux_destination(&metadata[4..])?;
-            if consumed + 4 != metadata.len() {
+            let trailing = &metadata[4 + consumed..];
+            let global_id = parse_xudp_global_id(trailing, option.has_data, destination.network);
+            if !trailing.is_empty() && global_id.is_none() {
                 debug!(
                     id,
-                    trailing = metadata.len().saturating_sub(consumed + 4),
+                    trailing = trailing.len(),
                     "mux new frame ignored trailing metadata"
                 );
             }
@@ -46,6 +49,7 @@ pub fn parse_mux_frame(metadata: &[u8], extra: &[u8]) -> std::io::Result<MuxFram
                 MuxNetwork::Udp => MuxCommand::Udp {
                     destination,
                     packet: data,
+                    global_id,
                 },
             }
         }
@@ -65,6 +69,7 @@ pub fn parse_mux_frame(metadata: &[u8], extra: &[u8]) -> std::io::Result<MuxFram
             MuxCommand::Udp {
                 destination,
                 packet: data,
+                global_id: None,
             }
         }
         MuxStatus::Keep => MuxCommand::Data { payload: data },
@@ -144,6 +149,19 @@ fn mux_data_len(extra: &[u8]) -> Option<usize> {
         return None;
     }
     Some(u16::from_be_bytes([extra[0], extra[1]]) as usize)
+}
+
+fn parse_xudp_global_id(
+    trailing: &[u8],
+    has_data: bool,
+    network: MuxNetwork,
+) -> Option<MuxGlobalId> {
+    if network != MuxNetwork::Udp || !has_data || trailing.len() < XUDP_GLOBAL_ID_LEN {
+        return None;
+    }
+    let mut global_id = MuxGlobalId::default();
+    global_id.copy_from_slice(&trailing[..XUDP_GLOBAL_ID_LEN]);
+    is_xudp_global_id(&global_id).then_some(global_id)
 }
 
 fn parse_mux_destination(input: &[u8]) -> std::io::Result<(MuxDestination, usize)> {

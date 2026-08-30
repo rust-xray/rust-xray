@@ -1,9 +1,11 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 
-use crate::outbound::freedom::connect_tcp_destination_with_runtime;
+use crate::outbound::freedom::{
+    connect_tcp_destination_with_runtime, connect_udp_destination_with_runtime,
+};
 use crate::outbound::runtime::OutboundConnectRuntime;
 use crate::routing::context::{NetworkKind, RouteContext};
 use crate::routing::sniff::sniff_protocol_from_payload;
@@ -13,6 +15,10 @@ use crate::vless::user_manager::VlessAuthenticatedClient;
 
 pub enum RoutedOutbound {
     Tcp(TcpStream),
+    Udp {
+        socket: UdpSocket,
+        target: std::net::SocketAddr,
+    },
     Blackhole,
 }
 
@@ -59,6 +65,7 @@ pub async fn connect_routed_outbound(
     destination: &VlessDestination,
     outbound_manager: &RuntimeOutboundManager,
     connect_runtime: Arc<OutboundConnectRuntime>,
+    network: NetworkKind,
 ) -> std::io::Result<RoutedOutbound> {
     let protocol = outbound_manager.get_protocol(outbound_tag).ok_or_else(|| {
         std::io::Error::new(
@@ -73,10 +80,18 @@ pub async fn connect_routed_outbound(
             std::io::ErrorKind::InvalidInput,
             "commander outbound receives the inbound stream directly",
         )),
-        OutboundProtocol::Freedom => {
-            let stream = connect_tcp_destination_with_runtime(destination, connect_runtime).await?;
-            Ok(RoutedOutbound::Tcp(stream))
-        }
+        OutboundProtocol::Freedom => match network {
+            NetworkKind::Udp => {
+                let (socket, target) =
+                    connect_udp_destination_with_runtime(destination, connect_runtime).await?;
+                Ok(RoutedOutbound::Udp { socket, target })
+            }
+            NetworkKind::Tcp | NetworkKind::Unix | NetworkKind::Unknown => {
+                let stream =
+                    connect_tcp_destination_with_runtime(destination, connect_runtime).await?;
+                Ok(RoutedOutbound::Tcp(stream))
+            }
+        },
     }
 }
 
@@ -96,6 +111,7 @@ pub fn route_context_from_vless(
     initial_payload: &[u8],
     socket: &RouteSocketMeta,
     sniffing_enabled: bool,
+    network: NetworkKind,
 ) -> RouteContext {
     let (target_domain, target_ips, target_port) = match destination {
         VlessDestination::Ip(addr, port) => (String::new(), vec![*addr], *port),
@@ -103,7 +119,7 @@ pub fn route_context_from_vless(
     };
     RouteContext {
         inbound_tag: inbound_tag.to_string(),
-        network: NetworkKind::Tcp,
+        network,
         source_ips: socket.source_ip.into_iter().collect(),
         target_ips,
         source_port: socket.source_port,

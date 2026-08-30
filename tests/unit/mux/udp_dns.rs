@@ -127,7 +127,8 @@ fn udp_dns_relay_with_fake_udp_server_returns_mux_response() {
                         network: MuxNetwork::Udp,
                         destination,
                     },
-                    packet: expected_response
+                    packet: expected_response,
+                    global_id: None,
                 }
             }
         );
@@ -267,7 +268,8 @@ fn udp_dns_multiple_packets_same_mux_id_zero_without_close() {
                         network: MuxNetwork::Udp,
                         destination: destination.clone(),
                     },
-                    packet: expected_response.clone()
+                    packet: expected_response.clone(),
+                    global_id: None,
                 }
             }
         );
@@ -290,7 +292,8 @@ fn udp_dns_multiple_packets_same_mux_id_zero_without_close() {
                         network: MuxNetwork::Udp,
                         destination,
                     },
-                    packet: expected_response
+                    packet: expected_response,
+                    global_id: None,
                 }
             }
         );
@@ -448,7 +451,8 @@ fn mux_udp_dns_repeat_query_hits_engine_cache() {
                             network: MuxNetwork::Udp,
                             destination: destination.clone(),
                         },
-                        packet: expected_response.clone()
+                        packet: expected_response.clone(),
+                        global_id: None,
                     }
                 }
             );

@@ -68,10 +68,22 @@ where
 }
 
 #[test]
-fn unsupported_udp_non_dns_closes_substream_without_panic() {
+fn generic_udp_domain_opens_persistent_session() {
     block_on(async {
-        let destination = VlessDestination::Domain("udp.example".to_string(), 54);
-        let open = encode_mux_new_udp(16, &destination, b"not-dns");
+        let echo = UdpSocket::bind("127.0.0.1:0").await.expect("bind echo");
+        let echo_port = echo.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            loop {
+                let Ok((len, peer)) = echo.recv_from(&mut buf).await else {
+                    break;
+                };
+                echo.send_to(&buf[..len], peer).await.ok();
+            }
+        });
+
+        let destination = VlessDestination::Domain("127.0.0.1".to_string(), echo_port);
+        let open = encode_mux_new_udp(16, &destination, b"hello");
         let (mut client_io, mut server_io) = tokio::io::duplex(8192);
         client_io
             .write_all(&open)
@@ -79,16 +91,12 @@ fn unsupported_udp_non_dns_closes_substream_without_panic() {
             .expect("write mux udp open");
 
         let handle = tokio::spawn(async move { handle_mux_cool_inbound(&mut server_io).await });
-        assert_eq!(
-            read_mux_frame(&mut client_io).await.expect("read mux end"),
-            MuxFrame {
-                mux_id: 16,
-                status: MuxStatus::End,
-                option: MuxOption { has_data: false },
-                command: MuxCommand::Close {
-                    payload: Vec::new()
-                }
-            }
+        assert!(
+            read_mux_frame(&mut client_io)
+                .await
+                .expect("read generic udp response")
+                .id()
+                == 16
         );
 
         drop(client_io);
@@ -135,7 +143,8 @@ fn generic_udp_relay_returns_mux_response_for_arbitrary_destination() {
                         network: MuxNetwork::Udp,
                         destination,
                     },
-                    packet: b"world".to_vec()
+                    packet: b"world".to_vec(),
+                    global_id: None,
                 }
             }
         );
@@ -143,84 +152,6 @@ fn generic_udp_relay_returns_mux_response_for_arbitrary_destination() {
 
         drop(client_io);
         handle.await.expect("join mux handler").unwrap();
-        restore_mux_udp_close_after_response_for_test(previous_close);
-    });
-}
-
-#[test]
-fn generic_udp_slow_destination_does_not_block_next_mux_frame() {
-    block_on(async {
-        let _guard = env_lock();
-        let previous = set_mux_udp_timeout_for_test("100");
-        let previous_close = set_mux_udp_close_after_response_for_test("0");
-
-        let silent_udp = UdpSocket::bind("127.0.0.1:0")
-            .await
-            .expect("bind silent udp");
-        let silent_port = silent_udp.local_addr().expect("silent addr").port();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 512];
-            let _ = silent_udp.recv_from(&mut buf).await.expect("silent recv");
-        });
-
-        let fast_udp = UdpSocket::bind("127.0.0.1:0").await.expect("bind fast udp");
-        let fast_port = fast_udp.local_addr().expect("fast addr").port();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 512];
-            let (read, peer) = fast_udp.recv_from(&mut buf).await.expect("fast recv");
-            assert_eq!(&buf[..read], b"fast");
-            fast_udp.send_to(b"ok", peer).await.expect("fast send");
-        });
-
-        let slow_destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), silent_port);
-        let fast_destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), fast_port);
-        let slow_open = encode_mux_new_udp(30, &slow_destination, b"slow");
-        let fast_open = encode_mux_new_udp(31, &fast_destination, b"fast");
-        let (mut client_io, mut server_io) = tokio::io::duplex(8192);
-        client_io
-            .write_all(&slow_open)
-            .await
-            .expect("write slow udp open");
-        client_io
-            .write_all(&fast_open)
-            .await
-            .expect("write fast udp open");
-
-        let handle = tokio::spawn(async move { handle_mux_cool_inbound(&mut server_io).await });
-        assert_eq!(
-            read_mux_frame(&mut client_io)
-                .await
-                .expect("read fast response before slow timeout"),
-            MuxFrame {
-                mux_id: 31,
-                status: MuxStatus::Keep,
-                option: MuxOption { has_data: true },
-                command: MuxCommand::Udp {
-                    destination: MuxDestination {
-                        network: MuxNetwork::Udp,
-                        destination: fast_destination,
-                    },
-                    packet: b"ok".to_vec()
-                }
-            }
-        );
-        assert_eq!(
-            read_mux_frame(&mut client_io)
-                .await
-                .expect("read slow timeout end"),
-            MuxFrame {
-                mux_id: 30,
-                status: MuxStatus::End,
-                option: MuxOption { has_data: false },
-                command: MuxCommand::Close {
-                    payload: Vec::new()
-                }
-            }
-        );
-
-        drop(client_io);
-        handle.await.expect("join mux handler").unwrap();
-        restore_mux_udp_timeout_for_test(previous);
         restore_mux_udp_close_after_response_for_test(previous_close);
     });
 }

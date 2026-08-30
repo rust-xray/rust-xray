@@ -66,3 +66,5 @@ pub use useless_records::{
     is_useless_record_overflow, too_many_ignored_records_error, useless_record_overflow_limit,
     UselessRecordCounter, UselessRecordOverflow,
 };
+
+pub(crate) use stream::handle_split_relay_reader_overflow;

@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,7 +7,7 @@ use crate::outbound::resolver::{dns_error_to_io, OutboundDnsResolver};
 use crate::outbound::runtime::OutboundConnectRuntime;
 use crate::vless::protocol::VlessDestination;
 use tokio::io::{copy_bidirectional, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tracing::{debug, trace};
 
 pub fn format_vless_destination(destination: &VlessDestination) -> String {
@@ -104,6 +104,79 @@ pub async fn connect_tcp_destination_with_resolver(
         "freedom outbound connected"
     );
     Ok(stream)
+}
+
+pub async fn resolve_udp_target(
+    destination: &VlessDestination,
+    runtime: Arc<OutboundConnectRuntime>,
+) -> std::io::Result<SocketAddr> {
+    let strategy = runtime.domain_strategy;
+    match destination {
+        VlessDestination::Ip(addr, port) => Ok(SocketAddr::new(*addr, *port)),
+        VlessDestination::Domain(domain, port) => {
+            if strategy.uses_dns_engine() {
+                let resolver = runtime.dns.as_ref();
+                let ips = resolver
+                    .lookup_ip(domain, strategy.to_query_strategy())
+                    .await
+                    .map_err(dns_error_to_io)?;
+                let ip = ips.into_iter().next().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("DNS returned no records for {domain}"),
+                    )
+                })?;
+                debug!(
+                    domain = %domain,
+                    resolved_ip = %ip,
+                    port,
+                    domain_strategy = ?strategy,
+                    "freedom outbound resolved UDP domain via DnsEngine"
+                );
+                Ok(SocketAddr::new(ip, *port))
+            } else if strategy.uses_system_resolver() {
+                trace!(
+                    domain = %domain,
+                    port,
+                    domain_strategy = ?strategy,
+                    "freedom outbound UDP using system resolver lookup"
+                );
+                let mut addrs = tokio::net::lookup_host((domain.as_str(), *port)).await?;
+                addrs.next().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("system resolver returned no records for {domain}:{port}"),
+                    )
+                })
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!("unsupported outbound domain strategy for UDP: {strategy:?}"),
+                ))
+            }
+        }
+    }
+}
+
+pub async fn connect_udp_destination_with_runtime(
+    destination: &VlessDestination,
+    runtime: Arc<OutboundConnectRuntime>,
+) -> std::io::Result<(UdpSocket, SocketAddr)> {
+    let target = resolve_udp_target(destination, Arc::clone(&runtime)).await?;
+    let bind_addr = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind_addr).await?;
+    debug!(%target, "freedom outbound UDP socket bound");
+    Ok((socket, target))
+}
+
+pub async fn connect_udp_destination(
+    destination: &VlessDestination,
+) -> std::io::Result<(UdpSocket, SocketAddr)> {
+    connect_udp_destination_with_runtime(destination, OutboundConnectRuntime::shared()).await
 }
 
 pub async fn forward_tcp_initial_payload(

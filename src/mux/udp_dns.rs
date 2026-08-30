@@ -15,90 +15,17 @@ use crate::mux::frame::{
     MuxSessionTrace, MuxUdpDnsLatencyTrace, ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE,
 };
 use crate::mux::state::{mux_actions, mux_dns_actions, MuxFrameActions, MuxOutTx};
-use crate::mux::tcp;
 use crate::outbound::freedom::format_vless_destination;
 use crate::vless::protocol::VlessDestination;
 
-pub(crate) fn mux_dns_legacy_direct_enabled() -> bool {
-    crate::dns::options::mux_dns_legacy_direct_enabled()
-}
-
-fn mux_dns_non_fatal_error(err: &DnsError) -> bool {
-    matches!(
-        err,
-        DnsError::Timeout
-            | DnsError::MalformedQuery
-            | DnsError::Upstream
-            | DnsError::ServerFailed
-            | DnsError::UnsupportedTransport(_)
-            | DnsError::Io(_, _)
-    )
-}
-
-async fn resolve_mux_udp_dns_packet(
-    dns: &Arc<DnsEngine>,
-    mux_id: u16,
-    target: SocketAddr,
-    data: &[u8],
-    trace: Option<DnsQueryTrace>,
-) -> Result<DnsQueryResponse, DnsError> {
-    if mux_dns_legacy_direct_enabled() {
-        warn!(
-            mux_id,
-            %target,
-            payload_len = data.len(),
-            "legacy mux direct DNS path enabled; DNS engine bypassed"
-        );
-        let timeout = DnsEngineOptions::from_env().mux_udp_dns_timeout;
-        let raw = relay_mux_udp_dns_legacy_direct(target, data, timeout).await?;
-        return Ok(DnsQueryResponse {
-            raw_response: raw,
-            server: target,
-            cached: false,
-            latency: Duration::ZERO,
-        });
+pub(crate) fn is_mux_udp_dns_request(destination: &VlessDestination, data: &[u8]) -> bool {
+    if destination_port(destination) == 53 {
+        return true;
     }
-    dns.resolve_mux_udp_dns_with_trace(mux_id, target, data, trace)
-        .await
+    is_test_mux_dns_request(data)
 }
 
-async fn relay_mux_udp_dns_legacy_direct(
-    target: SocketAddr,
-    query: &[u8],
-    timeout: Duration,
-) -> Result<Vec<u8>, DnsError> {
-    let expected_id = dns_query_id(query).ok_or(DnsError::MalformedQuery)?;
-    let bind_addr = if target.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
-    let socket = UdpSocket::bind(bind_addr)
-        .await
-        .map_err(|err| DnsError::Io(err.kind(), err.to_string()))?;
-    socket
-        .send_to(query, target)
-        .await
-        .map_err(|err| DnsError::Io(err.kind(), err.to_string()))?;
-    let mut buf = vec![0u8; 512];
-    let deadline = Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(DnsError::Timeout);
-        }
-        let recv = tokio::time::timeout(remaining, socket.recv_from(&mut buf))
-            .await
-            .map_err(|_| DnsError::Timeout)?
-            .map_err(|err| DnsError::Io(err.kind(), err.to_string()))?;
-        let (len, _) = recv;
-        if dns_query_id(&buf[..len]) == Some(expected_id) {
-            return Ok(buf[..len].to_vec());
-        }
-    }
-}
-
-pub(crate) async fn handle_udp_mux_packet(
+pub(crate) async fn handle_udp_mux_dns_new(
     id: u16,
     destination: VlessDestination,
     data: Vec<u8>,
@@ -109,21 +36,6 @@ pub(crate) async fn handle_udp_mux_packet(
     let received_at = Instant::now();
     let destination_label = format_vless_destination(&destination);
     let target = udp_socket_addr_without_dns(&destination);
-    debug!(
-        conn_id = trace.map(|trace| trace.conn_id),
-        mux_id = id,
-        %destination_label,
-        destination = ?target,
-        payload_len = data.len(),
-        dns_id = dns_query_id(&data),
-        elapsed_ms_since_conn_start = trace.map(|trace| trace.conn_started.elapsed().as_millis()),
-        "mux udp packet received"
-    );
-
-    if !is_mux_udp_dns_request(&destination, &data) {
-        tcp::spawn_generic_udp_relay(id, destination, data, trace, received_at, udp_tx);
-        return Ok(mux_actions(Vec::new()));
-    }
     debug!(
         conn_id = trace.map(|trace| trace.conn_id),
         mux_id = id,
@@ -241,11 +153,83 @@ fn destination_port(destination: &VlessDestination) -> u16 {
     }
 }
 
-fn is_mux_udp_dns_request(destination: &VlessDestination, data: &[u8]) -> bool {
-    if destination_port(destination) == 53 {
-        return true;
+pub(crate) fn mux_dns_legacy_direct_enabled() -> bool {
+    crate::dns::options::mux_dns_legacy_direct_enabled()
+}
+
+fn mux_dns_non_fatal_error(err: &DnsError) -> bool {
+    matches!(
+        err,
+        DnsError::Timeout
+            | DnsError::MalformedQuery
+            | DnsError::Upstream
+            | DnsError::ServerFailed
+            | DnsError::UnsupportedTransport(_)
+            | DnsError::Io(_, _)
+    )
+}
+
+async fn resolve_mux_udp_dns_packet(
+    dns: &Arc<DnsEngine>,
+    mux_id: u16,
+    target: SocketAddr,
+    data: &[u8],
+    trace: Option<DnsQueryTrace>,
+) -> Result<DnsQueryResponse, DnsError> {
+    if mux_dns_legacy_direct_enabled() {
+        warn!(
+            mux_id,
+            %target,
+            payload_len = data.len(),
+            "legacy mux direct DNS path enabled; DNS engine bypassed"
+        );
+        let timeout = DnsEngineOptions::from_env().mux_udp_dns_timeout;
+        let raw = relay_mux_udp_dns_legacy_direct(target, data, timeout).await?;
+        return Ok(DnsQueryResponse {
+            raw_response: raw,
+            server: target,
+            cached: false,
+            latency: Duration::ZERO,
+        });
     }
-    is_test_mux_dns_request(data)
+    dns.resolve_mux_udp_dns_with_trace(mux_id, target, data, trace)
+        .await
+}
+
+async fn relay_mux_udp_dns_legacy_direct(
+    target: SocketAddr,
+    query: &[u8],
+    timeout: Duration,
+) -> Result<Vec<u8>, DnsError> {
+    let expected_id = dns_query_id(query).ok_or(DnsError::MalformedQuery)?;
+    let bind_addr = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind_addr)
+        .await
+        .map_err(|err| DnsError::Io(err.kind(), err.to_string()))?;
+    socket
+        .send_to(query, target)
+        .await
+        .map_err(|err| DnsError::Io(err.kind(), err.to_string()))?;
+    let mut buf = vec![0u8; 512];
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(DnsError::Timeout);
+        }
+        let recv = tokio::time::timeout(remaining, socket.recv_from(&mut buf))
+            .await
+            .map_err(|_| DnsError::Timeout)?
+            .map_err(|err| DnsError::Io(err.kind(), err.to_string()))?;
+        let (len, _) = recv;
+        if dns_query_id(&buf[..len]) == Some(expected_id) {
+            return Ok(buf[..len].to_vec());
+        }
+    }
 }
 
 #[cfg(test)]

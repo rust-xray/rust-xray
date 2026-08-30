@@ -18,8 +18,8 @@ use crate::routing::conditions::{Condition, ProtocolMatcher, RouteMatchState};
 use crate::routing::context::RouteContext;
 use crate::routing::{
     route_context_from_proto, route_context_from_vless, route_decision_to_proto,
-    sniff_protocol_from_payload, vless_route_from_uuid, RouteSocketMeta, RuntimeRouter,
-    TargetResolver, ROUTER_CONFIG_TYPE,
+    sniff_protocol_from_payload, vless_route_from_uuid, NetworkKind, RouteSocketMeta,
+    RuntimeRouter, TargetResolver, ROUTER_CONFIG_TYPE,
 };
 use crate::runtime::RuntimeOutboundManager;
 use crate::vless::config::parse_vless_user_id;
@@ -88,6 +88,7 @@ fn vless_route_dynamic_user_same_as_static() {
         &[],
         &RouteSocketMeta::default(),
         false,
+        NetworkKind::Tcp,
     );
     let dynamic_ctx = route_context_from_vless(
         "vless-in",
@@ -96,6 +97,7 @@ fn vless_route_dynamic_user_same_as_static() {
         &[],
         &RouteSocketMeta::default(),
         false,
+        NetworkKind::Tcp,
     );
     assert_eq!(
         static_ctx.vless_route,
@@ -137,6 +139,7 @@ fn vless_route_custom_id_uses_effective_uuid() {
         &[],
         &RouteSocketMeta::default(),
         false,
+        NetworkKind::Tcp,
     );
     assert_eq!(ctx.vless_route, vless_route_from_uuid(&effective));
     assert_eq!(ctx.vless_route, vless_route_from_bytes(&effective));

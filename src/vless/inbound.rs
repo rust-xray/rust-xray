@@ -4,10 +4,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use crate::mux::{handle_mux_cool_inbound_with_env, MuxRouteEnv, MuxSessionTrace};
+use crate::mux::{handle_mux_cool_inbound_with_env, MuxRouteEnv, MuxSessionTrace, XudpManager};
 use crate::outbound::freedom::{
-    connect_tcp_destination, format_vless_destination, forward_tcp_initial_payload,
-    relay_tcp_bidirectional,
+    connect_tcp_destination, connect_udp_destination_with_runtime, format_vless_destination,
+    forward_tcp_initial_payload, relay_tcp_bidirectional,
 };
 use crate::outbound::runtime::OutboundConnectRuntime;
 use crate::reality::stages::{self, stage_error, RealityAcceptedStage};
@@ -16,7 +16,7 @@ use crate::reality::tls13::{
     useless_record_overflow_limit, ApplicationStreamDirectRelay, RealityTls13ApplicationStream,
     RealityTls13RelaySplit, SplitMuxInbound,
 };
-use crate::routing::{RouteSocketMeta, RuntimeRouter};
+use crate::routing::{connect_routed_outbound, NetworkKind, RouteSocketMeta, RuntimeRouter};
 use crate::runtime::VlessInboundAuthContext;
 use crate::stats::{StatsConnection, StatsState};
 use crate::tls::PrefixedStream;
@@ -27,6 +27,10 @@ use crate::vless::relay_debug::{
     log_outbound_stream_first_write, log_outbound_to_client_first_write,
     log_vless_request_diagnostics, log_vless_response_header_prefix,
 };
+use crate::vless::udp_relay::{
+    relay_vless_udp_bidirectional, relay_vless_udp_split_with_overflow_alert,
+};
+use crate::vless::udp_session::VlessUdpRelayOptions;
 use crate::vless::user_manager::{user_id_hint, VlessAuthenticatedClient, VlessUserManager};
 use crate::vless::vision::{
     is_vision_flow, new_shared_traffic_state, parse_vless_request_flow, SharedTrafficState,
@@ -296,6 +300,17 @@ struct VlessTcpRelayPrepared<S> {
     command: VlessCommand,
 }
 
+struct VlessUdpRelayPrepared<S> {
+    stream: S,
+    udp: Option<Arc<tokio::net::UdpSocket>>,
+    target: Option<std::net::SocketAddr>,
+    blackhole: bool,
+    initial_payload: Vec<u8>,
+    auth: VlessAuthenticatedClient,
+    destination: String,
+    command: VlessCommand,
+}
+
 struct VlessMuxRelayPrepared<S> {
     stream: S,
     vision: Option<(SharedTrafficState, [u8; 16])>,
@@ -306,6 +321,7 @@ struct VlessMuxRelayPrepared<S> {
 
 enum VlessRelayPrepared<S> {
     Tcp(VlessTcpRelayPrepared<S>),
+    Udp(VlessUdpRelayPrepared<S>),
     Mux(VlessMuxRelayPrepared<S>),
     Blackhole,
     Commander,
@@ -590,6 +606,127 @@ where
         ));
     }
 
+    if inbound.request.command == VlessCommand::Udp {
+        if looks_like_xudp_request(&inbound.request.additional_info) {
+            return Err(stage_error(
+                RealityAcceptedStage::Vless,
+                unsupported_vless_command_error(
+                    inbound.request.command,
+                    &inbound.request.additional_info,
+                ),
+            ));
+        }
+
+        let mut udp_socket = None;
+        let mut udp_target = None;
+        let mut blackhole = false;
+
+        if let Some(router) = router {
+            let route_ctx = crate::routing::route_context_from_vless(
+                &auth.inbound_tag,
+                &auth,
+                &inbound.request.destination,
+                &initial_payload,
+                socket_meta,
+                users_ref.sniffing_enabled(),
+                NetworkKind::Udp,
+            );
+            match router.pick_route_with_default(route_ctx).await {
+                Ok(decision) => {
+                    router.publish_route(&decision);
+                    debug!(
+                        stage = stages::VLESS_AUTH_OK,
+                        outbound_tag = %decision.outbound_tag,
+                        rule_tag = %decision.rule_tag,
+                        %destination,
+                        "VLESS UDP route selected"
+                    );
+                    let outbound_manager = router.outbound_manager();
+                    if outbound_manager.is_commander_outbound(&decision.outbound_tag) {
+                        return Err(stage_error(
+                            RealityAcceptedStage::Vless,
+                            std::io::Error::new(
+                                std::io::ErrorKind::Unsupported,
+                                "commander outbound does not support native VLESS UDP",
+                            ),
+                        ));
+                    }
+                    match connect_routed_outbound(
+                        &decision.outbound_tag,
+                        &inbound.request.destination,
+                        outbound_manager,
+                        OutboundConnectRuntime::shared(),
+                        NetworkKind::Udp,
+                    )
+                    .await
+                    {
+                        Ok(crate::routing::RoutedOutbound::Udp { socket, target }) => {
+                            udp_socket = Some(Arc::new(socket));
+                            udp_target = Some(target);
+                        }
+                        Ok(crate::routing::RoutedOutbound::Blackhole) => {
+                            blackhole = true;
+                        }
+                        Ok(crate::routing::RoutedOutbound::Tcp(_)) => {
+                            return Err(stage_error(
+                                RealityAcceptedStage::Vless,
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "freedom TCP outbound selected for VLESS UDP request",
+                                ),
+                            ));
+                        }
+                        Err(err) => return Err(stage_error(RealityAcceptedStage::Vless, err)),
+                    }
+                }
+                Err(err) => {
+                    return Err(stage_error(
+                        RealityAcceptedStage::Vless,
+                        std::io::Error::other(err.to_string()),
+                    ));
+                }
+            }
+        } else {
+            let (socket, target) = connect_udp_destination_with_runtime(
+                &inbound.request.destination,
+                OutboundConnectRuntime::shared(),
+            )
+            .await
+            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+            udp_socket = Some(Arc::new(socket));
+            udp_target = Some(target);
+        }
+
+        debug!(
+            stage = stages::VLESS_OUTBOUND_CONNECTED,
+            %destination,
+            blackhole,
+            "VLESS outbound UDP ready"
+        );
+
+        on_ready_to_respond()
+            .await
+            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
+        prepare_vless_tcp_response(&mut stream, inbound.request.version)
+            .await
+            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
+        return Ok((
+            VlessRelayPrepared::Udp(VlessUdpRelayPrepared {
+                stream,
+                udp: udp_socket,
+                target: udp_target,
+                blackhole,
+                initial_payload,
+                auth,
+                destination,
+                command: inbound.request.command,
+            }),
+            stats,
+        ));
+    }
+
     if inbound.request.command != VlessCommand::Tcp {
         return Err(stage_error(
             RealityAcceptedStage::Vless,
@@ -608,6 +745,7 @@ where
             &initial_payload,
             socket_meta,
             users_ref.sniffing_enabled(),
+            NetworkKind::Tcp,
         );
         match router.pick_route_with_default(route_ctx).await {
             Ok(decision) => {
@@ -657,15 +795,25 @@ where
                     }
                     return Ok((VlessRelayPrepared::Commander, stats));
                 }
-                match crate::routing::connect_routed_outbound(
+                match connect_routed_outbound(
                     &decision.outbound_tag,
                     &inbound.request.destination,
                     router.outbound_manager(),
                     OutboundConnectRuntime::shared(),
+                    NetworkKind::Tcp,
                 )
                 .await
                 {
                     Ok(crate::routing::RoutedOutbound::Tcp(stream)) => stream,
+                    Ok(crate::routing::RoutedOutbound::Udp { .. }) => {
+                        return Err(stage_error(
+                            RealityAcceptedStage::Vless,
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "freedom UDP outbound selected for VLESS TCP request",
+                            ),
+                        ));
+                    }
                     Ok(crate::routing::RoutedOutbound::Blackhole) => {
                         on_ready_to_respond()
                             .await
@@ -778,6 +926,141 @@ fn finish_vless_tcp_relay(
     Ok(())
 }
 
+struct VlessUdpRelayFinished {
+    auth: VlessAuthenticatedClient,
+    destination: String,
+    command: VlessCommand,
+}
+
+fn finish_vless_udp_relay(
+    finished: VlessUdpRelayFinished,
+    relay_result: std::io::Result<(u64, u64)>,
+    stats: Option<&StatsConnection>,
+    relay_started: Instant,
+) -> std::io::Result<()> {
+    let (uplink, downlink) =
+        relay_result.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+
+    if let Some(stats) = stats {
+        stats.record_relay(uplink, downlink);
+    }
+
+    debug!(
+        stage = stages::VLESS_RELAY_DONE,
+        email = finished.auth.email.as_deref(),
+        flow = finished.auth.flow.as_deref(),
+        command = ?finished.command,
+        destination = %finished.destination,
+        duration_ms = relay_started.elapsed().as_millis(),
+        uplink,
+        downlink,
+        "vless udp relay completed"
+    );
+
+    info!(
+        stage = stages::VLESS_RELAY_DONE,
+        email = finished.auth.email.as_deref(),
+        flow = finished.auth.flow.as_deref(),
+        command = ?finished.command,
+        destination = %finished.destination,
+        uplink,
+        downlink,
+        "VLESS UDP relay completed"
+    );
+
+    Ok(())
+}
+
+async fn run_prepared_udp_relay<S>(
+    prepared: VlessUdpRelayPrepared<S>,
+    stats: Option<&StatsConnection>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    info!(
+        stage = stages::VLESS_RELAY_STARTED,
+        "VLESS UDP relay started"
+    );
+    let VlessUdpRelayPrepared {
+        stream,
+        udp,
+        target,
+        blackhole,
+        initial_payload,
+        auth,
+        destination,
+        command,
+    } = prepared;
+    let relay_started = Instant::now();
+    let relay_result = relay_vless_udp_bidirectional(
+        stream,
+        udp,
+        target,
+        blackhole,
+        initial_payload,
+        stats,
+        VlessUdpRelayOptions::from_env(),
+    )
+    .await;
+    finish_vless_udp_relay(
+        VlessUdpRelayFinished {
+            auth,
+            destination,
+            command,
+        },
+        relay_result,
+        stats,
+        relay_started,
+    )
+}
+
+async fn run_prepared_reality_udp_relay<S>(
+    prepared: VlessUdpRelayPrepared<RealityTls13ApplicationStream<S>>,
+    stats: Option<&StatsConnection>,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    info!(
+        stage = stages::VLESS_RELAY_STARTED,
+        "VLESS UDP relay started"
+    );
+    let VlessUdpRelayPrepared {
+        stream,
+        udp,
+        target,
+        blackhole,
+        initial_payload,
+        auth,
+        destination,
+        command,
+    } = prepared;
+    let RealityTls13RelaySplit { reader, writer, .. } = stream.split_for_relay()?;
+    let relay_started = Instant::now();
+    let relay_result = relay_vless_udp_split_with_overflow_alert(
+        reader,
+        writer,
+        udp,
+        target,
+        blackhole,
+        initial_payload,
+        stats,
+        VlessUdpRelayOptions::from_env(),
+    )
+    .await;
+    finish_vless_udp_relay(
+        VlessUdpRelayFinished {
+            auth,
+            destination,
+            command,
+        },
+        relay_result,
+        stats,
+        relay_started,
+    )
+}
+
 pub async fn handle_vless_tcp_inbound<S>(
     stream: S,
     users: &VlessUserManager,
@@ -825,8 +1108,18 @@ where
                 .get_manager(&prepared.auth.inbound_tag)
                 .map(|manager| manager.sniffing_enabled())
                 .unwrap_or(false);
-            let route_env = mux_route_env(router, &prepared.auth, socket_meta, sniffing);
+            let route_env = mux_route_env(
+                router,
+                &prepared.auth,
+                prepared.vision.is_some(),
+                stats.as_ref(),
+                socket_meta,
+                sniffing,
+            );
             return run_prepared_mux_relay(prepared, None, stats.as_ref(), None, route_env).await;
+        }
+        VlessRelayPrepared::Udp(prepared) => {
+            return run_prepared_udp_relay(prepared, stats.as_ref()).await;
         }
         VlessRelayPrepared::Tcp(prepared) => prepared,
     };
@@ -881,10 +1174,15 @@ where
             let route_env = mux_route_env(
                 router,
                 &prepared.auth,
+                prepared.vision.is_some(),
+                stats.as_ref(),
                 socket_meta,
                 users.sniffing_enabled(),
             );
             return run_prepared_mux_relay(prepared, None, stats.as_ref(), None, route_env).await;
+        }
+        VlessRelayPrepared::Udp(prepared) => {
+            return run_prepared_udp_relay(prepared, stats.as_ref()).await;
         }
         VlessRelayPrepared::Tcp(prepared) => prepared,
     };
@@ -978,10 +1276,15 @@ where
             let route_env = mux_route_env(
                 router,
                 &prepared.auth,
+                prepared.vision.is_some(),
+                stats.as_ref(),
                 socket_meta,
                 users.sniffing_enabled(),
             );
             return run_prepared_mux_relay(prepared, None, stats.as_ref(), None, route_env).await;
+        }
+        VlessRelayPrepared::Udp(prepared) => {
+            return run_prepared_udp_relay(prepared, stats.as_ref()).await;
         }
     };
 
@@ -1115,9 +1418,19 @@ where
                     .map(VlessUserManager::sniffing_enabled)
                     .unwrap_or(false)
             };
-            let route_env = mux_route_env(router, &prepared.auth, socket_meta, sniffing);
+            let route_env = mux_route_env(
+                router,
+                &prepared.auth,
+                prepared.vision.is_some(),
+                stats.as_ref(),
+                socket_meta,
+                sniffing,
+            );
             return run_prepared_reality_mux_relay(prepared, stats.as_ref(), mux_trace, route_env)
                 .await;
+        }
+        VlessRelayPrepared::Udp(prepared) => {
+            return run_prepared_reality_udp_relay(prepared, stats.as_ref()).await;
         }
     };
 
@@ -1311,6 +1624,8 @@ where
 fn mux_route_env(
     router: Option<&Arc<RuntimeRouter>>,
     auth: &VlessAuthenticatedClient,
+    vision_mux_udp_only: bool,
+    stats: Option<&StatsConnection>,
     socket_meta: &RouteSocketMeta,
     sniffing_enabled: bool,
 ) -> Option<MuxRouteEnv> {
@@ -1320,6 +1635,10 @@ fn mux_route_env(
         auth: auth.clone(),
         socket_meta: socket_meta.clone(),
         sniffing_enabled,
+        vision_mux_udp_only,
+        stats: None,
+        xudp: XudpManager::shared(),
+        test_dispatch_counter: None,
     })
 }
 

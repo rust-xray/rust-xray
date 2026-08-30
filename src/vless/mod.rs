@@ -4,6 +4,9 @@ pub mod inbound;
 pub mod mux;
 pub mod protocol;
 pub(crate) mod relay_debug;
+pub mod udp_framing;
+pub mod udp_relay;
+pub mod udp_session;
 pub mod user_manager;
 pub(crate) mod vision;
 

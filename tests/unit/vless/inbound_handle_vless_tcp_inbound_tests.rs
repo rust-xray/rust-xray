@@ -1,10 +1,13 @@
 use super::*;
 use crate::vless::config::VlessClient;
+use crate::vless::protocol::encode_vless_response_header;
+use crate::vless::udp_framing::{encode_vless_udp_packet, VlessUdpPacketDecoder};
 use crate::vless::user_manager::VlessUserManager;
 use std::future::Future;
 use std::io::ErrorKind;
+use std::time::Duration;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 
 const USER_ID: [u8; 16] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -57,21 +60,54 @@ fn test_users() -> VlessUserManager {
 }
 
 #[test]
-fn handle_vless_tcp_inbound_udp_command_is_unsupported() {
-    let data = build_vless_request_bytes(&USER_ID, 0x02, 443);
-    let cursor = std::io::Cursor::new(data);
+fn handle_vless_tcp_inbound_udp_command_is_accepted() {
+    block_on(async {
+        std::env::set_var("RUST_XRAY_VLESS_UDP_DOWNLINK_GRACE_MS", "50");
+        std::env::set_var("RUST_XRAY_VLESS_UDP_RECV_POLL_MS", "50");
+        let (echo_addr, echo_task) = echo_server_for_inbound_test().await;
+        let mut data = build_vless_request_bytes(&USER_ID, 0x02, echo_addr.port());
+        data.extend(encode_vless_udp_packet(b"udp-native").expect("frame"));
 
-    let err = block_on(handle_vless_tcp_inbound(
-        cursor,
-        &test_users(),
-        None,
-        None,
-        None,
-    ))
-    .unwrap_err();
+        let (client, server) = duplex(8192);
+        let users = test_users();
+        let relay = tokio::spawn(async move {
+            handle_vless_tcp_inbound(server, &users, None, None, None).await
+        });
 
-    assert_eq!(err.kind(), ErrorKind::Unsupported);
-    assert!(err.to_string().contains("UDP unsupported"));
+        let mut client = client;
+        client.write_all(&data).await.expect("write request");
+        client.shutdown().await.expect("shutdown uplink");
+
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+            .await
+            .expect("read timeout")
+            .expect("read response");
+        relay.await.expect("relay join").expect("relay ok");
+        echo_task.abort();
+
+        let header = encode_vless_response_header(0, None);
+        assert!(response.starts_with(&header));
+        let mut decoder = VlessUdpPacketDecoder::new();
+        decoder.push(&response[header.len()..]);
+        assert_eq!(
+            decoder.next_packet().expect("packet").expect("payload"),
+            b"udp-native"
+        );
+    });
+}
+
+async fn echo_server_for_inbound_test() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind echo");
+    let addr = socket.local_addr().expect("addr");
+    let task = tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        loop {
+            let (len, peer) = socket.recv_from(&mut buf).await.expect("recv");
+            socket.send_to(&buf[..len], peer).await.expect("send");
+        }
+    });
+    (addr, task)
 }
 
 fn build_vless_mux_request_bytes(user_id: &[u8; 16], initial_payload: &[u8]) -> Vec<u8> {

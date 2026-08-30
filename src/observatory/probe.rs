@@ -124,12 +124,16 @@ async fn measure_delay_tagged_unbounded(
         &vless_destination,
         outbound_manager.as_ref(),
         Arc::clone(&connect_runtime),
+        crate::routing::NetworkKind::Tcp,
     )
     .await
     .map_err(|err| format!("cannot dial remote address: {err}"))?;
 
     match routed {
         RoutedOutbound::Blackhole => Err("blackhole outbound cannot relay probe".to_string()),
+        RoutedOutbound::Udp { .. } => {
+            Err("UDP outbound cannot relay HTTP observatory probe".to_string())
+        }
         RoutedOutbound::Tcp(stream) => {
             if uri.scheme_str() == Some("https") {
                 https_request(stream, host, path, options).await
