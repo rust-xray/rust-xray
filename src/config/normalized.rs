@@ -3,13 +3,14 @@
 use crate::config::xray::is_internal_commander_listen;
 use crate::config::xray::validate::{eq_ignore_ascii_case, validate_vless_reality_inbound_stream};
 use crate::config::xray::{
-    api_dokodemo_inbound_tag, effective_reality_max_client_ver, effective_reality_min_client_ver,
-    extract_api_inbound_tls_material, get_inbound_reality_settings, inbound_listen_addr,
-    inbound_vless_settings, is_vless_reality_inbound, reality_dest_addr, reality_dest_transport,
-    reality_dest_xver, reality_mldsa65_seed, reality_private_key, reality_server_names,
-    reality_short_ids, resolve_api_listen, validate_reality_inbound_config_policy, ApiListenSource,
-    ApiTlsMaterial, InboundObject, LimitFallback, OutboundObject, RealityInboundRuntime,
-    RoutingRuleObject, TransportNetwork, XHttpSettings, XrayConfig,
+    api_dokodemo_inbound_tag, api_inbound_listen_addr, effective_reality_max_client_ver,
+    effective_reality_min_client_ver, extract_api_inbound_tls_material,
+    get_inbound_reality_settings, inbound_listen_addr, inbound_vless_settings,
+    is_vless_reality_inbound, reality_dest_addr, reality_dest_transport, reality_dest_xver,
+    reality_mldsa65_seed, reality_private_key, reality_server_names, reality_short_ids,
+    resolve_api_listen, validate_reality_inbound_config_policy, ApiListenSource, ApiTlsMaterial,
+    InboundObject, LimitFallback, OutboundObject, RealityInboundRuntime, RoutingRuleObject,
+    TransportNetwork, XHttpSettings, XrayConfig,
 };
 use crate::dns::{DnsConfig, DnsServerConfig, QueryStrategy};
 use crate::reality::MLDSA65_SEED_LEN;
@@ -230,7 +231,8 @@ fn is_api_dokodemo_inbound(
     let Some(protocol) = inbound.protocol.as_deref() else {
         return false;
     };
-    if !eq_ignore_ascii_case(protocol, "dokodemo-door") {
+    if !eq_ignore_ascii_case(protocol, "dokodemo-door") && !eq_ignore_ascii_case(protocol, "tunnel")
+    {
         return false;
     }
     let Some(api) = config.api.as_ref() else {
@@ -465,7 +467,7 @@ fn normalize_api_inbound(inbound: &InboundObject) -> std::io::Result<ApiInbound>
         .unwrap_or_else(|| "dokodemo-door".to_string());
     Ok(ApiInbound {
         tag: inbound.tag.clone(),
-        listen_addr: inbound_listen_addr(inbound)?,
+        listen_addr: api_inbound_listen_addr(inbound)?,
         protocol,
     })
 }

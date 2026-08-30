@@ -150,6 +150,20 @@ fn remnawave_api_listen_resolves_from_routing_rule_to_api_tag() {
 }
 
 #[test]
+fn remnawave_node_332_tunnel_fixture_loads_from_file() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/remna/remnawave_node_332_tunnel_api.json"
+    );
+    let config = load_xray_config_from_file(path).expect("load fixture");
+    validate_xray_panel_config(&config).expect("validate");
+    assert_eq!(
+        api_dokodemo_inbound_tag(&config).as_deref(),
+        Some("REMNAWAVE_API_INBOUND")
+    );
+}
+
+#[test]
 fn remna_generated_smoke_fixture_parses_and_validates() {
     let config: XrayConfig =
         serde_json::from_str(REMNA_GENERATED_FIXTURE).expect("parse generated");

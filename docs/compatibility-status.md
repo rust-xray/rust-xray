@@ -50,7 +50,9 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | HandlerService (Stage 8E1) | Working | Full current `HandlerService` RPC surface runtime-backed via `RuntimeInboundManager` / `RuntimeOutboundManager`; dynamic VLESS+REALITY inbound, freedom/blackhole outbound; merged logical inbound auth identity; no config file rewrite |
 | RoutingService (Stage 8E2–8E4) | Working | All seven RPCs runtime-backed via `RuntimeRouter`; static JSON + dynamic `AddRule`/`RemoveRule`; VLESS TCP dispatch uses same router; webhook rules fire after route selection; GeoSite/GeoIP; balancers (`random`, `roundRobin`, `leastPing`, `leastLoad` algorithms). `DomainStrategy`: `IpOnDemand` lazily resolves target DNS when an IP condition needs target IP; `IpIfNonMatch` runs first pass without forced DNS, resolves once if no rule matches, then second pass. Live Observatory health wired for `leastPing`/`leastLoad` and random/roundRobin fallback health filtering (Stage 8E4-C) |
 | LoggerService (Stage 8E3) | Working | Canonical `RestartLogger` RPC; runtime-backed sink reopen from in-memory config; file rotation reopen proven via tonic E2E. Legacy `v2ray.core.app.log.command.LoggerService` alias (Stage 8E5-B) |
-| Legacy `v2ray.core.*` gRPC service aliases (Stage 8E5-B) | Working | Runtime route aliases only (no legacy protobuf descriptors): `HandlerService`, `StatsService`, `RoutingService`, `LoggerService` each register canonical + legacy names when the corresponding `api.services` entry is enabled; `ObservatoryService` has **no** legacy alias (upstream parity). Reflection `list_services` includes legacy names; `file_containing_symbol` for legacy symbols intentionally returns not-found while canonical symbols resolve |
+| Legacy `v2ray.core.*` gRPC service aliases (Stage 8E5-B) | Working | Runtime route aliases only (no legacy protobuf descriptors): `HandlerService`, `StatsService`, `RoutingService`, `LoggerService` each register canonical + legacy names when the corresponding `api.services` entry is enabled; `ObservatoryService` has **no** legacy alias (upstream parity). Reflection `list_services` includes legacy names; `file_containing_symbol` for legacy symbols intentionally returns not-found while canonical symbols resolve. Legacy route RPCs work via grpcurl/Xray CLI when reflection resolves the request through canonical descriptors (upstream parity: legacy `describe` fails; legacy grpcurl invoke also fails on upstream Xray 26.7.28 when reflection cannot resolve legacy symbols) |
+| grpcurl API interoperability (Stage 8E5-C) | Working | Plaintext direct `api.listen`; reflection v1 + v1alpha; canonical `list`/`describe`/RPC matrix; legacy service names listed; legacy `describe` not-found parity; env-gated `tests/api_external_interop.rs` (`GRPCURL_BIN`) |
+| Xray CLI API interoperability (Stage 8E5-C) | Working | Upstream `xray api` against plaintext TCP listener: stats (`statssys`, `stats`, `statsquery`, online commands), Handler CRUD/users (`lsi`, `lso`, `inbounduser`, `inboundusercount`, `adu`, `rmu`, `adi`, `rmi`, `ado`, `rmo`), routing (`bi`, `bo`, `adrules`, `rmrules`, `lrules`), `restartlogger`, `sib`; dynamic mutations affect live data plane; env-gated `tests/api_external_interop.rs` (`XRAY_UPSTREAM_BIN`) |
 | ObservatoryService (Stage 8E4) | Working | Canonical `xray.core.app.observatory.command.ObservatoryService` with `GetOutboundStatus`; standard Observatory runtime probes selected outbounds via tagged outbound dispatch; BurstObservatory HealthPing ring-buffer statistics (`health_ping` populated, timestamps zero); background worker from JSON `observatory` / `burstObservatory` blocks independent of API service mount. When both blocks are configured, both runtimes start; active health provider for routing/API resolves standard Observatory first (upstream first-feature lookup). Live `leastPing`/`leastLoad`/random/roundRobin health filtering wired via shared `OutboundHealthProvider` (Stage 8E4-C) |
 | Outbound routing / rules / balancers | Working | `RuntimeRouter` shared by VLESS data-plane + `RoutingService`; `DomainStrategy` `AsIs` / `IpOnDemand` / `IpIfNonMatch`; GeoSite/GeoIP matchers; webhook; balancer override/fallback. Health-dependent balancers (`leastPing`, `leastLoad`, `random`/`roundRobin` with `fallbackTag`) require configured Observatory (standard or burst) at router compile time, matching current Xray feature dependency semantics; `random`/`roundRobin` without `fallbackTag` do not require Observatory |
 | DNS engine core (cache, dedup, UDP/TCP) | Working | `DnsEngine` in-process; numeric IP servers; no system resolver on engine path |
@@ -59,7 +61,7 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 Accepted REALITY clients **do not** fall back on handshake/VLESS failure — the
 connection closes (by design).
 
-### gRPC API services (Stages 8A–8E5-B)
+### gRPC API services (Stages 8A–8E5)
 
 | Service | Status |
 |---------|--------|
@@ -69,9 +71,10 @@ connection closes (by design).
 | `RoutingService` | Working (canonical + legacy `v2ray.core.app.router.command.RoutingService` alias; server-streaming alias parity) |
 | `LoggerService` | Working (canonical + legacy `v2ray.core.app.log.command.LoggerService` alias) |
 | `ObservatoryService` | Working (canonical only; no legacy alias) |
+| grpcurl interoperability | Working (Stage 8E5-C) |
+| Xray CLI interoperability | Working (Stage 8E5-C) |
 
-Remaining API closure: grpcurl + Xray CLI interoperability (Stage 8E5-C); Remna
-unix-abstract E2E (Stage 8D where applicable).
+Remaining API work: Remna unix-abstract E2E (Stage 8D where applicable).
 
 ---
 
@@ -140,7 +143,7 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | REALITY session resumption on accepted path | Not implemented |
 | ML-KEM / hybrid KEM on REALITY **accepted TLS handshake** | Not implemented | Stage 2 adds **pre-auth only**: parse `X25519MLKEM768` ClientHello `key_share` (1216 B) and extract trailing X25519 for REALITY auth. **Not yet:** ML-KEM-768 encaps/decaps, hybrid ServerHello, 64-byte TLS shared secret, dest `key_share` mirroring. See [design doc](./reality-mlkem-design.md). |
 | Full Xray-core drop-in compatibility | Not implemented |
-| Final API config compatibility closure | Partial (Stage 8E5-B done) | Commander semantics + legacy aliases + reflection list/symbol parity; grpcurl/Xray CLI closure remains Stage 8E5-C |
+| Final API config compatibility closure | Working (Stage 8E5) | Commander semantics, legacy aliases, reflection parity, grpcurl + Xray CLI interoperability validated against upstream Xray 26.7.28 (`c1958db`). Safe divergences: duplicate recognized `api.services` entries fail startup; `GetSysStats` Go-runtime memory/goroutine fields zero/N/A; optional direct-listen TLS/mTLS is rust-xray extension; legacy reflection `describe`/grpcurl invoke limitation matches upstream |
 
 **DNS clarification:** Built-in `DnsEngine` serves Mux UDP DNS and optional freedom
 outbound resolve (`UseIP` / `UseIPv4` / `UseIPv6`). It does **not** replace full Xray DNS
@@ -182,12 +185,14 @@ mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`).
 
 ## Next Milestone
 
-**Stage 8E5 — API compatibility closure**
+**Stage 8D — RemnaNode 3.3.2 E2E / unix-abstract tunnel**
+
+Stage 8E5 (API compatibility closure) is complete:
 
 1. ~~Commander `api.tag` / `listen` / `services` transport semantics~~ (Stage 8E5-A)
 2. ~~Legacy `v2ray.core.*` service aliases + reflection quirks~~ (Stage 8E5-B)
-3. grpcurl + Xray CLI API interoperability (Stage 8E5-C)
-4. Remna unix-abstract E2E (Stage 8D closure where applicable)
+3. ~~grpcurl + Xray CLI API interoperability~~ (Stage 8E5-C)
+4. Remna unix-abstract E2E (Stage 8D)
 5. Keep the fully-green `cargo test` baseline
 
 ---

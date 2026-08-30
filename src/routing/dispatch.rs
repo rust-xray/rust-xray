@@ -80,6 +80,15 @@ pub async fn connect_routed_outbound(
     }
 }
 
+pub fn route_context_from_tunnel(inbound_tag: &str) -> RouteContext {
+    RouteContext {
+        inbound_tag: inbound_tag.to_string(),
+        network: NetworkKind::Tcp,
+        target_domain: "localhost".to_string(),
+        ..RouteContext::default()
+    }
+}
+
 pub fn route_context_from_vless(
     inbound_tag: &str,
     auth: &VlessAuthenticatedClient,

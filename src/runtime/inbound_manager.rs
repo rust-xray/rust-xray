@@ -12,8 +12,8 @@ use tracing::{debug, warn};
 
 use crate::api::proto::core::InboundHandlerConfig;
 use crate::app::{
-    build_inbound_auth_context, normalized_reality_merge_key, plain_vless_merge_key,
-    validate_reality_runtime_feature_gates, InboundListenerConfig,
+    normalized_reality_merge_key, plain_vless_merge_key, validate_reality_runtime_feature_gates,
+    InboundListenerConfig,
 };
 use crate::config::XrayConfig;
 use crate::routing::RuntimeRouter;
@@ -21,6 +21,7 @@ use crate::runtime::handler_config::{
     decode_inbound_handler_config, encode_inbound_handler_config, HandlerConfigError,
 };
 use crate::runtime::logical_inbound_auth::LogicalInboundAuthError;
+use crate::runtime::logical_inbound_auth::VlessInboundAuthContext;
 use crate::runtime::InboundUserManagers;
 use crate::stats::{StatsRegistry, StatsState};
 use crate::vless::user_manager::VlessUserManager;
@@ -285,17 +286,16 @@ impl RuntimeInboundManager {
         ));
         let stats_enabled =
             StatsState::from_xray_config(&self.xray, self.api_dokodemo_tag.clone()).enabled();
-        let mut logical_users = std::collections::BTreeMap::new();
-        logical_users.insert(tag.clone(), inbound.users.clone());
-        let auth = build_inbound_auth_context(
-            std::slice::from_ref(&tag),
-            &logical_users,
-            &inbound,
-            &self.xray,
-            &self.stats_registry,
-            stats_enabled,
-        )
-        .map_err(map_auth_error)?;
+        let stats = if stats_enabled {
+            Some(Arc::new(StatsState::from_xray_config_with_registry(
+                &self.xray,
+                Arc::clone(&self.stats_registry),
+                tag.clone(),
+            )))
+        } else {
+            None
+        };
+        let auth = VlessInboundAuthContext::from_single_manager(Arc::clone(&user_manager), stats);
 
         let mut listener_config = Arc::new(InboundListenerConfig {
             inbound: inbound.clone(),

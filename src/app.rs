@@ -13,8 +13,9 @@ use tracing::{debug, error, info, trace, warn};
 use crate::codec::{Codec, Reader};
 use crate::config::{
     api_dokodemo_inbound_tag, config_source_kind, format_redacted_run_command,
-    load_xray_config_from_source, normalize_config, redact_config_source, resolve_api_listen,
-    InboundTransportConfig, NormalizedConfig, NormalizedInbound, VlessRealityInbound, XrayConfig,
+    is_internal_commander_listen, load_xray_config_from_source, normalize_config,
+    redact_config_source, resolve_api_listen, InboundTransportConfig, NormalizedConfig,
+    NormalizedInbound, VlessRealityInbound, XrayConfig,
 };
 use crate::dns::DnsEngine;
 use crate::mux::MuxSessionTrace;
@@ -32,6 +33,7 @@ use crate::runtime::{
 };
 use crate::stats::{StatsRegistry, StatsState};
 use crate::tls::{read_client_hello_record, PrefixedStream, TlsClientHelloRecord};
+use crate::tunnel::start_tunnel_inbound;
 use crate::vless::{
     build_fallback_context, fallback_match_kind_label, looks_like_http_request,
     resolve_fallback_selection, VlessClient, VlessUserManager,
@@ -877,6 +879,37 @@ fn runtime_config_from_normalized(
     Ok(ServerRuntimeConfig { inbounds })
 }
 
+fn api_inbound_listen_is_unix(listen: &str) -> bool {
+    listen.starts_with('@') || listen.starts_with('/')
+}
+
+async fn start_api_tunnel_inbounds(
+    normalized: &NormalizedConfig,
+    handler_runtime: &Arc<HandlerRuntime>,
+) -> std::io::Result<Vec<crate::tunnel::TunnelInboundHandle>> {
+    let Some(api) = normalized.api.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if !is_internal_commander_listen(Some(api.listen.as_str())) {
+        return Ok(Vec::new());
+    }
+
+    let mut handles = Vec::new();
+    for inbound in &normalized.inbounds {
+        let NormalizedInbound::Api(api_inbound) = inbound else {
+            continue;
+        };
+        if !api_inbound_listen_is_unix(&api_inbound.listen_addr) {
+            continue;
+        }
+        let handle = start_tunnel_inbound(api_inbound.clone(), Arc::clone(&handler_runtime.router))
+            .await
+            .map_err(|err| stage_error("failed to start API tunnel inbound", err))?;
+        handles.push(handle);
+    }
+    Ok(handles)
+}
+
 fn stage_error(stage: &str, err: std::io::Error) -> std::io::Error {
     crate::startup_log::eprintln_stage(stage, &err);
     std::io::Error::new(err.kind(), format!("{stage}: {err}"))
@@ -1068,6 +1101,14 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
     )
     .await?;
 
+    let normalized = normalize_config(&xray).map_err(|err| {
+        stage_error(
+            "failed to normalize config for tunnel inbounds",
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()),
+        )
+    })?;
+    let tunnel_handles = start_api_tunnel_inbounds(&normalized, &handler_runtime).await?;
+
     info!("loading REALITY runtime");
     let mut server_config = load_runtime_config(&xray, stats_registry)
         .map_err(|err| stage_error("failed to load REALITY runtime", err))?;
@@ -1228,12 +1269,18 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
                 info!("rust-xray shutting down after signal");
                 crate::startup_log::eprintln_bootstrap("rust-xray shutting down after signal");
                 api_task.abort();
+                for handle in tunnel_handles {
+                    handle.abort();
+                }
             }
         }
     } else {
         wait_shutdown_signal().await;
         info!("rust-xray shutting down after signal");
         crate::startup_log::eprintln_bootstrap("rust-xray shutting down after signal");
+        for handle in tunnel_handles {
+            handle.abort();
+        }
     }
 
     crate::startup_log::eprintln_bootstrap("run_server returning");

@@ -24,13 +24,17 @@ fn find_api_inbound<'a>(config: &'a XrayConfig, api_tag: &str) -> Option<&'a Inb
         .map(|(inbound, _)| inbound)
 }
 
+fn is_api_routed_inbound_protocol(protocol: &str) -> bool {
+    eq_ignore_ascii_case(protocol, "dokodemo-door") || eq_ignore_ascii_case(protocol, "tunnel")
+}
+
 fn validate_api_inbound_protocol(inbound: &InboundObject, api_tag: &str) -> std::io::Result<()> {
     if let Some(protocol) = inbound.protocol.as_deref() {
-        if !eq_ignore_ascii_case(protocol, "dokodemo-door") {
+        if !is_api_routed_inbound_protocol(protocol) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 format!(
-                    "api inbound {:?} uses unsupported protocol {protocol}; expected dokodemo-door",
+                    "api inbound {:?} uses unsupported protocol {protocol}; expected dokodemo-door or tunnel",
                     api_tag
                 ),
             ));
@@ -38,6 +42,32 @@ fn validate_api_inbound_protocol(inbound: &InboundObject, api_tag: &str) -> std:
     }
 
     Ok(())
+}
+
+/// Resolve listen address for routed API inbounds (`tunnel`, `dokodemo-door`).
+///
+/// Unix socket inbounds use `@abstract` or filesystem paths without `:port`.
+pub fn api_inbound_listen_addr(inbound: &InboundObject) -> std::io::Result<String> {
+    let listen = inbound
+        .listen
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(listen) = listen {
+        if listen.starts_with('@') {
+            if listen.len() <= 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "abstract unix inbound listen must include a name after @",
+                ));
+            }
+            return Ok(listen.to_string());
+        }
+        if listen.starts_with('/') {
+            return Ok(listen.to_string());
+        }
+    }
+    inbound_listen_addr(inbound)
 }
 
 fn api_rule_inbound_tags(rule: &RoutingRuleObject) -> Vec<&str> {
@@ -246,7 +276,7 @@ fn routed_dokodemo_inbound_tags_for_api_outbound(
                     && inbound
                         .protocol
                         .as_deref()
-                        .is_some_and(|protocol| eq_ignore_ascii_case(protocol, "dokodemo-door"))
+                        .is_some_and(is_api_routed_inbound_protocol)
             }) {
                 tags.push(tag.to_string());
             }

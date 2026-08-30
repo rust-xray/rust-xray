@@ -7,9 +7,7 @@ use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
 
 use harness::*;
-use rust_xray::api::proto::app::proxyman::command::{
-    AddInboundRequest, AlterInboundRequest, RemoveInboundRequest,
-};
+use rust_xray::api::proto::app::proxyman::command::{AddInboundRequest, RemoveInboundRequest};
 use rust_xray::api::proto::app::router::command::RoutingContext;
 use rust_xray::api::proto::common::net::Network;
 use rust_xray::config::VlessRealityInbound;
@@ -290,6 +288,56 @@ async fn dynamic_add_inbound_routing_e2e_without_restart() {
     assert!(
         StdTcpListener::bind(format!("127.0.0.1:{port}")).is_ok(),
         "port must be reusable after RemoveInbound"
+    );
+}
+
+#[tokio::test]
+async fn dynamic_add_inbound_add_user_authenticates_on_data_plane() {
+    const INBOUND: &str = "dynamic-adduser-in";
+    const STATIC_ID: &str = "11111111-1111-1111-1111-111111111111";
+    const DYNAMIC_ID: &str = "22222222-2222-2222-2222-222222222222";
+
+    let static_user = ManagedUser {
+        id: Uuid::parse_str(STATIC_ID).expect("static uuid"),
+        email: "static@example.test".to_string(),
+        flow: None,
+        level: None,
+        expiry_secs: None,
+    };
+    let runtime = setup_routing_runtime().await;
+    let grpc_addr = spawn_routing_server(Arc::clone(&runtime)).await;
+    let (mut handler, _routing) = connect_routing_clients(grpc_addr).await;
+
+    let port = pick_free_port();
+    handler
+        .add_inbound(AddInboundRequest {
+            inbound: Some(plain_vless_inbound(INBOUND, port, static_user)),
+        })
+        .await
+        .expect("add inbound")
+        .into_inner();
+
+    handler
+        .alter_inbound(add_user_request(
+            INBOUND,
+            "dynamic@example.test",
+            DYNAMIC_ID,
+        ))
+        .await
+        .expect("add user")
+        .into_inner();
+
+    let vless_addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
+    let dynamic_bytes = *Uuid::parse_str(DYNAMIC_ID)
+        .expect("dynamic uuid")
+        .as_bytes();
+    let (target_port, hit) = spawn_target_listener().await;
+    dial_vless_user(vless_addr, &dynamic_bytes, target_port)
+        .await
+        .expect("dynamic user auth");
+    assert!(
+        target_hit_within(hit, 2000).await,
+        "HandlerService AddUser must update live auth context"
     );
 }
 

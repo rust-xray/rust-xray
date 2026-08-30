@@ -20,6 +20,7 @@ pub mod startup_log;
 pub mod stats;
 pub mod tls;
 pub mod transport;
+pub mod tunnel;
 pub mod vless;
 
 /// Re-exports the contents of the [rustls-pki-types](https://docs.rs/rustls-pki-types) crate for easy access

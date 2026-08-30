@@ -31,7 +31,7 @@ matrix. Short version:
 - REALITY accepted-path cipher suites: AES128-GCM, AES256-GCM, ChaCha20-Poly1305
 - VLESS fallback: default, SNI/name, HTTP path, ALPN (`http/1.1`, `h2`), PROXY v1/v2 (`xver=1|2`)
 - Network aliases: `raw`, legacy `tcp`, and experimental `xhttp` / `splithttp`
-- **Xray gRPC API (Stages 8A–8E5-B):** when `api` block is present — `ReflectionService` (optional, explicit only; v1 + v1alpha), `StatsService`, `HandlerService`, `RoutingService`, `LoggerService`, `ObservatoryService`. Legacy `v2ray.core.app.*` route aliases for Handler/Stats/Routing/Logger when each service is enabled (no Observatory legacy alias). Reflection lists legacy service names but legacy protobuf symbols are not descriptor-resolvable (upstream parity). Direct `api.listen` supports TCP, filesystem Unix (`/path`), and Linux abstract Unix (`@name`). Empty `api.listen` uses internal Commander outbound mode (no network listener). Plaintext gRPC is canonical Xray behavior; optional TLS/mTLS on direct listen is a rust-xray extension.
+- **Xray gRPC API (Stages 8A–8E5):** when `api` block is present — `ReflectionService` (optional, explicit only; v1 + v1alpha), `StatsService`, `HandlerService`, `RoutingService`, `LoggerService`, `ObservatoryService`. Legacy `v2ray.core.app.*` route aliases for Handler/Stats/Routing/Logger when each service is enabled (no Observatory legacy alias). Reflection lists legacy service names but legacy protobuf symbols are not descriptor-resolvable (upstream parity). Direct `api.listen` supports TCP, filesystem Unix (`/path`), and Linux abstract Unix (`@name`). Empty `api.listen` uses internal Commander outbound mode (no network listener). Plaintext gRPC is canonical Xray behavior; optional TLS/mTLS on direct listen is a rust-xray extension. grpcurl + upstream Xray CLI interoperability validated (Stage 8E5-C).
 - **Routing / balancers (Stage 8E2–8E4):** `RuntimeRouter` executes static + dynamic rules on VLESS TCP dispatch; `DomainStrategy` (`AsIs`, `IpOnDemand`, `IpIfNonMatch`); GeoSite/GeoIP; protocol sniff matcher; webhook rules; balancers (`random`, `roundRobin`, `leastPing`, `leastLoad` algorithms). Live Observatory health wired for `leastPing`/`leastLoad` and random/roundRobin fallback health filtering (Stage 8E4-C).
 - **HandlerService (Stage 8E1):** dynamic inbound/outbound CRUD, user add/remove, list/get operations for supported VLESS+REALITY / freedom / blackhole types; merged logical inbound auth identity.
 - **LoggerService (Stage 8E3):** `RestartLogger` runtime-backed; reopens configured error/access file sinks after external rotation. General logging config gaps remain (`dnsLog`, `maskAddress`, JSON `loglevel` mapping — see compatibility doc).
@@ -39,19 +39,20 @@ matrix. Short version:
 Accepted path **does not fallback** on failure — handshake/VLESS errors close the
 connection.
 
-### Xray gRPC API status (Stages 8A–8E3)
+### Xray gRPC API status (Stages 8A–8E5)
 
 | Service | Status |
 |---------|--------|
-| API foundation (`api.tag`, `api.listen`, reflection, shared runtime, legacy aliases) | Implemented (Stage 8E5-B) |
-| `StatsService` | Implemented |
-| `HandlerService` | Implemented |
-| `RoutingService` | Implemented |
-| `LoggerService` | Implemented |
-| `ObservatoryService` | Implemented (standard Observatory + BurstObservatory HealthPing; live balancer health wired in Stage 8E4-C) |
+| API foundation (`api.tag`, `api.listen`, reflection, shared runtime, legacy aliases) | Working (Stage 8E5) |
+| `StatsService` | Working |
+| `HandlerService` | Working |
+| `RoutingService` | Working |
+| `LoggerService` | Working |
+| `ObservatoryService` | Working (standard Observatory + BurstObservatory HealthPing; live balancer health wired in Stage 8E4-C) |
+| grpcurl interoperability | Working (Stage 8E5-C) |
+| Xray CLI interoperability | Working (Stage 8E5-C) |
 
-This is **not** full Xray API compatibility closure. Remaining API work includes
-grpcurl + Xray CLI interoperability (Stage 8E5-C), plus Remna unix-abstract E2E (Stage 8D).
+Remaining API work: Remna unix-abstract E2E (Stage 8D).
 
 ### Experimental
 
@@ -78,7 +79,6 @@ grpcurl + Xray CLI interoperability (Stage 8E5-C), plus Remna unix-abstract E2E 
 - REALITY over gRPC / WebSocket transport runtime (rejected at startup when `security: reality`)
 - **ML-KEM-768 cryptography** and **TLS 1.3 negotiated X25519MLKEM768** on the REALITY accepted path (hybrid ServerHello, 64-byte shared secret, dest group mirroring — Stage 3+; pre-auth hybrid **carrier parsing only** in Stage 2)
 - Full outbound ecosystem beyond freedom/blackhole, DoH, Vision splice/zero-copy beyond DIRECT MVP
-- grpcurl + Xray CLI API interoperability (Stage 8E5-C)
 - REALITY post-handshake **Stage 5C** extras: `GlobalMaxCSSMsgCount`, alert-driven CCS probe paths
 - REALITY probe **exact uTLS ClientHello fingerprint** parity (`HelloGolang` / `HelloChrome_Auto`) — probes use rustls (**partial** parity; Stage 5B record-length + Stage 5C extra-CCS tolerance probing only)
 - REALITY session resumption on accepted path
@@ -90,7 +90,7 @@ Happ's current **UDP DNS over VLESS Mux** path by itself.
 
 ### Next milestone
 
-**Stage 8E5-C — grpcurl + Xray CLI API closure** (formal CLI tooling interoperability; Remna unix-abstract E2E where applicable in Stage 8D).
+**Stage 8D — RemnaNode 3.3.2 E2E / unix-abstract tunnel**
 
 See [compatibility-status.md](docs/compatibility-status.md) for remaining Mux/UDP gaps.
 
@@ -222,6 +222,51 @@ Release build:
 
 ```bash
 cargo build --release
+```
+
+### Cross-build Linux x86_64 GNU
+
+Dockerless cross-compilation from macOS to a transferable **glibc** Linux x86_64
+binary (not musl). Use the artifact on a remote Linux host for RemnaNode Stage 8D
+validation.
+
+Host prerequisites (install manually):
+
+```bash
+brew install zig
+cargo install --locked cargo-zigbuild
+rustup target add x86_64-unknown-linux-gnu
+```
+
+Build (default: **debug** profile — symbols preserved for gdb/readelf on the
+remote host):
+
+```bash
+scripts/build-linux-x86_64-gnu.sh
+# or: make build-linux-x86_64-gnu
+```
+
+Optional:
+
+```bash
+RUST_XRAY_PROFILE=release scripts/build-linux-x86_64-gnu.sh
+RUST_XRAY_GLIBC_VERSION=2.31 scripts/build-linux-x86_64-gnu.sh
+RUST_XRAY_STRIP=0 scripts/build-linux-x86_64-gnu.sh
+```
+
+Output:
+
+```text
+dist/linux-x86_64-gnu/rust-xray
+dist/linux-x86_64-gnu/rust-xray.unstripped
+dist/linux-x86_64-gnu/build-info.txt
+dist/linux-x86_64-gnu/SHA256SUMS
+```
+
+On the Linux x86_64 host after copying the artifact:
+
+```bash
+scripts/check-linux-x86_64-gnu-binary.sh ./rust-xray
 ```
 
 ## Configuration

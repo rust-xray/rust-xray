@@ -6,8 +6,9 @@ use tokio::net::UnixStream;
 use crate::startup_log;
 
 use super::raw::XrayConfig;
+use super::unix_http::{fetch_unix_http_config, is_canonical_unix_http_config_source};
 
-const HTTP_UNIX_SCHEME: &str = "http+unix://";
+pub const HTTP_UNIX_SCHEME: &str = "http+unix://";
 const REMNAWAVE_INTERNAL_CONFIG_PATH: &str = "/internal/get-config";
 
 pub fn validate_xray_panel_config(config: &XrayConfig) -> std::io::Result<()> {
@@ -53,6 +54,8 @@ pub fn redact_config_source(source: &str) -> String {
 pub fn config_source_kind(source: &str) -> &'static str {
     if source.starts_with(HTTP_UNIX_SCHEME) {
         "http+unix"
+    } else if is_canonical_unix_http_config_source(source) {
+        "unix-http"
     } else {
         "file"
     }
@@ -60,13 +63,23 @@ pub fn config_source_kind(source: &str) -> &'static str {
 
 /// True when config is loaded from Remnawave's internal `http+unix` socket API.
 pub fn is_remnawave_http_unix_config_source(source: &str) -> bool {
-    if config_source_kind(source) != "http+unix" {
-        return false;
+    if source.starts_with(HTTP_UNIX_SCHEME) {
+        return match parse_http_unix_config_uri(source) {
+            Ok((_, path)) => path.starts_with(REMNAWAVE_INTERNAL_CONFIG_PATH),
+            Err(_) => source.contains(REMNAWAVE_INTERNAL_CONFIG_PATH),
+        };
     }
-    match parse_http_unix_config_uri(source) {
-        Ok((_, path)) => path.starts_with(REMNAWAVE_INTERNAL_CONFIG_PATH),
-        Err(_) => source.contains(REMNAWAVE_INTERNAL_CONFIG_PATH),
+    if is_canonical_unix_http_config_source(source) {
+        return super::unix_http::split_unix_http_target(source)
+            .ok()
+            .is_some_and(|(_, path)| is_remnawave_internal_config_path(&path))
+            || source.contains(REMNAWAVE_INTERNAL_CONFIG_PATH);
     }
+    false
+}
+
+fn is_remnawave_internal_config_path(path: &str) -> bool {
+    path.starts_with(REMNAWAVE_INTERNAL_CONFIG_PATH)
 }
 
 /// Redacted Xray-style command line for logs (`rw-core -config ... -format json`).
@@ -89,6 +102,8 @@ pub fn format_redacted_run_command(
 pub async fn load_xray_config_from_source(source: &str) -> std::io::Result<XrayConfig> {
     let contents = if source.starts_with(HTTP_UNIX_SCHEME) {
         fetch_http_unix_config(source).await?
+    } else if is_canonical_unix_http_config_source(source) {
+        fetch_unix_http_config(source).await?
     } else {
         std::fs::read_to_string(source).map_err(|e| {
             std::io::Error::new(
@@ -178,7 +193,10 @@ pub(crate) fn parse_http_unix_source(source: &str) -> std::io::Result<(&str, &st
     Ok((socket_path, request_target))
 }
 
-fn decode_http_config_response(source: &str, response: &[u8]) -> std::io::Result<String> {
+pub(crate) fn decode_http_config_response(
+    source: &str,
+    response: &[u8],
+) -> std::io::Result<String> {
     let header_end = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")

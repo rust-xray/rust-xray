@@ -21,8 +21,8 @@ pub use context::{
     PROCESS_RUNTIME_SOURCE,
 };
 pub use dispatch::{
-    connect_routed_outbound, route_context_from_vless, vless_route_from_uuid, RouteSocketMeta,
-    RoutedOutbound,
+    connect_routed_outbound, route_context_from_tunnel, route_context_from_vless,
+    vless_route_from_uuid, RouteSocketMeta, RoutedOutbound,
 };
 pub use health::{
     HealthPingObservation, NoOutboundHealthProvider, OutboundHealthObservation,

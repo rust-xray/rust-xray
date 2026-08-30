@@ -181,7 +181,11 @@ fn validate_run_format(format: Option<&str>) -> Result<(), CliError> {
 
 fn looks_like_config_source(arg: &str) -> bool {
     !arg.starts_with('-')
-        && (arg.starts_with("http+unix://") || arg.ends_with(".json") || Path::new(arg).exists())
+        && (arg.starts_with("http+unix://")
+            || arg.starts_with('@')
+            || arg.contains(":/")
+            || arg.ends_with(".json")
+            || Path::new(arg).exists())
 }
 
 fn parse_api_command(args: &[String]) -> Result<Command, CliError> {
