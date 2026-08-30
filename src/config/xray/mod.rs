@@ -1,6 +1,7 @@
 //! Xray / Remnawave panel JSON config parsing and validation.
 
 pub mod api;
+pub mod api_listen;
 mod limit_fallback;
 pub mod load;
 mod observatory;
@@ -12,6 +13,10 @@ pub mod validate;
 pub mod xhttp;
 
 pub use api::*;
+pub use api_listen::{
+    api_listen_kind, bind_api_listen, bind_api_listener, is_internal_commander_listen,
+    parse_api_grpc_listen_addr, parse_api_tcp_listen_addr, ApiListenKind, BoundApiListener,
+};
 pub use limit_fallback::LimitFallback;
 pub use load::*;
 pub use raw::*;

@@ -258,7 +258,7 @@ async fn relay_vless_tcp_bidirectional<S>(
     _stats: Option<&StatsConnection>,
 ) -> std::io::Result<(u64, u64)>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let probed_client = RelayClientWriteProbe::new(client_stream);
     let relay_result = if let Some((traffic, user_uuid)) = vision {
@@ -308,6 +308,7 @@ enum VlessRelayPrepared<S> {
     Tcp(VlessTcpRelayPrepared<S>),
     Mux(VlessMuxRelayPrepared<S>),
     Blackhole,
+    Commander,
 }
 
 async fn prepare_reality_vless_relay<S>(
@@ -320,7 +321,7 @@ async fn prepare_reality_vless_relay<S>(
     Option<StatsConnection>,
 )>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     prepare_reality_vless_relay_with_hook(stream, auth_ctx, socket_meta, router, || async {
         Ok(())
@@ -339,7 +340,7 @@ async fn prepare_reality_vless_relay_with_hook<S, F, Fut>(
     Option<StatsConnection>,
 )>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<()>>,
 {
@@ -372,7 +373,7 @@ async fn prepare_vless_relay_with_router<S>(
     router: Option<&Arc<RuntimeRouter>>,
 ) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsConnection>)>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     prepare_vless_relay_with_hook_and_router(
         stream,
@@ -395,7 +396,7 @@ async fn prepare_vless_relay_with_hook<S, F, Fut>(
     on_ready_to_respond: F,
 ) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsConnection>)>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<()>>,
 {
@@ -421,7 +422,7 @@ async fn prepare_vless_relay_with_hook_and_router<S, F, Fut>(
     on_ready_to_respond: F,
 ) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsConnection>)>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<()>>,
 {
@@ -454,7 +455,7 @@ async fn prepare_vless_relay_from_inbound<S, F, Fut>(
     on_ready_to_respond: F,
 ) -> std::io::Result<(VlessRelayPrepared<S>, Option<StatsConnection>)>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<()>>,
 {
@@ -618,6 +619,44 @@ where
                     %destination,
                     "VLESS route selected"
                 );
+                let outbound_manager = router.outbound_manager();
+                if outbound_manager.is_commander_outbound(&decision.outbound_tag) {
+                    on_ready_to_respond()
+                        .await
+                        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+                    prepare_vless_tcp_response(&mut stream, inbound.request.version)
+                        .await
+                        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+                    if !initial_payload.is_empty() {
+                        log_outbound_stream_first_write(&initial_payload);
+                        stream
+                            .write_all(&initial_payload)
+                            .await
+                            .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+                        if let Some(stats) = stats.as_ref() {
+                            stats.record_uplink(initial_payload.len() as u64);
+                        }
+                    }
+                    let listener = outbound_manager.commander_listener().ok_or_else(|| {
+                        stage_error(
+                            RealityAcceptedStage::Vless,
+                            std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                "commander outbound listener is not active",
+                            ),
+                        )
+                    })?;
+                    if !listener.try_push_io(stream) {
+                        return Err(stage_error(
+                            RealityAcceptedStage::Vless,
+                            std::io::Error::new(
+                                std::io::ErrorKind::WouldBlock,
+                                "commander outbound connection queue full",
+                            ),
+                        ));
+                    }
+                    return Ok((VlessRelayPrepared::Commander, stats));
+                }
                 match crate::routing::connect_routed_outbound(
                     &decision.outbound_tag,
                     &inbound.request.destination,
@@ -747,7 +786,7 @@ pub async fn handle_vless_tcp_inbound<S>(
     router: Option<&Arc<RuntimeRouter>>,
 ) -> std::io::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let socket_meta = RouteSocketMeta {
         source_ip,
@@ -764,7 +803,7 @@ pub async fn handle_vless_tcp_inbound_with_auth_context<S>(
     router: Option<&Arc<RuntimeRouter>>,
 ) -> std::io::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (prepared, stats) = prepare_vless_relay_with_hook_and_router(
         stream,
@@ -779,6 +818,7 @@ where
 
     let prepared = match prepared {
         VlessRelayPrepared::Blackhole => return Ok(()),
+        VlessRelayPrepared::Commander => return Ok(()),
         VlessRelayPrepared::Mux(prepared) => {
             let sniffing = auth_ctx
                 .auth_set()
@@ -829,13 +869,14 @@ pub async fn handle_vless_tcp_inbound_with_socket_meta<S>(
     router: Option<&Arc<RuntimeRouter>>,
 ) -> std::io::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (prepared, stats) =
         prepare_vless_relay_with_router(stream, users, stats_state, socket_meta, router).await?;
 
     let prepared = match prepared {
         VlessRelayPrepared::Blackhole => return Ok(()),
+        VlessRelayPrepared::Commander => return Ok(()),
         VlessRelayPrepared::Mux(prepared) => {
             let route_env = mux_route_env(
                 router,
@@ -887,7 +928,7 @@ pub async fn handle_vless_tcp_inbound_with_response_hook<S, F, Fut>(
     on_ready_to_respond: F,
 ) -> std::io::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<()>>,
 {
@@ -915,7 +956,7 @@ pub async fn handle_vless_tcp_inbound_with_socket_meta_and_response_hook<S, F, F
     on_ready_to_respond: F,
 ) -> std::io::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<()>>,
 {
@@ -931,6 +972,7 @@ where
 
     let prepared = match prepared {
         VlessRelayPrepared::Blackhole => return Ok(()),
+        VlessRelayPrepared::Commander => return Ok(()),
         VlessRelayPrepared::Tcp(prepared) => prepared,
         VlessRelayPrepared::Mux(prepared) => {
             let route_env = mux_route_env(
@@ -984,7 +1026,7 @@ async fn prepare_reality_vless_relay_legacy<S>(
     Option<StatsConnection>,
 )>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut stream = stream;
     let inbound = match read_vless_request(&mut stream).await {
@@ -1013,7 +1055,7 @@ pub async fn handle_reality_vless_tcp_inbound<S>(
     stats_state: Option<&StatsState>,
 ) -> std::io::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     handle_reality_vless_tcp_inbound_traced(
         stream,
@@ -1037,7 +1079,7 @@ pub async fn handle_reality_vless_tcp_inbound_traced<S>(
     router: Option<&Arc<RuntimeRouter>>,
 ) -> std::io::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (prepared, stats) = if let Some(auth_ctx) = auth_ctx {
         prepare_reality_vless_relay(stream, auth_ctx, socket_meta, router).await?
@@ -1059,6 +1101,7 @@ where
 
     let prepared = match prepared {
         VlessRelayPrepared::Blackhole => return Ok(()),
+        VlessRelayPrepared::Commander => return Ok(()),
         VlessRelayPrepared::Tcp(prepared) => prepared,
         VlessRelayPrepared::Mux(prepared) => {
             let sniffing = if let Some(auth_ctx) = auth_ctx {
@@ -1151,7 +1194,7 @@ async fn run_prepared_reality_mux_relay<S>(
     route_env: Option<MuxRouteEnv>,
 ) -> std::io::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     info!(
         stage = stages::VLESS_RELAY_STARTED,
@@ -1210,7 +1253,7 @@ async fn run_prepared_mux_relay<S>(
     route_env: Option<MuxRouteEnv>,
 ) -> std::io::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     info!(
         stage = stages::VLESS_RELAY_STARTED,

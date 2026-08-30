@@ -1,5 +1,9 @@
 use serde_json::Value;
 
+use super::api_listen::{
+    api_listen_kind, is_internal_commander_listen, parse_api_tcp_listen_addr, ApiListenKind,
+};
+
 use super::raw::{InboundObject, RoutingRuleObject, XrayConfig};
 use super::reality::inbound_listen_addr;
 use super::validate::eq_ignore_ascii_case;
@@ -50,6 +54,7 @@ pub enum ApiListenSource {
     ApiListenField,
     InboundTagMatchesApiTag,
     RoutingRule,
+    InternalCommander,
 }
 
 impl ApiListenSource {
@@ -58,6 +63,7 @@ impl ApiListenSource {
             Self::ApiListenField => "api.listen",
             Self::InboundTagMatchesApiTag => "inbound.tag==api.tag",
             Self::RoutingRule => "routing.outboundTag==api.tag",
+            Self::InternalCommander => "internal-commander",
         }
     }
 }
@@ -190,13 +196,17 @@ pub fn is_localhost_api_listen(listen: &str) -> bool {
     listen.trim().starts_with("127.0.0.1:")
 }
 
-/// Resolved API listen address and optional dokodemo-door inbound tag (when not using `api.listen`).
+/// Resolved API listen address and optional dokodemo-door inbound tag (legacy routed inbound).
 pub fn resolve_api_listen(
     config: &XrayConfig,
 ) -> std::io::Result<Option<(String, ApiListenSource, Option<String>)>> {
     let Some(api) = config.api.as_ref() else {
         return Ok(None);
     };
+
+    if is_internal_commander_listen(api.listen.as_deref()) {
+        return Ok(None);
+    }
 
     if let Some(listen) = api
         .listen
@@ -218,10 +228,47 @@ pub fn resolve_api_listen(
 }
 
 /// Tag of the dokodemo-door inbound used for API (if any).
+fn routed_dokodemo_inbound_tags_for_api_outbound(
+    config: &XrayConfig,
+    api_tag: &str,
+) -> Vec<String> {
+    let Some(routing) = config.routing.as_ref() else {
+        return Vec::new();
+    };
+    let mut tags = Vec::new();
+    for rule in &routing.rules {
+        if rule.outbound_tag.as_deref() != Some(api_tag) {
+            continue;
+        }
+        for tag in api_rule_inbound_tags(rule) {
+            if config.inbounds.iter().any(|inbound| {
+                inbound.tag.as_deref() == Some(tag)
+                    && inbound
+                        .protocol
+                        .as_deref()
+                        .is_some_and(|protocol| eq_ignore_ascii_case(protocol, "dokodemo-door"))
+            }) {
+                tags.push(tag.to_string());
+            }
+        }
+    }
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
 pub fn api_dokodemo_inbound_tag(config: &XrayConfig) -> Option<String> {
     let api = config.api.as_ref()?;
     if api.listen.as_deref().is_some_and(|s| !s.trim().is_empty()) {
         return None;
+    }
+    if is_internal_commander_listen(api.listen.as_deref()) {
+        let routed = routed_dokodemo_inbound_tags_for_api_outbound(config, api.tag.as_str());
+        return match routed.len() {
+            0 => None,
+            1 => Some(routed[0].clone()),
+            _ => None,
+        };
     }
     find_api_inbound(config, api.tag.as_str()).and_then(|inbound| inbound.tag.clone())
 }
@@ -304,32 +351,37 @@ pub(crate) fn validate_api_config(config: &XrayConfig) -> std::io::Result<()> {
         if api.tag.trim().is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "api.tag must not be empty",
+                "API tag can't be empty.",
             ));
         }
-        if !api.services.is_empty() {
-            let Some((listen, _, _)) = resolve_api_listen(config)? else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!(
-                        "API services configured for tag {:?} but no api.listen and no routed dokodemo-door API inbound was found",
-                        api.tag
-                    ),
-                ));
-            };
-            crate::api::server::parse_api_grpc_listen_addr(&listen)?;
-        } else if let Some((listen, _, _)) = resolve_api_listen(config)? {
-            crate::api::server::parse_api_grpc_listen_addr(&listen)?;
-        }
-        for service in &api.services {
-            let known = KNOWN_API_SERVICES
-                .iter()
-                .any(|candidate| super::validate::eq_ignore_ascii_case(service, candidate));
-            if !known {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    format!("api.services entry is not supported: {service}"),
-                ));
+        if let Some(listen) = api
+            .listen
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            match api_listen_kind(Some(listen)) {
+                ApiListenKind::Tcp => {
+                    parse_api_tcp_listen_addr(listen)?;
+                }
+                ApiListenKind::UnixPath => {
+                    if listen.len() <= 1 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "unix api.listen path must not be empty",
+                        ));
+                    }
+                }
+                #[cfg(all(unix, target_os = "linux"))]
+                ApiListenKind::UnixAbstract => {
+                    if listen.len() <= 1 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "abstract unix api.listen must include a name after @",
+                        ));
+                    }
+                }
+                ApiListenKind::InternalCommander => {}
             }
         }
     }

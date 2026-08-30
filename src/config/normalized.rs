@@ -1,5 +1,6 @@
 //! Typed, validated config model built from raw Xray panel JSON.
 
+use crate::config::xray::is_internal_commander_listen;
 use crate::config::xray::validate::{eq_ignore_ascii_case, validate_vless_reality_inbound_stream};
 use crate::config::xray::{
     api_dokodemo_inbound_tag, effective_reality_max_client_ver, effective_reality_min_client_ver,
@@ -231,6 +232,13 @@ fn is_api_dokodemo_inbound(
     };
     if !eq_ignore_ascii_case(protocol, "dokodemo-door") {
         return false;
+    }
+    let Some(api) = config.api.as_ref() else {
+        return false;
+    };
+    if is_internal_commander_listen(api.listen.as_deref()) {
+        return api_dokodemo_inbound_tag(config)
+            .is_some_and(|tag| inbound.tag.as_deref() == Some(tag.as_str()));
     }
     if api_dokodemo_tag.is_some_and(|tag| inbound.tag.as_deref() == Some(tag)) {
         return true;
@@ -466,6 +474,16 @@ fn normalize_api(config: &XrayConfig) -> std::io::Result<Option<NormalizedApi>> 
     let Some(api) = config.api.as_ref() else {
         return Ok(None);
     };
+    if is_internal_commander_listen(api.listen.as_deref()) {
+        return Ok(Some(NormalizedApi {
+            tag: api.tag.clone(),
+            listen: String::new(),
+            listen_source: ApiListenSource::InternalCommander,
+            services: api.services.clone(),
+            dokodemo_inbound_tag: api_dokodemo_inbound_tag(config),
+            tls: None,
+        }));
+    }
     let Some((listen, listen_source, inbound_tag)) = resolve_api_listen(config)? else {
         return Ok(None);
     };

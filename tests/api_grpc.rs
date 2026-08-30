@@ -82,9 +82,9 @@ async fn grpc_stats_get_sys_stats_returns_minimal_response() {
 }
 
 #[test]
-fn parse_enabled_services_rejects_unknown() {
-    let err = parse_enabled_services(&["ExampleService".to_string()]).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+fn parse_enabled_services_ignores_unknown() {
+    let enabled = parse_enabled_services(&["ExampleService".to_string()]).expect("parse");
+    assert!(enabled.is_empty());
 }
 
 #[test]

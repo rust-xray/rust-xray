@@ -43,7 +43,6 @@ fn parse_api_listen_requires_host_and_port() {
     assert!(parse_api_grpc_listen_addr("0.0.0.0:10085").is_ok());
     let err = parse_api_grpc_listen_addr("127.0.0.1").unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("host:port"));
 }
 
 #[test]

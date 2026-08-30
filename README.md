@@ -31,7 +31,7 @@ matrix. Short version:
 - REALITY accepted-path cipher suites: AES128-GCM, AES256-GCM, ChaCha20-Poly1305
 - VLESS fallback: default, SNI/name, HTTP path, ALPN (`http/1.1`, `h2`), PROXY v1/v2 (`xver=1|2`)
 - Network aliases: `raw`, legacy `tcp`, and experimental `xhttp` / `splithttp`
-- **Xray gRPC API (Stages 8A–8E4-B):** when `api` block is present — `ReflectionService` (optional), `StatsService`, `HandlerService`, `RoutingService`, `LoggerService`, `ObservatoryService`. Not full Xray API parity yet (see below).
+- **Xray gRPC API (Stages 8A–8E5-A):** when `api` block is present — `ReflectionService` (optional, explicit only), `StatsService`, `HandlerService`, `RoutingService`, `LoggerService`, `ObservatoryService`. Direct `api.listen` supports TCP, filesystem Unix (`/path`), and Linux abstract Unix (`@name`). Empty `api.listen` uses internal Commander outbound mode (no network listener). Plaintext gRPC is canonical Xray behavior; optional TLS/mTLS on direct listen is a rust-xray extension.
 - **Routing / balancers (Stage 8E2–8E4):** `RuntimeRouter` executes static + dynamic rules on VLESS TCP dispatch; `DomainStrategy` (`AsIs`, `IpOnDemand`, `IpIfNonMatch`); GeoSite/GeoIP; protocol sniff matcher; webhook rules; balancers (`random`, `roundRobin`, `leastPing`, `leastLoad` algorithms). Live Observatory health wired for `leastPing`/`leastLoad` and random/roundRobin fallback health filtering (Stage 8E4-C).
 - **HandlerService (Stage 8E1):** dynamic inbound/outbound CRUD, user add/remove, list/get operations for supported VLESS+REALITY / freedom / blackhole types; merged logical inbound auth identity.
 - **LoggerService (Stage 8E3):** `RestartLogger` runtime-backed; reopens configured error/access file sinks after external rotation. General logging config gaps remain (`dnsLog`, `maskAddress`, JSON `loglevel` mapping — see compatibility doc).
@@ -43,7 +43,7 @@ connection.
 
 | Service | Status |
 |---------|--------|
-| API foundation (`api.listen`, reflection, shared runtime) | Implemented |
+| API foundation (`api.tag`, `api.listen`, reflection, shared runtime) | Implemented (Stage 8E5-A Commander semantics) |
 | `StatsService` | Implemented |
 | `HandlerService` | Implemented |
 | `RoutingService` | Implemented |
@@ -51,8 +51,8 @@ connection.
 | `ObservatoryService` | Implemented (standard Observatory + BurstObservatory HealthPing; live balancer health wired in Stage 8E4-C) |
 
 This is **not** full Xray API compatibility closure. Remaining API work includes
-legacy `v2ray.core.*` aliases, exact `api.tag` / `services` semantics, and
-Remna unix-abstract E2E (Stages 8D–8E5).
+legacy `v2ray.core.*` aliases and reflection alias quirks (Stage 8E5-B), plus
+Remna unix-abstract E2E (Stage 8D).
 
 ### Experimental
 
@@ -79,7 +79,7 @@ Remna unix-abstract E2E (Stages 8D–8E5).
 - REALITY over gRPC / WebSocket transport runtime (rejected at startup when `security: reality`)
 - **ML-KEM-768 cryptography** and **TLS 1.3 negotiated X25519MLKEM768** on the REALITY accepted path (hybrid ServerHello, 64-byte shared secret, dest group mirroring — Stage 3+; pre-auth hybrid **carrier parsing only** in Stage 2)
 - Full outbound ecosystem beyond freedom/blackhole, DoH, Vision splice/zero-copy beyond DIRECT MVP
-- Legacy `v2ray.core.*` API aliases and final API config closure (Stage 8E5)
+- Legacy `v2ray.core.*` API aliases and reflection alias quirks (Stage 8E5-B)
 - REALITY post-handshake **Stage 5C** extras: `GlobalMaxCSSMsgCount`, alert-driven CCS probe paths
 - REALITY probe **exact uTLS ClientHello fingerprint** parity (`HelloGolang` / `HelloChrome_Auto`) — probes use rustls (**partial** parity; Stage 5B record-length + Stage 5C extra-CCS tolerance probing only)
 - REALITY session resumption on accepted path
@@ -91,7 +91,7 @@ Happ's current **UDP DNS over VLESS Mux** path by itself.
 
 ### Next milestone
 
-**Stage 8E5 — API compatibility closure** (legacy `v2ray.core.*` aliases, exact `api.tag` / `services` semantics, Remna unix-abstract E2E).
+**Stage 8E5-B — API legacy aliases** (legacy `v2ray.core.*` aliases, reflection compatibility quirks, Remna unix-abstract E2E where applicable).
 
 See [compatibility-status.md](docs/compatibility-status.md) for remaining Mux/UDP gaps.
 

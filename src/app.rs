@@ -816,7 +816,7 @@ fn runtime_config_from_normalized(
     let mut inbounds = Vec::with_capacity(runtimes.len());
 
     for (inbound, merged_inbound_tags, logical_users) in runtimes {
-        let inbound_tag = inbound
+        let _inbound_tag = inbound
             .tag
             .clone()
             .filter(|tag| !tag.is_empty())
@@ -937,76 +937,24 @@ async fn start_xray_api_server(
 
     info!(api_tag = %api.tag, api_services = ?api.services, "Xray API starting");
 
-    let resolved = resolve_api_listen(xray)
-        .map_err(|err| stage_error("failed to resolve API listener", err))?;
-    let Some((listen, listen_source, dokodemo_tag)) = resolved else {
-        let err = std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "API services configured for tag {:?} but no api.listen and no routed dokodemo-door API inbound was found",
-                api.tag
-            ),
-        );
-        return Err(stage_error("failed to resolve API listener", err));
+    let startup = api::server::start_configured_api_server(
+        config_source,
+        xray,
+        handler_runtime,
+        stats_registry,
+    )
+    .await
+    .map_err(|err| stage_error("failed to start Xray API", err))?;
+
+    let Some(startup) = startup else {
+        return Ok(None);
     };
 
-    crate::startup_log::eprintln_api_listen_resolved(
-        &listen,
-        listen_source.as_log_label(),
-        dokodemo_tag.as_deref(),
-        api.tag.as_str(),
-    );
-    info!(
-        api_listen = %listen,
-        api_listen_source = listen_source.as_log_label(),
-        dokodemo_inbound_tag = ?dokodemo_tag,
-        "detected Xray API listener address"
-    );
-
-    if let Some(tag) = dokodemo_tag.as_deref() {
-        info!(
-            inbound_tag = %tag,
-            api_listen = %listen,
-            "skipping normal inbound startup for API dokodemo-door inbound (API gRPC owns this listen/port)"
-        );
-        crate::startup_log::eprintln_bootstrap(format!(
-            "skipped inbound tag {tag} (API gRPC owns {listen})"
-        ));
+    if let Some(label) = startup.bound_label.as_deref() {
+        crate::startup_log::eprintln_api_listening(label, startup.transport.as_log_label());
     }
 
-    let selection = api::server::resolve_api_transport_mode(api::server::ApiTransportContext {
-        config_source,
-        api_listen: Some(&listen),
-        xray: Some(xray),
-    })
-    .map_err(|err| stage_error("failed to configure API transport", err))?;
-    api::server::log_api_transport_selected(&selection);
-    let transport = selection.mode;
-    info!(api_transport = transport.as_log_label(), "Xray API mode");
-
-    let enabled = api::server::parse_enabled_services(&api.services)
-        .map_err(|err| stage_error("failed to parse API services", err))?;
-
-    let (listener, bound_addr) = api::server::bind_api_listener(&listen)
-        .await
-        .map_err(|err| stage_error("failed to bind Xray API", err))?;
-    info!(bind_addr = %bound_addr, "Xray API bind OK");
-
-    api::server::log_api_listener_ready(&listen, bound_addr, &api.services, &enabled, &transport);
-    crate::startup_log::eprintln_api_listening(&listen, transport.as_log_label());
-
-    let api_task = tokio::spawn(async move {
-        api::server::serve_grpc_on(
-            listener,
-            enabled,
-            stats_registry,
-            handler_runtime,
-            transport,
-        )
-        .await
-    });
-
-    Ok(Some(api_task))
+    Ok(Some(startup.task))
 }
 
 async fn run_server(opts: RunOptions) -> std::io::Result<()> {

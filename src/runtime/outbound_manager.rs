@@ -5,9 +5,10 @@ use std::sync::{Arc, RwLock};
 
 use crate::api::proto::core::OutboundHandlerConfig;
 use crate::config::xray::raw::OutboundObject;
+use crate::runtime::commander_listener::CommanderOutboundListener;
 use crate::runtime::handler_config::{
-    decode_outbound_handler_config, encode_outbound_from_startup, encode_outbound_handler_config,
-    HandlerConfigError, OutboundProtocol,
+    decode_outbound_handler_config, encode_commander_outbound, encode_outbound_from_startup,
+    encode_outbound_handler_config, HandlerConfigError, OutboundProtocol,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,7 @@ pub struct OutboundEntry {
 pub struct RuntimeOutboundManager {
     entries: RwLock<HashMap<String, OutboundEntry>>,
     default_tag: RwLock<Option<String>>,
+    commander_listener: RwLock<Option<Arc<CommanderOutboundListener>>>,
 }
 
 impl RuntimeOutboundManager {
@@ -48,6 +50,7 @@ impl RuntimeOutboundManager {
         Arc::new(Self {
             entries: RwLock::new(HashMap::new()),
             default_tag: RwLock::new(None),
+            commander_listener: RwLock::new(None),
         })
     }
 
@@ -103,10 +106,61 @@ impl RuntimeOutboundManager {
         let entries = self.entries.read().expect("outbound entries lock");
         let mut outbounds: Vec<_> = entries
             .values()
+            .filter(|entry| entry.protocol != OutboundProtocol::Commander)
             .map(|entry| entry.handler_config.clone())
             .collect();
         outbounds.sort_by(|left, right| left.tag.cmp(&right.tag));
         outbounds
+    }
+
+    pub fn is_commander_outbound(&self, tag: &str) -> bool {
+        self.entries
+            .read()
+            .expect("outbound entries lock")
+            .get(tag)
+            .is_some_and(|entry| entry.protocol == OutboundProtocol::Commander)
+    }
+
+    pub fn commander_listener(&self) -> Option<Arc<CommanderOutboundListener>> {
+        self.commander_listener
+            .read()
+            .expect("commander listener lock")
+            .clone()
+    }
+
+    /// Install/replace the internal Commander outbound (Xray internal `api.listen == ""` mode).
+    pub fn install_commander_outbound(
+        self: &Arc<Self>,
+        tag: &str,
+        listener: Arc<CommanderOutboundListener>,
+    ) -> Result<(), OutboundManagerError> {
+        let tag = tag.trim().to_string();
+        if tag.is_empty() {
+            return Err(OutboundManagerError::InvalidConfig {
+                message: "commander outbound tag is required".to_string(),
+            });
+        }
+
+        let config = encode_commander_outbound(&tag);
+        let mut entries = self.entries.write().expect("outbound entries lock");
+        entries.insert(
+            tag.clone(),
+            OutboundEntry {
+                tag: tag.clone(),
+                protocol: OutboundProtocol::Commander,
+                handler_config: config,
+            },
+        );
+
+        let mut default = self.default_tag.write().expect("default outbound tag lock");
+        if default.is_none() {
+            *default = Some(tag);
+        }
+        *self
+            .commander_listener
+            .write()
+            .expect("commander listener lock") = Some(listener);
+        Ok(())
     }
 
     pub fn contains(&self, tag: &str) -> bool {

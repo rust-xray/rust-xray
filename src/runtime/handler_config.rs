@@ -720,6 +720,7 @@ pub fn encode_inbound_handler_config(
 pub enum OutboundProtocol {
     Freedom,
     Blackhole,
+    Commander,
 }
 
 impl OutboundProtocol {
@@ -727,6 +728,7 @@ impl OutboundProtocol {
         match self {
             Self::Freedom => "freedom",
             Self::Blackhole => "blackhole",
+            Self::Commander => "commander",
         }
     }
 }
@@ -761,15 +763,26 @@ pub fn decode_outbound_handler_config(
     Ok((protocol, config.clone()))
 }
 
+pub fn encode_commander_outbound(tag: &str) -> OutboundHandlerConfig {
+    OutboundHandlerConfig {
+        tag: tag.trim().to_string(),
+        ..Default::default()
+    }
+}
+
 pub fn encode_outbound_handler_config(
     tag: &str,
     protocol: OutboundProtocol,
 ) -> OutboundHandlerConfig {
+    if matches!(protocol, OutboundProtocol::Commander) {
+        return encode_commander_outbound(tag);
+    }
     let proxy = match protocol {
         OutboundProtocol::Freedom => encode_typed(&FreedomConfig::default(), FREEDOM_CONFIG_TYPE),
         OutboundProtocol::Blackhole => {
             encode_typed(&BlackholeConfig::default(), BLACKHOLE_CONFIG_TYPE)
         }
+        OutboundProtocol::Commander => unreachable!("handled above"),
     };
     OutboundHandlerConfig {
         tag: tag.to_string(),

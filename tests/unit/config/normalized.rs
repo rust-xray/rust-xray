@@ -236,8 +236,8 @@ fn remnawave_routing_api_normalizes() {
     let normalized = normalize_config(&config).unwrap();
 
     let api = normalized.api.as_ref().expect("api");
-    assert_eq!(api.listen, "127.0.0.1:61000");
-    assert_eq!(api.listen_source, ApiListenSource::RoutingRule);
+    assert_eq!(api.listen, "");
+    assert_eq!(api.listen_source, ApiListenSource::InternalCommander);
     assert_eq!(api.dokodemo_inbound_tag.as_deref(), Some("api-inbound"));
 
     let api_inbounds: Vec<_> = normalized

@@ -1,7 +1,8 @@
 use rust_xray::config::{
-    api_listen_addr, first_reality_inbound_runtime, load_xray_config_from_file,
-    load_xray_config_from_source, redact_config_source, resolve_api_listen,
-    validate_xray_panel_config, ApiListenSource, XrayConfig,
+    api_dokodemo_inbound_tag, api_listen_addr, first_reality_inbound_runtime,
+    is_internal_commander_listen, load_xray_config_from_file, load_xray_config_from_source,
+    redact_config_source, resolve_api_listen, validate_xray_panel_config, ApiListenSource,
+    XrayConfig,
 };
 
 const REMNA_FIXTURE: &str = include_str!("fixtures/remna/reality_vless_api_config.json");
@@ -93,10 +94,10 @@ fn remna_xray_style_api_listen_resolves_from_tagged_inbound() {
 
     let config: XrayConfig = serde_json::from_value(value).expect("parse xray-style api config");
     validate_xray_panel_config(&config).expect("panel validation");
-    assert_eq!(
-        api_listen_addr(&config).expect("api listen"),
-        Some("127.0.0.1:61000".to_string())
-    );
+    assert_eq!(api_listen_addr(&config).expect("api listen"), None);
+    assert!(is_internal_commander_listen(
+        config.api.as_ref().unwrap().listen.as_deref()
+    ));
     first_reality_inbound_runtime(&config).expect("reality runtime");
 }
 
@@ -140,9 +141,10 @@ fn remnawave_api_listen_resolves_from_routing_rule_to_api_tag() {
     let config: XrayConfig =
         serde_json::from_value(value).expect("parse remnawave-style api config");
     validate_xray_panel_config(&config).expect("panel validation");
+    assert_eq!(api_listen_addr(&config).expect("api listen"), None);
     assert_eq!(
-        api_listen_addr(&config).expect("api listen"),
-        Some("127.0.0.1:61000".to_string())
+        api_dokodemo_inbound_tag(&config).as_deref(),
+        Some("REMNAWAVE_API_IN")
     );
     first_reality_inbound_runtime(&config).expect("reality runtime");
 }
@@ -165,12 +167,11 @@ fn remnawave_node_minimal_fixture_resolves_api_61000_via_routing() {
     let config: XrayConfig =
         serde_json::from_str(REMNAWAVE_NODE_MINIMAL_61000).expect("parse minimal");
     validate_xray_panel_config(&config).expect("panel validation");
-    let (listen, source, tag) = resolve_api_listen(&config)
-        .expect("resolve")
-        .expect("listen");
-    assert_eq!(listen, "127.0.0.1:61000");
-    assert_eq!(source, ApiListenSource::RoutingRule);
-    assert_eq!(tag.as_deref(), Some("api-inbound"));
+    assert_eq!(resolve_api_listen(&config).expect("resolve"), None);
+    assert_eq!(
+        api_dokodemo_inbound_tag(&config).as_deref(),
+        Some("api-inbound")
+    );
     first_reality_inbound_runtime(&config).expect("reality runtime");
 }
 
@@ -292,7 +293,7 @@ fn api_listen_without_port_is_rejected_at_validation() {
     config.api.as_mut().expect("api").listen = Some("127.0.0.1".to_string());
     let err = validate_xray_panel_config(&config).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("host:port"));
+    assert!(err.to_string().contains("invalid api.listen TCP"));
 }
 
 #[test]
@@ -334,12 +335,11 @@ fn remna_api_topology_with_observatory_service_validates() {
 
     let config: XrayConfig = serde_json::from_value(value).expect("parse");
     validate_xray_panel_config(&config).expect("panel validation");
-    let (listen, source, tag) = resolve_api_listen(&config)
-        .expect("resolve")
-        .expect("listen");
-    assert_eq!(listen, "127.0.0.1:61000");
-    assert_eq!(source, ApiListenSource::RoutingRule);
-    assert_eq!(tag.as_deref(), Some("api-inbound"));
+    assert_eq!(resolve_api_listen(&config).expect("resolve"), None);
+    assert_eq!(
+        api_dokodemo_inbound_tag(&config).as_deref(),
+        Some("api-inbound")
+    );
 }
 
 #[test]
@@ -378,8 +378,8 @@ fn ambiguous_api_routing_returns_explicit_error() {
     });
 
     let config: XrayConfig = serde_json::from_value(value).expect("parse");
-    let err = resolve_api_listen(&config).unwrap_err();
-    assert!(err.to_string().contains("ambiguous"));
+    assert_eq!(resolve_api_listen(&config).expect("resolve"), None);
+    assert_eq!(api_dokodemo_inbound_tag(&config), None);
 }
 
 #[tokio::test]
@@ -421,7 +421,7 @@ fn api_listen_direct_field_wins_over_routing() {
 }
 
 #[test]
-fn unknown_api_service_is_explicit_error() {
+fn unknown_api_service_is_ignored_at_startup() {
     let mut config = parse_remna_fixture();
     config
         .api
@@ -430,7 +430,5 @@ fn unknown_api_service_is_explicit_error() {
         .services
         .push("ExampleService".to_string());
 
-    let err = validate_xray_panel_config(&config).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-    assert!(err.to_string().contains("api.services"));
+    validate_xray_panel_config(&config).expect("unknown api.services entries are ignored");
 }

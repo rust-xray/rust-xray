@@ -1,3 +1,4 @@
+mod commander_listener;
 mod handler_config;
 mod inbound_manager;
 mod inbound_users;
@@ -5,9 +6,13 @@ mod logical_inbound_auth;
 mod outbound_manager;
 
 pub use crate::routing::RuntimeRouter;
+pub use commander_listener::{
+    close_commander_listener, CommanderConnection, CommanderIncoming, CommanderOutboundListener,
+    InternalCommanderHandle, COMMANDER_OUTBOUND_BUFFER,
+};
 pub use handler_config::{
-    decode_inbound_handler_config, decode_outbound_handler_config, encode_inbound_handler_config,
-    encode_outbound_from_startup, encode_outbound_handler_config,
+    decode_inbound_handler_config, decode_outbound_handler_config, encode_commander_outbound,
+    encode_inbound_handler_config, encode_outbound_from_startup, encode_outbound_handler_config,
     encode_plain_vless_inbound_handler_config, DecodedInboundHandler, HandlerConfigError,
     OutboundProtocol, BLACKHOLE_CONFIG_TYPE, FREEDOM_CONFIG_TYPE, REALITY_CONFIG_TYPE,
     RECEIVER_CONFIG_TYPE, SPLITHHTTP_CONFIG_TYPE, VLESS_INBOUND_CONFIG_TYPE,

@@ -1,6 +1,8 @@
 pub mod client;
+pub mod commander;
 pub mod diagnostics;
 pub mod handler;
+pub mod listen;
 pub mod logger;
 pub mod observatory;
 pub mod proto;

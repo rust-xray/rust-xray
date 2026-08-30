@@ -69,6 +69,10 @@ pub async fn connect_routed_outbound(
 
     match protocol {
         OutboundProtocol::Blackhole => Ok(RoutedOutbound::Blackhole),
+        OutboundProtocol::Commander => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "commander outbound receives the inbound stream directly",
+        )),
         OutboundProtocol::Freedom => {
             let stream = connect_tcp_destination_with_runtime(destination, connect_runtime).await?;
             Ok(RoutedOutbound::Tcp(stream))

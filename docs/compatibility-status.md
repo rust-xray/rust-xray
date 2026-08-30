@@ -45,7 +45,8 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | Fallback `xver=2` PROXY v2 | Working | Live smoke + golden vector |
 | Network alias `raw` / legacy `tcp` | Working | Same REALITY TCP runtime |
 | StatsService API | Working | All seven RPCs when `api` block present; atomic counter reset; OnlineMap refcount; seven policy flags default false until `policy` enables them; online IP from TCP peer through all transports including XHTTP; dynamic users use level policy automatically; `GetSysStats` Go-runtime fields N/A in Rust (Stage 8B) |
-| Xray gRPC API foundation (Stage 8A) | Working | Canonical protobuf/service registration, direct `api.listen`, optional reflection, plaintext default, shared runtime state wiring (`StatsRegistry`, `InboundUserManagers`) |
+| Xray gRPC API foundation (Stage 8A) | Working | Canonical protobuf/service registration, direct `api.listen` (TCP / filesystem Unix / Linux abstract `@name`), optional reflection, plaintext default (TLS/mTLS on direct listen = rust-xray extension), shared runtime state wiring (`StatsRegistry`, `InboundUserManagers`) |
+| Commander API transport (Stage 8E5-A) | Working | `api.tag` required; `api.services` case-insensitive with unknown entries ignored; empty service list allowed; `api.listen != ""` binds direct listener without replacing same-tag outbound; `api.listen == ""` internal Commander outbound (bounded queue capacity 4, no network listener); Commander outbound hidden from `HandlerService.ListOutbounds`; duplicate recognized service entries fail startup (safe divergence — upstream allows duplicate config entries but tonic router rejects duplicate routes) |
 | HandlerService (Stage 8E1) | Working | Full current `HandlerService` RPC surface runtime-backed via `RuntimeInboundManager` / `RuntimeOutboundManager`; dynamic VLESS+REALITY inbound, freedom/blackhole outbound; merged logical inbound auth identity; no config file rewrite |
 | RoutingService (Stage 8E2–8E4) | Working | All seven RPCs runtime-backed via `RuntimeRouter`; static JSON + dynamic `AddRule`/`RemoveRule`; VLESS TCP dispatch uses same router; webhook rules fire after route selection; GeoSite/GeoIP; balancers (`random`, `roundRobin`, `leastPing`, `leastLoad` algorithms). `DomainStrategy`: `IpOnDemand` lazily resolves target DNS when an IP condition needs target IP; `IpIfNonMatch` runs first pass without forced DNS, resolves once if no rule matches, then second pass. Live Observatory health wired for `leastPing`/`leastLoad` and random/roundRobin fallback health filtering (Stage 8E4-C) |
 | LoggerService (Stage 8E3) | Working | Canonical `RestartLogger` RPC; runtime-backed sink reopen from in-memory config; file rotation reopen proven via tonic E2E. Legacy `v2ray.core.app.log.command.LoggerService` alias deferred to Stage 8E5 |
@@ -139,7 +140,7 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | ML-KEM / hybrid KEM on REALITY **accepted TLS handshake** | Not implemented | Stage 2 adds **pre-auth only**: parse `X25519MLKEM768` ClientHello `key_share` (1216 B) and extract trailing X25519 for REALITY auth. **Not yet:** ML-KEM-768 encaps/decaps, hybrid ServerHello, 64-byte TLS shared secret, dest `key_share` mirroring. See [design doc](./reality-mlkem-design.md). |
 | Full Xray-core drop-in compatibility | Not implemented |
 | Legacy `v2ray.core.*` API service aliases | Not implemented (Stage 8E5) |
-| Final API config compatibility closure | Not implemented (Stage 8E5) |
+| Final API config compatibility closure | Partial (Stage 8E5-A done) | Commander listen/tag/services semantics; legacy `v2ray.core.*` aliases remain Stage 8E5-B |
 
 **DNS clarification:** Built-in `DnsEngine` serves Mux UDP DNS and optional freedom
 outbound resolve (`UseIP` / `UseIPv4` / `UseIPv6`). It does **not** replace full Xray DNS
@@ -183,8 +184,8 @@ mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`).
 
 **Stage 8E5 — API compatibility closure**
 
-1. Legacy `v2ray.core.*` service aliases
-2. Exact `api.tag` / `services` semantics
+1. ~~Commander `api.tag` / `listen` / `services` transport semantics~~ (Stage 8E5-A)
+2. Legacy `v2ray.core.*` service aliases + reflection quirks (Stage 8E5-B)
 3. Remna unix-abstract E2E (Stage 8D closure where applicable)
 4. Keep the fully-green `cargo test` baseline
 

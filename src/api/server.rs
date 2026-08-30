@@ -2,10 +2,18 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
-use tonic::transport::server::Router;
+#[cfg(unix)]
+use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::{Stream, StreamExt};
+use tonic::transport::server::{Connected, Router};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 use crate::api::diagnostics::DiagnosingTcpIncoming;
+pub use crate::config::xray::api_listen::{
+    bind_api_listen, bind_api_listener, is_internal_commander_listen, parse_api_grpc_listen_addr,
+    parse_api_tcp_listen_addr, ApiListenKind, BoundApiListener,
+};
+use crate::runtime::{CommanderOutboundListener, InternalCommanderHandle};
 use tracing::info;
 
 use crate::api::handler::HandlerServiceImpl;
@@ -27,7 +35,7 @@ use crate::runtime::HandlerRuntime;
 use crate::stats::StatsRegistry;
 
 /// Enabled Xray API gRPC services (from `api.services`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ApiService {
     Reflection,
     Handler,
@@ -301,30 +309,6 @@ fn resolve_tls_material(
     }
 }
 
-/// Parse `api.listen` / resolved API address. Requires an explicit `host:port` (no default port).
-pub fn parse_api_grpc_listen_addr(listen: &str) -> std::io::Result<SocketAddr> {
-    let listen = listen.trim();
-    if listen.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "api.listen must not be empty",
-        ));
-    }
-    if !listen.contains(':') {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("api.listen must include host:port (e.g. 127.0.0.1:61000), got {listen:?}"),
-        ));
-    }
-
-    listen.parse().map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid api.listen address {listen}: {e}"),
-        )
-    })
-}
-
 fn build_server_tls_config(mode: &ApiTransportMode) -> std::io::Result<ServerTlsConfig> {
     match mode {
         ApiTransportMode::Plaintext => Err(std::io::Error::new(
@@ -385,22 +369,6 @@ pub fn api_transport_mode_from_env() -> std::io::Result<ApiTransportMode> {
     .mode)
 }
 
-/// Bind the API TCP listener before serving (fail fast if the address is unavailable).
-pub async fn bind_api_listener(listen: &str) -> std::io::Result<(TcpListener, SocketAddr)> {
-    let configured = listen.trim().to_string();
-    let socket_addr = parse_api_grpc_listen_addr(&configured)?;
-    let listener = TcpListener::bind(socket_addr).await.map_err(|err| {
-        std::io::Error::new(
-            err.kind(),
-            format!(
-                "failed to bind Xray API listener on {socket_addr} (api.listen={configured}): {err}"
-            ),
-        )
-    })?;
-    let bound = listener.local_addr()?;
-    Ok((listener, bound))
-}
-
 fn api_service_canonical_path(service: ApiService) -> &'static str {
     match service {
         ApiService::Reflection => "grpc.reflection.v1.ServerReflection",
@@ -451,52 +419,193 @@ pub fn log_api_listener_ready(
     ));
 }
 
-/// Parse `api.services` into mountable services. Unknown or unsupported entries error at startup.
+/// Parse `api.services` into mountable services (unknown entries are ignored).
 pub fn parse_enabled_services(services: &[String]) -> std::io::Result<Vec<ApiService>> {
-    if services.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "api.services must list at least one gRPC service",
-        ));
-    }
-
     let mut enabled = Vec::with_capacity(services.len());
     for service in services {
         let parsed = if eq_ignore_ascii_case(service, "ReflectionService") {
-            ApiService::Reflection
+            Some(ApiService::Reflection)
         } else if eq_ignore_ascii_case(service, "HandlerService") {
-            ApiService::Handler
+            Some(ApiService::Handler)
         } else if eq_ignore_ascii_case(service, "LoggerService") {
-            ApiService::Logger
+            Some(ApiService::Logger)
         } else if eq_ignore_ascii_case(service, "StatsService") {
-            ApiService::Stats
+            Some(ApiService::Stats)
         } else if eq_ignore_ascii_case(service, "RoutingService") {
-            ApiService::Routing
+            Some(ApiService::Routing)
         } else if eq_ignore_ascii_case(service, "ObservatoryService") {
-            ApiService::Observatory
+            Some(ApiService::Observatory)
         } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                format!("api.services entry is not supported: {service}"),
-            ));
+            None
         };
-
-        if !enabled.contains(&parsed) {
+        if let Some(parsed) = parsed {
             enabled.push(parsed);
         }
     }
-
-    if enabled.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "api.services did not enable any mountable gRPC service (StatsService, HandlerService, ...)",
-        ));
-    }
-
     Ok(enabled)
 }
 
-/// Start the Xray-compatible gRPC API server on a pre-bound listener (blocks until shutdown).
+fn validate_duplicate_api_services(services: &[ApiService]) -> std::io::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for service in services {
+        if !seen.insert(*service) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("duplicate API service registration: {service:?}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+enum GrpcBuildState {
+    Server(Server),
+    Router(Router),
+}
+
+impl GrpcBuildState {
+    fn add_service(
+        self,
+        service: ApiService,
+        stats_registry: &Arc<StatsRegistry>,
+        handler_runtime: &Arc<HandlerRuntime>,
+    ) -> std::io::Result<Self> {
+        let add = |mut builder: Server| -> std::io::Result<Router> {
+            Ok(match service {
+                ApiService::Reflection => {
+                    let reflection = tonic_reflection::server::Builder::configure()
+                        .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
+                        .build_v1()
+                        .map_err(std::io::Error::other)?;
+                    builder.add_service(reflection)
+                }
+                ApiService::Stats => builder.add_service(StatsServiceServer::new(
+                    StatsServiceImpl::new(Arc::clone(stats_registry)),
+                )),
+                ApiService::Handler => builder.add_service(HandlerServiceServer::new(
+                    HandlerServiceImpl::new(Arc::clone(handler_runtime)),
+                )),
+                ApiService::Logger => {
+                    let logger = LoggerServiceImpl::from_global().map_err(|err| {
+                        std::io::Error::other(format!(
+                            "LoggerService unavailable: {}",
+                            err.message()
+                        ))
+                    })?;
+                    builder.add_service(LoggerServiceServer::new(logger))
+                }
+                ApiService::Routing => builder.add_service(RoutingServiceServer::new(
+                    RoutingServiceImpl::new(Arc::clone(handler_runtime)),
+                )),
+                ApiService::Observatory => {
+                    let observatory = ObservatoryServiceImpl::new(Arc::clone(handler_runtime))
+                        .map_err(|err| {
+                            std::io::Error::other(format!(
+                                "ObservatoryService unavailable: {}",
+                                err.message()
+                            ))
+                        })?;
+                    builder.add_service(ObservatoryServiceServer::new(observatory))
+                }
+            })
+        };
+
+        match self {
+            Self::Server(builder) => add(builder).map(Self::Router),
+            Self::Router(router) => Ok(Self::Router(match service {
+                ApiService::Reflection => {
+                    let reflection = tonic_reflection::server::Builder::configure()
+                        .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
+                        .build_v1()
+                        .map_err(std::io::Error::other)?;
+                    router.add_service(reflection)
+                }
+                ApiService::Stats => router.add_service(StatsServiceServer::new(
+                    StatsServiceImpl::new(Arc::clone(stats_registry)),
+                )),
+                ApiService::Handler => router.add_service(HandlerServiceServer::new(
+                    HandlerServiceImpl::new(Arc::clone(handler_runtime)),
+                )),
+                ApiService::Logger => {
+                    let logger = LoggerServiceImpl::from_global().map_err(|err| {
+                        std::io::Error::other(format!(
+                            "LoggerService unavailable: {}",
+                            err.message()
+                        ))
+                    })?;
+                    router.add_service(LoggerServiceServer::new(logger))
+                }
+                ApiService::Routing => router.add_service(RoutingServiceServer::new(
+                    RoutingServiceImpl::new(Arc::clone(handler_runtime)),
+                )),
+                ApiService::Observatory => {
+                    let observatory = ObservatoryServiceImpl::new(Arc::clone(handler_runtime))
+                        .map_err(|err| {
+                            std::io::Error::other(format!(
+                                "ObservatoryService unavailable: {}",
+                                err.message()
+                            ))
+                        })?;
+                    router.add_service(ObservatoryServiceServer::new(observatory))
+                }
+            })),
+        }
+    }
+}
+
+fn build_grpc_router(
+    server_builder: Server,
+    services: &[ApiService],
+    stats_registry: &Arc<StatsRegistry>,
+    handler_runtime: &Arc<HandlerRuntime>,
+) -> std::io::Result<Option<Router>> {
+    let mut state = GrpcBuildState::Server(server_builder);
+    for service in services {
+        state = state.add_service(*service, stats_registry, handler_runtime)?;
+    }
+    match state {
+        GrpcBuildState::Server(_) => Ok(None),
+        GrpcBuildState::Router(router) => Ok(Some(router)),
+    }
+}
+
+/// Start the Xray-compatible gRPC API on a custom incoming stream (blocks until shutdown).
+pub async fn serve_grpc_incoming<I, IO>(
+    incoming: I,
+    services: Vec<ApiService>,
+    stats_registry: Arc<StatsRegistry>,
+    handler_runtime: Arc<HandlerRuntime>,
+    transport: ApiTransportMode,
+) -> std::io::Result<()>
+where
+    I: Stream<Item = Result<IO, std::io::Error>> + Send + Unpin + 'static,
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Connected + Unpin + Send + 'static,
+{
+    let mut server_builder = Server::builder();
+    if transport.uses_tls() {
+        let tls = build_server_tls_config(&transport)?;
+        server_builder = server_builder
+            .tls_config(tls)
+            .map_err(std::io::Error::other)?;
+    }
+
+    let router = build_grpc_router(server_builder, &services, &stats_registry, &handler_runtime)?;
+
+    if let Some(router) = router {
+        router
+            .serve_with_incoming(incoming)
+            .await
+            .map_err(|err| std::io::Error::other(format!("Xray API server stopped: {err}")))?;
+    } else {
+        let mut incoming = incoming;
+        while let Some(result) = incoming.next().await {
+            let _ = result?;
+        }
+    }
+    Ok(())
+}
+
+/// Start the Xray-compatible gRPC API server on a pre-bound TCP listener (blocks until shutdown).
 pub async fn serve_grpc_on(
     listener: TcpListener,
     services: Vec<ApiService>,
@@ -507,71 +616,188 @@ pub async fn serve_grpc_on(
     let local_addr = listener.local_addr()?;
     let incoming = DiagnosingTcpIncoming::from_listener(listener, true, None, transport.clone())
         .map_err(std::io::Error::other)?;
+    serve_grpc_incoming(
+        incoming,
+        services,
+        stats_registry,
+        handler_runtime,
+        transport,
+    )
+    .await
+    .map_err(|err| std::io::Error::other(format!("Xray API server on {local_addr} stopped: {err}")))
+}
 
-    let mut server_builder = Server::builder();
+#[cfg(unix)]
+pub async fn serve_grpc_on_unix(
+    listener: tokio::net::UnixListener,
+    services: Vec<ApiService>,
+    stats_registry: Arc<StatsRegistry>,
+    handler_runtime: Arc<HandlerRuntime>,
+    transport: ApiTransportMode,
+) -> std::io::Result<()> {
     if transport.uses_tls() {
-        let tls = build_server_tls_config(&transport)?;
-        server_builder = server_builder
-            .tls_config(tls)
-            .map_err(std::io::Error::other)?;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TLS/mTLS API transport is not supported on Unix domain listeners",
+        ));
     }
+    let incoming = UnixListenerStream::new(listener);
+    serve_grpc_incoming(
+        incoming,
+        services,
+        stats_registry,
+        handler_runtime,
+        transport,
+    )
+    .await
+}
 
-    let mut router: Option<Router> = None;
-    macro_rules! add_service {
-        ($svc:expr) => {
-            router = Some(match router {
-                None => server_builder.add_service($svc),
-                Some(router) => router.add_service($svc),
-            });
-        };
-    }
+/// Result of starting the configured Xray API Commander.
+#[derive(Debug)]
+pub struct ApiServerStartup {
+    pub enabled_services: Vec<ApiService>,
+    pub transport: ApiTransportMode,
+    pub task: tokio::task::JoinHandle<std::io::Result<()>>,
+    pub internal: Option<InternalCommanderHandle>,
+    pub configured_listen: String,
+    pub bound_label: Option<String>,
+}
 
-    if services.contains(&ApiService::Reflection) {
-        let reflection = tonic_reflection::server::Builder::configure()
-            .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
-            .build_v1()
-            .map_err(std::io::Error::other)?;
-        add_service!(reflection);
-    }
-    if services.contains(&ApiService::Stats) {
-        add_service!(StatsServiceServer::new(StatsServiceImpl::new(Arc::clone(
-            &stats_registry,
-        ))));
-    }
-    if services.contains(&ApiService::Handler) {
-        add_service!(HandlerServiceServer::new(HandlerServiceImpl::new(
-            Arc::clone(&handler_runtime)
-        )));
-    }
-    if services.contains(&ApiService::Logger) {
-        let logger = LoggerServiceImpl::from_global().map_err(|err| {
-            std::io::Error::other(format!("LoggerService unavailable: {}", err.message()))
-        })?;
-        add_service!(LoggerServiceServer::new(logger));
-    }
-    if services.contains(&ApiService::Routing) {
-        add_service!(RoutingServiceServer::new(RoutingServiceImpl::new(
-            Arc::clone(&handler_runtime)
-        )));
-    }
-    if services.contains(&ApiService::Observatory) {
-        let observatory =
+pub async fn start_configured_api_server(
+    config_source: &str,
+    xray: &XrayConfig,
+    handler_runtime: Arc<HandlerRuntime>,
+    stats_registry: Arc<StatsRegistry>,
+) -> std::io::Result<Option<ApiServerStartup>> {
+    let Some(api) = xray.api.as_ref() else {
+        return Ok(None);
+    };
+
+    let enabled = parse_enabled_services(&api.services)?;
+    validate_duplicate_api_services(&enabled)?;
+
+    for service in &enabled {
+        if matches!(service, ApiService::Observatory) {
             ObservatoryServiceImpl::new(Arc::clone(&handler_runtime)).map_err(|err| {
                 std::io::Error::other(format!("ObservatoryService unavailable: {}", err.message()))
             })?;
-        add_service!(ObservatoryServiceServer::new(observatory));
+        }
+        if matches!(service, ApiService::Logger) {
+            LoggerServiceImpl::from_global().map_err(|err| {
+                std::io::Error::other(format!("LoggerService unavailable: {}", err.message()))
+            })?;
+        }
     }
 
-    let router = router.ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "api.services did not enable any mountable gRPC service",
-        )
+    let selection = resolve_api_transport_mode(ApiTransportContext {
+        config_source,
+        api_listen: api.listen.as_deref(),
+        xray: Some(xray),
     })?;
+    log_api_transport_selected(&selection);
+    let transport = selection.mode;
 
-    router.serve_with_incoming(incoming).await.map_err(|err| {
-        std::io::Error::other(format!("Xray API server on {local_addr} stopped: {err}"))
-    })
+    let configured_listen = api.listen.clone().unwrap_or_default();
+    if is_internal_commander_listen(api.listen.as_deref()) {
+        let (listener, incoming) = CommanderOutboundListener::pair();
+        handler_runtime
+            .outbound
+            .install_commander_outbound(&api.tag, Arc::clone(&listener))
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let internal = InternalCommanderHandle::new(Arc::clone(&listener));
+        let task = tokio::spawn(serve_grpc_incoming(
+            incoming,
+            enabled.clone(),
+            stats_registry,
+            handler_runtime,
+            transport.clone(),
+        ));
+        log_api_internal_commander_ready(&api.tag, &api.services, &enabled, &transport);
+        return Ok(Some(ApiServerStartup {
+            enabled_services: enabled,
+            transport,
+            task,
+            internal: Some(internal),
+            configured_listen,
+            bound_label: None,
+        }));
+    }
+
+    let bound = bind_api_listen(configured_listen.trim()).await?;
+    let bound_label = bound.log_label();
+    match bound {
+        BoundApiListener::Tcp(listener, bound_addr) => {
+            log_api_listener_ready(
+                configured_listen.trim(),
+                bound_addr,
+                &api.services,
+                &enabled,
+                &transport,
+            );
+            let task = tokio::spawn(serve_grpc_on(
+                listener,
+                enabled.clone(),
+                stats_registry,
+                handler_runtime,
+                transport.clone(),
+            ));
+            Ok(Some(ApiServerStartup {
+                enabled_services: enabled,
+                transport,
+                task,
+                internal: None,
+                configured_listen,
+                bound_label: Some(bound_label),
+            }))
+        }
+        #[cfg(unix)]
+        BoundApiListener::Unix(listener, path) => {
+            info!(
+                api_listen = %configured_listen.trim(),
+                api_unix_path = %path,
+                "Xray API listening on Unix socket"
+            );
+            let task = tokio::spawn(serve_grpc_on_unix(
+                listener,
+                enabled.clone(),
+                stats_registry,
+                handler_runtime,
+                transport.clone(),
+            ));
+            Ok(Some(ApiServerStartup {
+                enabled_services: enabled,
+                transport,
+                task,
+                internal: None,
+                configured_listen,
+                bound_label: Some(bound_label),
+            }))
+        }
+    }
+}
+
+pub fn log_api_internal_commander_ready(
+    api_tag: &str,
+    configured_services: &[String],
+    enabled: &[ApiService],
+    mode: &ApiTransportMode,
+) {
+    let mounted = format_mounted_service_paths(enabled);
+    info!(
+        api_tag = %api_tag,
+        api_mode = "internal-commander",
+        api_mounted_services = %mounted,
+        "Xray API internal Commander mode active (no network listener)"
+    );
+    info!(
+        api_services = ?configured_services,
+        api_mounted_services = %mounted,
+        "Xray API enabled services"
+    );
+    crate::startup_log::eprintln_bootstrap(format!(
+        "API internal Commander outbound tag={api_tag} plaintext gRPC ({mounted})"
+    ));
+    let _ = mode;
 }
 
 /// Start the Xray-compatible gRPC API server (blocks until shutdown).
