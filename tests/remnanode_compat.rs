@@ -52,6 +52,115 @@ fn canonical_unix_http_config_source_detection() {
     ));
 }
 
+#[test]
+fn remnawave_node_332_routing_startup_ignores_s6_cwd_for_geodata() {
+    use prost::Message;
+    use rust_xray::api::proto::common::geodata::domain;
+    use rust_xray::api::proto::common::geodata::{Domain, GeoSite};
+    use rust_xray::config::xray::raw::{RoutingConfig, RoutingRuleObject};
+    use rust_xray::dns::engine::DnsEngine;
+    use rust_xray::routing::RuntimeRouter;
+    use rust_xray::runtime::RuntimeOutboundManager;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn encode_geodata_record(message: &GeoSite) -> Vec<u8> {
+        let body = message.encode_to_vec();
+        let mut out = Vec::with_capacity(1 + 5 + body.len());
+        out.push(0);
+        let mut value = body.len() as u64;
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        out.extend(body);
+        out
+    }
+
+    let asset_dir = TempDir::new().expect("asset dir");
+    let geosite_bytes = encode_geodata_record(&GeoSite {
+        code: "TEST".to_string(),
+        domain: vec![Domain {
+            r#type: domain::Type::Full as i32,
+            value: "remna-geo.example".to_string(),
+            attribute: vec![],
+        }],
+    });
+    std::fs::write(asset_dir.path().join("geosite.dat"), geosite_bytes).expect("geosite.dat");
+
+    let s6_cwd = TempDir::new().expect("s6 cwd");
+    std::fs::write(s6_cwd.path().join("geosite.dat"), b"decoy").expect("cwd decoy");
+
+    let previous_cwd = std::env::current_dir().expect("cwd");
+    let previous_asset = std::env::var("XRAY_LOCATION_ASSET").ok();
+    std::env::set_current_dir(s6_cwd.path()).expect("set cwd");
+    std::env::set_var("XRAY_LOCATION_ASSET", asset_dir.path());
+
+    let mut config: XrayConfig =
+        serde_json::from_str(REMNA_332_TUNNEL_FIXTURE).expect("parse fixture");
+    config.routing = Some(RoutingConfig {
+        domain_strategy: Some("AsIs".to_string()),
+        rules: vec![
+            RoutingRuleObject {
+                outbound_tag: Some("REMNAWAVE_API".to_string()),
+                rule_type: Some("field".to_string()),
+                inbound_tag: Some(serde_json::json!(["REMNAWAVE_API_INBOUND"])),
+                ..Default::default()
+            },
+            RoutingRuleObject {
+                outbound_tag: Some("block".to_string()),
+                rule_type: Some("field".to_string()),
+                extra: BTreeMap::from([(
+                    "domain".to_string(),
+                    serde_json::json!(["geosite:TEST"]),
+                )]),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    validate_xray_panel_config(&config).expect("panel validation");
+
+    let outbound = RuntimeOutboundManager::new();
+    for tag in ["direct", "block", "REMNAWAVE_API"] {
+        outbound
+            .register_startup_outbound(&rust_xray::config::xray::raw::OutboundObject {
+                tag: Some(tag.to_string()),
+                protocol: Some(if tag == "block" {
+                    "blackhole".to_string()
+                } else {
+                    "freedom".to_string()
+                }),
+                extra: Default::default(),
+            })
+            .expect("outbound");
+    }
+
+    RuntimeRouter::new(
+        config.routing.as_ref(),
+        outbound,
+        Arc::new(DnsEngine::with_mux_defaults()),
+        false,
+        None,
+    )
+    .expect("routing startup must resolve geodata via asset dir, not s6 cwd");
+
+    if let Some(value) = previous_asset {
+        std::env::set_var("XRAY_LOCATION_ASSET", value);
+    } else {
+        std::env::remove_var("XRAY_LOCATION_ASSET");
+    }
+    std::env::set_current_dir(previous_cwd).expect("restore cwd");
+}
+
 #[cfg(all(unix, target_os = "linux"))]
 mod linux_tunnel_e2e {
     use super::*;

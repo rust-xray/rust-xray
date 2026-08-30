@@ -1,25 +1,12 @@
 use std::path::{Path, PathBuf};
 
-const ASSET_ENV: &str = "XRAY_LOCATION_ASSET";
+use crate::platform::resolve_xray_asset;
 
 /// Resolve a geodata file path using Xray asset semantics.
 ///
-/// Absolute paths are used as-is. Relative paths are resolved against
-/// `XRAY_LOCATION_ASSET` when set, otherwise the process current directory.
+/// Absolute paths are preserved. Relative filenames use [`resolve_xray_asset`].
 pub fn resolve_geodata_path(file: &str) -> PathBuf {
-    let path = Path::new(file);
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-    if let Ok(asset_root) = std::env::var(ASSET_ENV) {
-        let candidate = Path::new(&asset_root).join(file);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(file)
+    resolve_xray_asset(Path::new(file))
 }
 
 pub fn default_geosite_file() -> &'static str {

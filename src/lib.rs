@@ -12,6 +12,7 @@ pub mod logging;
 pub mod mux;
 pub mod observatory;
 pub mod outbound;
+pub mod platform;
 pub mod proxy;
 pub mod reality;
 pub mod routing;
