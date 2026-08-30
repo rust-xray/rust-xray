@@ -555,7 +555,7 @@ async fn mux_two_domains_route_independently_within_one_session() {
     let frame = read_mux_frame(&mut client).await.expect("mux data");
     assert_eq!(frame.mux_id, 1);
     if let MuxCommand::Data { payload } = frame.command {
-        assert_eq!(payload, b"PONG");
+        assert_eq!(payload.as_ref(), b"PONG");
     } else {
         panic!("expected mux data response");
     }
@@ -588,7 +588,7 @@ async fn mux_two_domains_route_independently_within_one_session() {
     client.write_all(&open_x2).await.expect("write child 3");
     let frame = read_mux_frame(&mut client).await.expect("child3 data");
     if let MuxCommand::Data { payload } = frame.command {
-        assert_eq!(payload, b"PONG");
+        assert_eq!(payload.as_ref(), b"PONG");
     } else {
         panic!("expected mux data response for restored route");
     }

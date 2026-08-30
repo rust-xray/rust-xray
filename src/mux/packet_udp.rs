@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bytes::{Bytes, BytesMut};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::mux::encoder::encode_mux_udp_packet;
 use crate::mux::frame::XUDP_MAX_PACKET_LEN;
+use crate::mux::payload::UdpPacket;
 use crate::mux::route_env::MuxRouteEnv;
 use crate::mux::routed_udp::{RoutedUdpAssociation, MUX_UDP_ASSOCIATION_QUEUE_CAPACITY};
 use crate::mux::state::{mux_actions, MuxFrameActions, MuxOutTx};
@@ -19,17 +21,12 @@ enum MuxUdpSessionStatus {
     Closing,
 }
 
-struct UdpPacket {
-    destination: Option<VlessDestination>,
-    payload: Vec<u8>,
-}
-
 struct MuxUdpSession {
     mux_id: u16,
     status: Mutex<MuxUdpSessionStatus>,
     outbound: Mutex<Option<RoutedUdpAssociation>>,
     uplink_tx: Mutex<mpsc::Sender<UdpPacket>>,
-    downlink_tx: Mutex<mpsc::Sender<(VlessDestination, Vec<u8>)>>,
+    downlink_tx: Mutex<mpsc::Sender<(VlessDestination, Bytes)>>,
     tasks: Mutex<SessionTaskHandles>,
     stats: Option<StatsSession>,
 }
@@ -55,7 +52,7 @@ impl MuxUdpSessionManager {
         &self,
         mux_id: u16,
         destination: VlessDestination,
-        packet: Vec<u8>,
+        packet: Bytes,
         route_env: Option<&MuxRouteEnv>,
         udp_tx: MuxOutTx,
     ) -> std::io::Result<MuxFrameActions> {
@@ -89,7 +86,7 @@ impl MuxUdpSessionManager {
             .await?;
         start_session_workers(&session, uplink_rx, downlink_rx, udp_tx).await;
         if !packet.is_empty() {
-            forward_packet(&session, Some(&destination), &packet).await;
+            forward_packet(&session, Some(&destination), packet).await;
         }
         self.sessions.lock().await.insert(mux_id, session);
         debug!(mux_id, "generic mux udp session active");
@@ -100,7 +97,7 @@ impl MuxUdpSessionManager {
         &self,
         mux_id: u16,
         destination: Option<&VlessDestination>,
-        packet: &[u8],
+        packet: Bytes,
     ) -> std::io::Result<bool> {
         if packet.len() > XUDP_MAX_PACKET_LEN {
             return Err(std::io::Error::new(
@@ -182,7 +179,7 @@ impl MuxUdpSessionManager {
 async fn forward_packet(
     session: &Arc<MuxUdpSession>,
     destination: Option<&VlessDestination>,
-    packet: &[u8],
+    packet: Bytes,
 ) {
     session
         .uplink_tx
@@ -190,7 +187,7 @@ async fn forward_packet(
         .await
         .send(UdpPacket {
             destination: destination.cloned(),
-            payload: packet.to_vec(),
+            payload: packet,
         })
         .await
         .ok();
@@ -199,7 +196,7 @@ async fn forward_packet(
 async fn start_session_workers(
     session: &Arc<MuxUdpSession>,
     mut uplink_rx: mpsc::Receiver<UdpPacket>,
-    mut downlink_rx: mpsc::Receiver<(VlessDestination, Vec<u8>)>,
+    mut downlink_rx: mpsc::Receiver<(VlessDestination, Bytes)>,
     udp_tx: MuxOutTx,
 ) {
     let uplink_session = Arc::clone(session);
@@ -288,14 +285,16 @@ async fn ensure_downlink_task(session: &Arc<MuxUdpSession>) {
     let mux_id = session.mux_id;
     let status = Arc::clone(session);
     let downlink = tokio::spawn(async move {
-        let mut buf = vec![0u8; XUDP_MAX_PACKET_LEN];
+        let mut recv_buf = BytesMut::with_capacity(512);
         loop {
             if *status.status.lock().await != MuxUdpSessionStatus::Active {
                 break;
             }
-            match outbound.recv_from(&mut buf).await {
+            recv_buf.clear();
+            recv_buf.resize(XUDP_MAX_PACKET_LEN, 0);
+            match outbound.recv_from(&mut recv_buf).await {
                 Ok(Some((len, destination))) => {
-                    let payload = buf[..len].to_vec();
+                    let payload = recv_buf.split_to(len).freeze();
                     if downlink_tx.send((destination, payload)).await.is_err() {
                         break;
                     }

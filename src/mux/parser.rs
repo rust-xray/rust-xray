@@ -1,6 +1,7 @@
 use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, trace};
 
@@ -13,6 +14,17 @@ use crate::outbound::freedom::format_vless_destination;
 use crate::vless::protocol::VlessDestination;
 
 pub fn parse_mux_frame(metadata: &[u8], extra: &[u8]) -> std::io::Result<MuxFrame> {
+    let payload_len = mux_data_len(extra).unwrap_or(0);
+    let has_data = metadata.get(3).is_some_and(|opt| opt & MUX_OPT_DATA != 0);
+    let data = if has_data {
+        parse_mux_payload_copy(extra)?
+    } else {
+        Bytes::new()
+    };
+    build_mux_frame(metadata, data, payload_len)
+}
+
+fn build_mux_frame(metadata: &[u8], data: Bytes, payload_len: usize) -> std::io::Result<MuxFrame> {
     if metadata.len() < 4 {
         return Err(Error::new(
             ErrorKind::UnexpectedEof,
@@ -22,13 +34,6 @@ pub fn parse_mux_frame(metadata: &[u8], extra: &[u8]) -> std::io::Result<MuxFram
     let id = u16::from_be_bytes([metadata[0], metadata[1]]);
     let status = MuxStatus::from_wire(metadata[2])?;
     let option = MuxOption::from_wire(metadata[3]);
-    let payload_len = mux_data_len(extra).unwrap_or(0);
-    let data = if option.has_data {
-        parse_mux_data(extra)?
-    } else {
-        Vec::new()
-    };
-
     let command = match status {
         MuxStatus::New => {
             let (destination, consumed) = parse_mux_destination(&metadata[4..])?;
@@ -103,8 +108,7 @@ where
     let mut metadata = vec![0u8; metadata_len];
     reader.read_exact(&mut metadata).await?;
     let has_data = metadata.get(3).is_some_and(|opt| opt & MUX_OPT_DATA != 0);
-    let mut extra = Vec::new();
-    if has_data {
+    let extra = if has_data {
         let mut data_len = [0u8; 2];
         reader.read_exact(&mut data_len).await?;
         let data_len = u16::from_be_bytes(data_len) as usize;
@@ -114,14 +118,29 @@ where
                 format!("invalid mux data length: {data_len}"),
             ));
         }
+        let mut extra = BytesMut::with_capacity(data_len + 2);
+        extra.extend_from_slice(&(data_len as u16).to_be_bytes());
         extra.resize(data_len + 2, 0);
-        extra[..2].copy_from_slice(&(data_len as u16).to_be_bytes());
         reader.read_exact(&mut extra[2..]).await?;
-    }
-    parse_mux_frame(&metadata, &extra)
+        extra.freeze()
+    } else {
+        Bytes::new()
+    };
+    parse_mux_frame_from_bytes(&metadata, &extra)
 }
 
-fn parse_mux_data(extra: &[u8]) -> std::io::Result<Vec<u8>> {
+fn parse_mux_frame_from_bytes(metadata: &[u8], extra: &Bytes) -> std::io::Result<MuxFrame> {
+    let payload_len = mux_data_len(extra).unwrap_or(0);
+    let has_data = metadata.get(3).is_some_and(|opt| opt & MUX_OPT_DATA != 0);
+    let data = if has_data {
+        parse_mux_payload_bytes(extra)?
+    } else {
+        Bytes::new()
+    };
+    build_mux_frame(metadata, data, payload_len)
+}
+
+fn parse_mux_payload_bytes(extra: &Bytes) -> std::io::Result<Bytes> {
     if extra.len() < 2 {
         return Err(Error::new(
             ErrorKind::UnexpectedEof,
@@ -141,7 +160,30 @@ fn parse_mux_data(extra: &[u8]) -> std::io::Result<Vec<u8>> {
             "truncated mux data payload",
         ));
     }
-    Ok(extra[2..2 + len].to_vec())
+    Ok(extra.slice(2..2 + len))
+}
+
+fn parse_mux_payload_copy(extra: &[u8]) -> std::io::Result<Bytes> {
+    if extra.len() < 2 {
+        return Err(Error::new(
+            ErrorKind::UnexpectedEof,
+            "truncated mux data length",
+        ));
+    }
+    let len = u16::from_be_bytes([extra[0], extra[1]]) as usize;
+    if len == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "mux data length must not be zero",
+        ));
+    }
+    if extra.len() < len + 2 {
+        return Err(Error::new(
+            ErrorKind::UnexpectedEof,
+            "truncated mux data payload",
+        ));
+    }
+    Ok(Bytes::copy_from_slice(&extra[2..2 + len]))
 }
 
 fn mux_data_len(extra: &[u8]) -> Option<usize> {

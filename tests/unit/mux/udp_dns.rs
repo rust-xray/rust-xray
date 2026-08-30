@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::net::UdpSocket;
 
@@ -127,7 +128,7 @@ fn udp_dns_relay_with_fake_udp_server_returns_mux_response() {
                         network: MuxNetwork::Udp,
                         destination,
                     },
-                    packet: expected_response,
+                    packet: Bytes::from(expected_response),
                     global_id: None,
                 }
             }
@@ -189,7 +190,7 @@ fn udp_dns_success_close_frame_enabled_by_env() {
                 status: MuxStatus::End,
                 option: MuxOption { has_data: false },
                 command: MuxCommand::Close {
-                    payload: Vec::new()
+                    payload: Bytes::new()
                 }
             }
         );
@@ -268,7 +269,7 @@ fn udp_dns_multiple_packets_same_mux_id_zero_without_close() {
                         network: MuxNetwork::Udp,
                         destination: destination.clone(),
                     },
-                    packet: expected_response.clone(),
+                    packet: Bytes::from(expected_response.clone()),
                     global_id: None,
                 }
             }
@@ -292,7 +293,7 @@ fn udp_dns_multiple_packets_same_mux_id_zero_without_close() {
                         network: MuxNetwork::Udp,
                         destination,
                     },
-                    packet: expected_response,
+                    packet: Bytes::from(expected_response),
                     global_id: None,
                 }
             }
@@ -365,7 +366,7 @@ fn udp_dns_timeout_closes_substream_without_killing_session() {
                 status: MuxStatus::End,
                 option: MuxOption { has_data: false },
                 command: MuxCommand::Close {
-                    payload: Vec::new()
+                    payload: Bytes::new()
                 }
             }
         );
@@ -451,7 +452,7 @@ fn mux_udp_dns_repeat_query_hits_engine_cache() {
                             network: MuxNetwork::Udp,
                             destination: destination.clone(),
                         },
-                        packet: expected_response.clone(),
+                        packet: Bytes::from(expected_response.clone()),
                         global_id: None,
                     }
                 }

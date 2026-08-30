@@ -3,6 +3,7 @@ use crate::vless::config::VlessClient;
 use crate::vless::protocol::encode_vless_response_header;
 use crate::vless::udp_framing::{encode_vless_udp_packet, VlessUdpPacketDecoder};
 use crate::vless::user_manager::VlessUserManager;
+use bytes::Bytes;
 use std::future::Future;
 use std::io::ErrorKind;
 use std::time::Duration;
@@ -90,7 +91,11 @@ fn handle_vless_tcp_inbound_udp_command_is_accepted() {
         let mut decoder = VlessUdpPacketDecoder::new();
         decoder.push(&response[header.len()..]);
         assert_eq!(
-            decoder.next_packet().expect("packet").expect("payload"),
+            decoder
+                .next_packet()
+                .expect("packet")
+                .expect("payload")
+                .as_ref(),
             b"udp-native"
         );
     });
@@ -194,7 +199,7 @@ fn handle_vless_tcp_inbound_mux_single_tcp_substream_roundtrip() {
                 status: MuxStatus::Keep,
                 option: MuxOption { has_data: true },
                 command: MuxCommand::Data {
-                    payload: b"PONG".to_vec()
+                    payload: Bytes::from_static(b"PONG")
                 }
             }
         );
@@ -207,7 +212,7 @@ fn handle_vless_tcp_inbound_mux_single_tcp_substream_roundtrip() {
                 status: MuxStatus::End,
                 option: MuxOption { has_data: false },
                 command: MuxCommand::Close {
-                    payload: Vec::new()
+                    payload: Bytes::new()
                 }
             }
         );

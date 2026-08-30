@@ -1,6 +1,8 @@
 use std::io::{Error, ErrorKind};
 use std::time::Instant;
 
+use bytes::Bytes;
+
 use crate::vless::protocol::VlessDestination;
 
 pub(crate) const MUX_OPT_DATA: u8 = 0x01;
@@ -133,19 +135,19 @@ impl MuxFrame {
 pub enum MuxCommand {
     Tcp {
         destination: MuxDestination,
-        initial_payload: Vec<u8>,
+        initial_payload: Bytes,
     },
     Udp {
         destination: MuxDestination,
-        packet: Vec<u8>,
+        packet: Bytes,
         /// Parsed from trailing New+UDP metadata when exactly 8 bytes remain and any byte is non-zero.
         global_id: Option<MuxGlobalId>,
     },
     Data {
-        payload: Vec<u8>,
+        payload: Bytes,
     },
     Close {
-        payload: Vec<u8>,
+        payload: Bytes,
     },
     KeepAlive,
 }

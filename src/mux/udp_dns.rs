@@ -17,6 +17,7 @@ use crate::mux::frame::{
 use crate::mux::state::{mux_actions, mux_dns_actions, MuxFrameActions};
 use crate::outbound::freedom::format_vless_destination;
 use crate::vless::protocol::VlessDestination;
+use bytes::Bytes;
 
 pub(crate) fn is_mux_udp_dns_request(destination: &VlessDestination, data: &[u8]) -> bool {
     if destination_port(destination) == 53 {
@@ -28,7 +29,7 @@ pub(crate) fn is_mux_udp_dns_request(destination: &VlessDestination, data: &[u8]
 pub(crate) async fn handle_udp_mux_dns_new(
     id: u16,
     destination: VlessDestination,
-    data: Vec<u8>,
+    data: Bytes,
     dns: &Arc<DnsEngine>,
     trace: Option<MuxSessionTrace>,
 ) -> std::io::Result<MuxFrameActions> {

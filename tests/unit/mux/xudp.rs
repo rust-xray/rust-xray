@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -171,7 +172,7 @@ async fn bind_tagged_echo_udp(tag: u8) -> SocketAddr {
     addr
 }
 
-async fn read_udp_response<R>(reader: &mut R) -> Vec<u8>
+async fn read_udp_response<R>(reader: &mut R) -> Bytes
 where
     R: AsyncRead + Unpin,
 {
@@ -199,7 +200,7 @@ async fn xudp_first_global_id_creates_one_association() {
             global_id,
             1,
             destination,
-            b"one".to_vec(),
+            Bytes::from_static(b"one"),
             &route_env,
             udp_tx,
         )
@@ -223,14 +224,21 @@ async fn xudp_same_global_id_reuse_does_not_create_second_association() {
             global_id,
             1,
             destination.clone(),
-            b"a".to_vec(),
+            Bytes::from_static(b"a"),
             &route_env,
             udp_tx.clone(),
         )
         .await
         .expect("first new");
     manager
-        .handle_new(global_id, 2, destination, b"b".to_vec(), &route_env, udp_tx)
+        .handle_new(
+            global_id,
+            2,
+            destination,
+            Bytes::from_static(b"b"),
+            &route_env,
+            udp_tx,
+        )
         .await
         .expect("reattach new");
     assert_eq!(manager.association_count().await, 1);
@@ -249,7 +257,7 @@ async fn xudp_different_global_ids_create_independent_associations() {
             [1, 0, 0, 0, 0, 0, 0, 1],
             1,
             destination.clone(),
-            b"a".to_vec(),
+            Bytes::from_static(b"a"),
             &route_env,
             udp_tx.clone(),
         )
@@ -260,7 +268,7 @@ async fn xudp_different_global_ids_create_independent_associations() {
             [2, 0, 0, 0, 0, 0, 0, 2],
             2,
             destination,
-            b"b".to_vec(),
+            Bytes::from_static(b"b"),
             &route_env,
             udp_tx,
         )
@@ -279,7 +287,14 @@ async fn xudp_detach_marks_expiring_and_sweep_removes() {
     let destination = VlessDestination::Ip(target.ip(), target.port());
     let (udp_tx, _udp_rx) = mpsc::channel(64);
     manager
-        .handle_new(global_id, 7, destination, b"x".to_vec(), &route_env, udp_tx)
+        .handle_new(
+            global_id,
+            7,
+            destination,
+            Bytes::from_static(b"x"),
+            &route_env,
+            udp_tx,
+        )
         .await
         .expect("new");
     manager.detach(global_id, 7).await;
@@ -306,7 +321,7 @@ async fn xudp_reattach_before_expiry_restores_active() {
             global_id,
             1,
             destination.clone(),
-            b"a".to_vec(),
+            Bytes::from_static(b"a"),
             &route_env,
             udp_tx.clone(),
         )
@@ -314,7 +329,14 @@ async fn xudp_reattach_before_expiry_restores_active() {
         .expect("new");
     manager.detach(global_id, 1).await;
     manager
-        .handle_new(global_id, 2, destination, b"b".to_vec(), &route_env, udp_tx)
+        .handle_new(
+            global_id,
+            2,
+            destination,
+            Bytes::from_static(b"b"),
+            &route_env,
+            udp_tx,
+        )
         .await
         .expect("reattach");
     assert_eq!(manager.status_of(global_id).await, Some(XudpStatus::Active));
@@ -335,7 +357,7 @@ async fn xudp_stale_expiry_candidate_cannot_remove_reactivated_association() {
             global_id,
             1,
             destination.clone(),
-            b"first".to_vec(),
+            Bytes::from_static(b"first"),
             &route_env,
             udp_tx.clone(),
         )
@@ -349,7 +371,7 @@ async fn xudp_stale_expiry_candidate_cannot_remove_reactivated_association() {
             global_id,
             2,
             destination,
-            b"reattach".to_vec(),
+            Bytes::from_static(b"reattach"),
             &route_env,
             udp_tx,
         )
@@ -373,7 +395,7 @@ async fn xudp_failed_initial_route_does_not_leave_initializing_association() {
             [16, 16, 16, 16, 16, 16, 16, 16],
             1,
             destination,
-            b"fail".to_vec(),
+            Bytes::from_static(b"fail"),
             &route_env,
             udp_tx,
         )
@@ -396,7 +418,7 @@ async fn xudp_blackhole_does_not_require_external_udp_peer() {
             global_id,
             3,
             destination,
-            b"drop".to_vec(),
+            Bytes::from_static(b"drop"),
             &route_env,
             udp_tx,
         )
@@ -491,7 +513,7 @@ async fn xudp_multiple_downstream_datagrams_emit_multiple_keep_frames() {
             global_id,
             9,
             destination,
-            b"probe".to_vec(),
+            Bytes::from_static(b"probe"),
             &route_env,
             udp_tx,
         )
@@ -545,7 +567,7 @@ async fn xudp_stats_count_payload_once_in_each_direction() {
             [19, 19, 19, 19, 19, 19, 19, 19],
             19,
             destination,
-            payload.to_vec(),
+            Bytes::copy_from_slice(payload),
             &route_env,
             udp_tx,
         )
@@ -584,7 +606,7 @@ async fn xudp_keep_carries_per_packet_destination_metadata() {
             global_id,
             10,
             destination.clone(),
-            b"first".to_vec(),
+            Bytes::from_static(b"first"),
             &route_env,
             udp_tx,
         )
@@ -592,7 +614,7 @@ async fn xudp_keep_carries_per_packet_destination_metadata() {
         .expect("new");
     let alt = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), target.port());
     manager
-        .handle_keep(10, global_id, Some(&alt), b"second")
+        .handle_keep(10, global_id, Some(&alt), Bytes::from_static(b"second"))
         .await
         .expect("keep");
 }
@@ -624,7 +646,7 @@ async fn xudp_live_destinationless_keep_frames_reuse_association() {
         ))
         .await
         .expect("xudp new");
-    assert_eq!(read_udp_response(&mut client).await, b"first");
+    assert_eq!(read_udp_response(&mut client).await.as_ref(), b"first");
     assert_eq!(manager.status_of(global_id).await, Some(XudpStatus::Active));
     assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
 
@@ -634,7 +656,10 @@ async fn xudp_live_destinationless_keep_frames_reuse_association() {
         assert_eq!(u16::from_be_bytes([raw[0], raw[1]]), 4);
         assert_eq!(&raw[2..6], &[0x00, 0x00, 0x02, 0x01]);
         client.write_all(&raw).await.expect("write live keep");
-        assert_eq!(read_udp_response(&mut client).await, payload);
+        assert_eq!(
+            read_udp_response(&mut client).await.as_ref(),
+            payload.as_slice()
+        );
         assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
     }
 
@@ -672,19 +697,22 @@ async fn xudp_destinationless_keep_uses_initial_target_after_explicit_override()
         ))
         .await
         .expect("xudp new");
-    assert_eq!(read_udp_response(&mut client).await, b"Anew-a");
+    assert_eq!(read_udp_response(&mut client).await.as_ref(), b"Anew-a");
 
     client
         .write_all(&encode_mux_keep_udp(40, &destination_b, b"override-b"))
         .await
         .expect("explicit destination keep");
-    assert_eq!(read_udp_response(&mut client).await, b"Boverride-b");
+    assert_eq!(
+        read_udp_response(&mut client).await.as_ref(),
+        b"Boverride-b"
+    );
 
     client
         .write_all(&encode_mux_keep_data(40, b"default-a").expect("destination-less keep"))
         .await
         .expect("destination-less keep");
-    assert_eq!(read_udp_response(&mut client).await, b"Adefault-a");
+    assert_eq!(read_udp_response(&mut client).await.as_ref(), b"Adefault-a");
     assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
     assert_eq!(manager.association_count().await, 1);
 
@@ -767,7 +795,7 @@ async fn xudp_cross_parent_reattach_reuses_association() {
         .await
         .expect("destination-less keep after reattach");
     assert_eq!(
-        read_udp_response(&mut client_b).await,
+        read_udp_response(&mut client_b).await.as_ref(),
         b"destination-less after reattach"
     );
     drop(client_b);
@@ -830,7 +858,7 @@ async fn xudp_initializing_collision_does_not_duplicate_association() {
             global_id,
             1,
             destination.clone(),
-            b"a".to_vec(),
+            Bytes::from_static(b"a"),
             &route_env,
             udp_tx.clone(),
         )
@@ -840,7 +868,14 @@ async fn xudp_initializing_collision_does_not_duplicate_association() {
         .force_status_for_test(global_id, XudpStatus::Initializing)
         .await;
     manager
-        .handle_new(global_id, 2, destination, b"b".to_vec(), &route_env, udp_tx)
+        .handle_new(
+            global_id,
+            2,
+            destination,
+            Bytes::from_static(b"b"),
+            &route_env,
+            udp_tx,
+        )
         .await
         .expect("collision new");
     assert_eq!(manager.association_count().await, 1);
@@ -887,7 +922,7 @@ async fn xudp_broken_association_recreate_dispatches_twice() {
             global_id,
             1,
             destination.clone(),
-            b"first".to_vec(),
+            Bytes::from_static(b"first"),
             &route_env,
             udp_tx_a,
         )
@@ -901,7 +936,7 @@ async fn xudp_broken_association_recreate_dispatches_twice() {
             global_id,
             2,
             destination.clone(),
-            b"reattach".to_vec(),
+            Bytes::from_static(b"reattach"),
             &route_env,
             udp_tx_b,
         )
@@ -917,7 +952,7 @@ async fn xudp_broken_association_recreate_dispatches_twice() {
             global_id,
             3,
             destination,
-            b"after-break".to_vec(),
+            Bytes::from_static(b"after-break"),
             &route_env,
             udp_tx_c,
         )
@@ -1020,7 +1055,7 @@ async fn xudp_server_accepts_packet_at_server_capacity() {
     let target = bind_echo_udp().await;
     let global_id = [13, 13, 13, 13, 13, 13, 13, 13];
     let destination = VlessDestination::Ip(target.ip(), target.port());
-    let payload = vec![0xAB; XUDP_MAX_PACKET_LEN];
+    let payload = Bytes::from(vec![0xAB; XUDP_MAX_PACKET_LEN]);
     let (udp_tx, _udp_rx) = mpsc::channel(64);
     manager
         .handle_new(global_id, 21, destination, payload, &route_env, udp_tx)
@@ -1036,7 +1071,7 @@ async fn xudp_server_rejects_packet_larger_than_server_capacity() {
     let target = bind_echo_udp().await;
     let global_id = [14, 14, 14, 14, 14, 14, 14, 14];
     let destination = VlessDestination::Ip(target.ip(), target.port());
-    let payload = vec![0u8; XUDP_MAX_PACKET_LEN + 1];
+    let payload = Bytes::from(vec![0u8; XUDP_MAX_PACKET_LEN + 1]);
     let (udp_tx, _udp_rx) = mpsc::channel(64);
     let result = manager
         .handle_new(global_id, 22, destination, payload, &route_env, udp_tx)
@@ -1045,4 +1080,79 @@ async fn xudp_server_rejects_packet_larger_than_server_capacity() {
         Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput),
         Ok(_) => panic!("oversize packet rejected"),
     }
+}
+
+#[test]
+fn xudp_recv_buffer_capacity_stabilizes_after_mixed_packet_sizes() {
+    use bytes::BytesMut;
+
+    let sizes = [47usize, 102, 8192, 47, 8192, 60];
+    let mut recv_buf = BytesMut::with_capacity(512);
+    let mut capacities = Vec::new();
+    for &size in &sizes {
+        recv_buf.clear();
+        recv_buf.resize(XUDP_MAX_PACKET_LEN, 0);
+        for (idx, byte) in recv_buf[..size].iter_mut().enumerate() {
+            *byte = (idx & 0xFF) as u8;
+        }
+        let payload = recv_buf.split_to(size).freeze();
+        capacities.push(recv_buf.capacity());
+        assert_eq!(payload.len(), size);
+        drop(payload);
+    }
+    assert!(capacities
+        .iter()
+        .all(|capacity| *capacity <= XUDP_MAX_PACKET_LEN));
+    assert!(
+        *capacities.last().expect("last capacity") <= XUDP_MAX_PACKET_LEN
+    );
+    assert!(
+        capacities
+            .windows(2)
+            .all(|pair| pair[1] <= XUDP_MAX_PACKET_LEN),
+        "recv buffer capacity grew without bound: {capacities:?}"
+    );
+}
+
+#[tokio::test]
+async fn xudp_loopback_stress_completes_without_hang() {
+    let manager = short_expiry_manager();
+    let route_env = test_route_env(freedom_router(), Arc::clone(&manager), false);
+    let target = bind_echo_udp().await;
+    let global_id = [55, 55, 55, 55, 55, 55, 55, 55];
+    let destination = VlessDestination::Ip(target.ip(), target.port());
+    let (mut client, mut server) = duplex(65536);
+    let server_task = tokio::spawn(async move {
+        handle_mux_cool_inbound_with_env(&mut server, DnsEngine::shared(), None, Some(route_env))
+            .await
+    });
+
+    client
+        .write_all(&encode_mux_new_udp_xudp(
+            70,
+            &destination,
+            &global_id,
+            b"seed",
+        ))
+        .await
+        .expect("xudp new");
+    let _ = tokio::time::timeout(Duration::from_secs(2), read_udp_response(&mut client))
+        .await
+        .expect("seed response timeout");
+
+    const PACKETS: usize = 100;
+    for i in 0..PACKETS {
+        let payload = vec![(i & 0xFF) as u8; 47 + (i % 20)];
+        client
+            .write_all(&encode_mux_keep_data(70, &payload).expect("keep"))
+            .await
+            .expect("write keep");
+        let echoed = tokio::time::timeout(Duration::from_secs(2), read_udp_response(&mut client))
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for xudp echo packet {i}"));
+        assert_eq!(echoed.len(), payload.len());
+    }
+
+    drop(client);
+    server_task.await.expect("join").expect("mux relay");
 }

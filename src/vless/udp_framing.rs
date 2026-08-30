@@ -1,5 +1,7 @@
 use std::io::{Error, ErrorKind};
 
+use bytes::{Buf, Bytes, BytesMut};
+
 /// Maximum payload size representable by the VLESS UDP 2-byte length field.
 pub const VLESS_UDP_MAX_PACKET_LEN: usize = u16::MAX as usize;
 
@@ -36,7 +38,7 @@ impl From<VlessUdpFramingError> for Error {
 /// Streaming decoder for `[u16 be length][payload]` VLESS UDP packets.
 #[derive(Debug, Default)]
 pub struct VlessUdpPacketDecoder {
-    buffer: Vec<u8>,
+    buffer: BytesMut,
     eof: bool,
 }
 
@@ -60,7 +62,7 @@ impl VlessUdpPacketDecoder {
     }
 
     /// Returns the next complete packet payload, skipping upstream-style zero-length packets.
-    pub fn next_packet(&mut self) -> Result<Option<Vec<u8>>, VlessUdpFramingError> {
+    pub fn next_packet(&mut self) -> Result<Option<Bytes>, VlessUdpFramingError> {
         loop {
             if self.buffer.len() < 2 {
                 if self.eof && !self.buffer.is_empty() {
@@ -81,12 +83,12 @@ impl VlessUdpPacketDecoder {
                 return Ok(None);
             }
 
+            self.buffer.advance(2);
             let payload = if packet_len == 0 {
-                Vec::new()
+                Bytes::new()
             } else {
-                self.buffer[2..2 + packet_len].to_vec()
+                self.buffer.split_to(packet_len).freeze()
             };
-            self.buffer.drain(0..2 + packet_len);
 
             if payload.is_empty() {
                 continue;

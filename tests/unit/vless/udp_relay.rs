@@ -80,7 +80,10 @@ async fn ipv4_round_trip_single_datagram() {
 
     let mut decoder = VlessUdpPacketDecoder::new();
     decoder.push(&response);
-    assert_eq!(decoder.next_packet().expect("packet").unwrap(), payload);
+    assert_eq!(
+        decoder.next_packet().expect("packet").unwrap().as_ref(),
+        payload
+    );
     echo_task.abort();
 }
 
@@ -98,9 +101,9 @@ async fn multiple_datagrams_one_association() {
 
     let mut decoder = VlessUdpPacketDecoder::new();
     decoder.push(&response);
-    assert_eq!(decoder.next_packet().unwrap().unwrap(), b"one");
-    assert_eq!(decoder.next_packet().unwrap().unwrap(), b"two");
-    assert_eq!(decoder.next_packet().unwrap().unwrap(), b"three");
+    assert_eq!(decoder.next_packet().unwrap().unwrap().as_ref(), b"one");
+    assert_eq!(decoder.next_packet().unwrap().unwrap().as_ref(), b"two");
+    assert_eq!(decoder.next_packet().unwrap().unwrap().as_ref(), b"three");
     echo_task.abort();
 }
 
@@ -238,7 +241,10 @@ async fn domain_destination_resolves_via_system_lookup() {
 
     let mut decoder = VlessUdpPacketDecoder::new();
     decoder.push(&response);
-    assert_eq!(decoder.next_packet().expect("packet").unwrap(), payload);
+    assert_eq!(
+        decoder.next_packet().expect("packet").unwrap().as_ref(),
+        payload
+    );
     echo_task.abort();
 }
 
@@ -253,6 +259,9 @@ async fn reality_compatible_split_relay_uses_single_writer() {
 
     let mut decoder = VlessUdpPacketDecoder::new();
     decoder.push(&response);
-    assert_eq!(decoder.next_packet().expect("packet").unwrap(), payload);
+    assert_eq!(
+        decoder.next_packet().expect("packet").unwrap().as_ref(),
+        payload
+    );
     echo_task.abort();
 }

@@ -3,12 +3,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use bytes::{Bytes, BytesMut};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::mux::encoder::encode_mux_udp_packet;
 use crate::mux::frame::{MuxGlobalId, XUDP_MAX_PACKET_LEN};
+use crate::mux::payload::UdpPacket;
 use crate::mux::route_env::MuxRouteEnv;
 use crate::mux::routed_udp::{RoutedUdpAssociation, MUX_UDP_ASSOCIATION_QUEUE_CAPACITY};
 use crate::mux::state::{mux_actions, MuxFrameActions, MuxOutTx};
@@ -22,11 +24,6 @@ pub(crate) enum XudpStatus {
     Expiring,
 }
 
-struct XudpPacket {
-    destination: Option<VlessDestination>,
-    payload: Vec<u8>,
-}
-
 #[derive(Clone)]
 struct AttachedMux {
     mux_id: u16,
@@ -37,10 +34,10 @@ struct XudpAssociation {
     global_id: MuxGlobalId,
     status: Mutex<XudpStatus>,
     outbound: Mutex<Option<RoutedUdpAssociation>>,
-    uplink_tx: Mutex<mpsc::Sender<XudpPacket>>,
+    uplink_tx: Mutex<mpsc::Sender<UdpPacket>>,
     attached: Mutex<Option<AttachedMux>>,
     expire_at: Mutex<Option<Instant>>,
-    downlink_tx: Mutex<mpsc::Sender<(VlessDestination, Vec<u8>)>>,
+    downlink_tx: Mutex<mpsc::Sender<(VlessDestination, Bytes)>>,
     tasks: Mutex<XudpTaskHandles>,
     stats: Option<StatsSession>,
     healthy: AtomicBool,
@@ -120,7 +117,7 @@ impl XudpManager {
         global_id: MuxGlobalId,
         mux_id: u16,
         destination: VlessDestination,
-        packet: Vec<u8>,
+        packet: Bytes,
         route_env: &MuxRouteEnv,
         udp_tx: MuxOutTx,
     ) -> std::io::Result<MuxFrameActions> {
@@ -171,10 +168,10 @@ impl XudpManager {
         let initialize = async {
             if !first_open {
                 Self::detach_response_target(&association).await;
-                if !Self::forward_packet(&association, Some(&destination), &packet).await {
+                if !Self::forward_packet(&association, Some(&destination), packet.clone()).await {
                     self.rebuild_outbound(&association, &destination, route_env)
                         .await?;
-                    if !Self::forward_packet(&association, Some(&destination), &packet).await {
+                    if !Self::forward_packet(&association, Some(&destination), packet).await {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::BrokenPipe,
                             "rebuilt xudp association rejected first packet",
@@ -184,7 +181,7 @@ impl XudpManager {
             } else {
                 self.create_routed_outbound(&association, &destination, route_env)
                     .await?;
-                if !Self::forward_packet(&association, Some(&destination), &packet).await {
+                if !Self::forward_packet(&association, Some(&destination), packet).await {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::BrokenPipe,
                         "new xudp association rejected first packet",
@@ -213,7 +210,7 @@ impl XudpManager {
         mux_id: u16,
         global_id: MuxGlobalId,
         destination: Option<&VlessDestination>,
-        packet: &[u8],
+        packet: Bytes,
     ) -> std::io::Result<()> {
         if packet.len() > XUDP_MAX_PACKET_LEN {
             return Err(std::io::Error::new(
@@ -374,7 +371,7 @@ impl XudpManager {
     async fn forward_packet(
         association: &Arc<XudpAssociation>,
         destination: Option<&VlessDestination>,
-        packet: &[u8],
+        packet: Bytes,
     ) -> bool {
         if !association.healthy.load(Ordering::Acquire) {
             return false;
@@ -383,9 +380,9 @@ impl XudpManager {
             .uplink_tx
             .lock()
             .await
-            .send(XudpPacket {
+            .send(UdpPacket {
                 destination: destination.cloned(),
-                payload: packet.to_vec(),
+                payload: packet,
             })
             .await
             .is_ok()
@@ -449,8 +446,8 @@ impl XudpManager {
 
 async fn start_association_workers(
     association: &Arc<XudpAssociation>,
-    mut uplink_rx: mpsc::Receiver<XudpPacket>,
-    mut downlink_rx: mpsc::Receiver<(VlessDestination, Vec<u8>)>,
+    mut uplink_rx: mpsc::Receiver<UdpPacket>,
+    mut downlink_rx: mpsc::Receiver<(VlessDestination, Bytes)>,
 ) {
     let uplink_association = Arc::clone(association);
     let uplink = tokio::spawn(async move {
@@ -534,11 +531,13 @@ async fn ensure_downlink_task(association: &Arc<XudpAssociation>) {
     let global_id = association.global_id;
     let association_health = Arc::clone(association);
     let downlink = tokio::spawn(async move {
-        let mut buf = vec![0u8; XUDP_MAX_PACKET_LEN];
+        let mut recv_buf = BytesMut::with_capacity(512);
         loop {
-            match outbound.recv_from(&mut buf).await {
+            recv_buf.clear();
+            recv_buf.resize(XUDP_MAX_PACKET_LEN, 0);
+            match outbound.recv_from(&mut recv_buf).await {
                 Ok(Some((len, destination))) => {
-                    let payload = buf[..len].to_vec();
+                    let payload = recv_buf.split_to(len).freeze();
                     if downlink_tx.send((destination, payload)).await.is_err() {
                         association_health.healthy.store(false, Ordering::Release);
                         break;

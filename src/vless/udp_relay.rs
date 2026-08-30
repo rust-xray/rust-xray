@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -118,7 +119,11 @@ where
                         if len == 0 {
                             continue;
                         }
-                        if downlink_tx.send(Ok(buf[..len].to_vec())).await.is_err() {
+                        if downlink_tx
+                            .send(Ok(Bytes::copy_from_slice(&buf[..len])))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }

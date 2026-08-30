@@ -2,6 +2,7 @@ mod encoder;
 mod frame;
 mod packet_udp;
 mod parser;
+mod payload;
 mod route_env;
 mod routed_udp;
 mod session;
