@@ -59,6 +59,29 @@ fn mux_frame_parser_parses_basic_open_data_close_frames() {
 }
 
 #[test]
+fn mux_frame_parser_preserves_live_destinationless_keep() {
+    for payload_len in [8, 28, 60] {
+        let metadata = [0x00, 0x00, 0x02, 0x01];
+        let payload = vec![payload_len as u8; payload_len];
+        let mut extra = Vec::with_capacity(payload_len + 2);
+        extra.extend_from_slice(&(payload_len as u16).to_be_bytes());
+        extra.extend_from_slice(&payload);
+
+        assert_eq!(
+            parse_mux_frame(&metadata, &extra).unwrap(),
+            MuxFrame {
+                mux_id: 0,
+                status: MuxStatus::Keep,
+                option: MuxOption { has_data: true },
+                command: MuxCommand::Data {
+                    payload: payload.clone(),
+                },
+            }
+        );
+    }
+}
+
+#[test]
 fn malformed_mux_frame_rejected_safely() {
     assert!(parse_mux_frame(&[0, 1, MUX_STATUS_NEW], &[]).is_err());
     assert!(parse_mux_frame(&[0, 1, MUX_STATUS_NEW, MUX_OPT_DATA], &[0]).is_err());

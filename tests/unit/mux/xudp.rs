@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{duplex, AsyncWriteExt};
+use tokio::io::{duplex, AsyncRead, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -11,9 +11,10 @@ use uuid::Uuid;
 use crate::config::xray::raw::OutboundObject;
 use crate::dns::DnsEngine;
 use crate::mux::encoder::{
-    encode_mux_end, encode_mux_keep_udp, encode_mux_new_tcp, encode_mux_new_udp_xudp,
+    encode_mux_end, encode_mux_keep_data, encode_mux_keep_udp, encode_mux_new_tcp,
+    encode_mux_new_udp_xudp,
 };
-use crate::mux::frame::{XUDP_MAX_PACKET_LEN, XUDP_UPSTREAM_CLIENT_MAX_PAYLOAD};
+use crate::mux::frame::{MuxCommand, XUDP_MAX_PACKET_LEN, XUDP_UPSTREAM_CLIENT_MAX_PAYLOAD};
 use crate::mux::parser::read_mux_frame;
 use crate::mux::route_env::MuxRouteEnv;
 use crate::mux::session::handle_mux_cool_inbound_with_env;
@@ -148,6 +149,40 @@ async fn bind_echo_udp() -> SocketAddr {
         }
     });
     addr
+}
+
+async fn bind_tagged_echo_udp(tag: u8) -> SocketAddr {
+    let socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind tagged echo udp");
+    let addr = socket.local_addr().expect("tagged echo addr");
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        loop {
+            let Ok((len, peer)) = socket.recv_from(&mut buf).await else {
+                break;
+            };
+            let mut response = Vec::with_capacity(len + 1);
+            response.push(tag);
+            response.extend_from_slice(&buf[..len]);
+            let _ = socket.send_to(&response, peer).await;
+        }
+    });
+    addr
+}
+
+async fn read_udp_response<R>(reader: &mut R) -> Vec<u8>
+where
+    R: AsyncRead + Unpin,
+{
+    let frame = tokio::time::timeout(Duration::from_secs(1), read_mux_frame(reader))
+        .await
+        .expect("mux response timeout")
+        .expect("mux response");
+    match frame.command {
+        MuxCommand::Udp { packet, .. } => packet,
+        other => panic!("expected mux UDP response, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -557,9 +592,104 @@ async fn xudp_keep_carries_per_packet_destination_metadata() {
         .expect("new");
     let alt = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), target.port());
     manager
-        .handle_keep(10, global_id, alt, b"second".to_vec())
+        .handle_keep(10, global_id, Some(&alt), b"second")
         .await
         .expect("keep");
+}
+
+#[tokio::test]
+async fn xudp_live_destinationless_keep_frames_reuse_association() {
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let manager = short_expiry_manager();
+    let route_env = test_route_env_with_dispatch_counter(
+        freedom_router(),
+        Arc::clone(&manager),
+        Arc::clone(&dispatch_count),
+    );
+    let target = bind_echo_udp().await;
+    let destination = VlessDestination::Ip(target.ip(), target.port());
+    let global_id = [21, 22, 23, 24, 25, 26, 27, 28];
+    let (mut client, mut server) = duplex(8192);
+    let server_task = tokio::spawn(async move {
+        handle_mux_cool_inbound_with_env(&mut server, DnsEngine::shared(), None, Some(route_env))
+            .await
+    });
+
+    client
+        .write_all(&encode_mux_new_udp_xudp(
+            0,
+            &destination,
+            &global_id,
+            b"first",
+        ))
+        .await
+        .expect("xudp new");
+    assert_eq!(read_udp_response(&mut client).await, b"first");
+    assert_eq!(manager.status_of(global_id).await, Some(XudpStatus::Active));
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+
+    for payload_len in [8, 28, 60] {
+        let payload = vec![payload_len as u8; payload_len];
+        let raw = encode_mux_keep_data(0, &payload).expect("destination-less keep");
+        assert_eq!(u16::from_be_bytes([raw[0], raw[1]]), 4);
+        assert_eq!(&raw[2..6], &[0x00, 0x00, 0x02, 0x01]);
+        client.write_all(&raw).await.expect("write live keep");
+        assert_eq!(read_udp_response(&mut client).await, payload);
+        assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+    }
+
+    assert_eq!(manager.association_count().await, 1);
+    drop(client);
+    server_task.await.expect("join").expect("mux relay");
+}
+
+#[tokio::test]
+async fn xudp_destinationless_keep_uses_initial_target_after_explicit_override() {
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let manager = short_expiry_manager();
+    let route_env = test_route_env_with_dispatch_counter(
+        freedom_router(),
+        Arc::clone(&manager),
+        Arc::clone(&dispatch_count),
+    );
+    let target_a = bind_tagged_echo_udp(b'A').await;
+    let target_b = bind_tagged_echo_udp(b'B').await;
+    let destination_a = VlessDestination::Ip(target_a.ip(), target_a.port());
+    let destination_b = VlessDestination::Ip(target_b.ip(), target_b.port());
+    let global_id = [31, 32, 33, 34, 35, 36, 37, 38];
+    let (mut client, mut server) = duplex(8192);
+    let server_task = tokio::spawn(async move {
+        handle_mux_cool_inbound_with_env(&mut server, DnsEngine::shared(), None, Some(route_env))
+            .await
+    });
+
+    client
+        .write_all(&encode_mux_new_udp_xudp(
+            40,
+            &destination_a,
+            &global_id,
+            b"new-a",
+        ))
+        .await
+        .expect("xudp new");
+    assert_eq!(read_udp_response(&mut client).await, b"Anew-a");
+
+    client
+        .write_all(&encode_mux_keep_udp(40, &destination_b, b"override-b"))
+        .await
+        .expect("explicit destination keep");
+    assert_eq!(read_udp_response(&mut client).await, b"Boverride-b");
+
+    client
+        .write_all(&encode_mux_keep_data(40, b"default-a").expect("destination-less keep"))
+        .await
+        .expect("destination-less keep");
+    assert_eq!(read_udp_response(&mut client).await, b"Adefault-a");
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+    assert_eq!(manager.association_count().await, 1);
+
+    drop(client);
+    server_task.await.expect("join").expect("mux relay");
 }
 
 #[tokio::test]
@@ -631,6 +761,14 @@ async fn xudp_cross_parent_reattach_reuses_association() {
             .await
             .expect("response timeout b")
             .is_ok()
+    );
+    client_b
+        .write_all(&encode_mux_keep_data(2, b"destination-less after reattach").unwrap())
+        .await
+        .expect("destination-less keep after reattach");
+    assert_eq!(
+        read_udp_response(&mut client_b).await,
+        b"destination-less after reattach"
     );
     drop(client_b);
     let _ = server_b_task.await;

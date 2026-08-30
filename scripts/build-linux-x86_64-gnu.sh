@@ -6,12 +6,52 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 GLIBC_VERSION="${RUST_XRAY_GLIBC_VERSION:-2.28}"
-RUST_XRAY_PROFILE="${RUST_XRAY_PROFILE:-debug}"
+RUST_XRAY_PROFILE="${RUST_XRAY_PROFILE:-release}"
 RUST_XRAY_STRIP="${RUST_XRAY_STRIP:-1}"
+BIN_NAME="rust-xray"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--debug | --release]
+
+Cross-build ${BIN_NAME} for Linux x86_64 GNU (glibc).
+
+Options:
+  --debug    Build with the debug profile (symbols preserved for gdb/readelf)
+  --release  Build with the release profile (default)
+  -h, --help Show this help
+
+Environment:
+  RUST_XRAY_PROFILE      debug|release (CLI flags override when present)
+  RUST_XRAY_GLIBC_VERSION  glibc baseline for cargo-zigbuild (default: 2.28)
+  RUST_XRAY_STRIP        1 to strip the shipped artifact (default), 0 to skip
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug)
+      RUST_XRAY_PROFILE=debug
+      shift
+      ;;
+    --release)
+      RUST_XRAY_PROFILE=release
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
 RUST_TARGET="x86_64-unknown-linux-gnu"
 ZIGBUILD_TARGET="${RUST_TARGET}.${GLIBC_VERSION}"
 DIST_DIR="$ROOT/dist/linux-x86_64-gnu"
-BIN_NAME="rust-xray"
 
 require_cmd() {
   local name="$1"

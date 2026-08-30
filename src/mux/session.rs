@@ -213,6 +213,32 @@ async fn handle_client_frame(
         packet_sessions,
     } = context;
     let id = frame.mux_id;
+
+    // Keep metadata does not identify the session type. Xray's XUDP writer
+    // deliberately omits the UDP destination after New, leaving only
+    // SessionID, Keep, and Data. Resolve ownership before falling back to the
+    // TCP command handler.
+    if frame.status == MuxStatus::Keep {
+        if let MuxCommand::Data { payload } = &frame.command {
+            if let Some(global_id) = xudp_sessions.global_id(id).await {
+                if let Some(route_env) = route_env {
+                    route_env
+                        .xudp
+                        .handle_keep(id, global_id, None, payload)
+                        .await?;
+                }
+                return Ok(mux_actions(Vec::new()));
+            }
+            if packet_sessions.contains_session(id).await {
+                return if packet_sessions.handle_keep(id, None, payload).await? {
+                    Ok(mux_actions(Vec::new()))
+                } else {
+                    Ok(mux_actions(vec![encode_mux_end(id)]))
+                };
+            }
+        }
+    }
+
     match frame.command {
         MuxCommand::Udp {
             destination,
@@ -249,7 +275,7 @@ async fn handle_client_frame(
                 if let Some(route_env) = route_env {
                     route_env
                         .xudp
-                        .handle_keep(id, global_id, destination.destination, packet)
+                        .handle_keep(id, global_id, Some(&destination.destination), &packet)
                         .await?;
                 }
                 return Ok(mux_actions(Vec::new()));
@@ -280,6 +306,16 @@ async fn handle_client_frame(
                         .await
                 }
                 MuxStatus::Keep => {
+                    if packet_sessions.contains_session(id).await {
+                        return if packet_sessions
+                            .handle_keep(id, Some(&destination.destination), &packet)
+                            .await?
+                        {
+                            Ok(mux_actions(Vec::new()))
+                        } else {
+                            Ok(mux_actions(vec![encode_mux_end(id)]))
+                        };
+                    }
                     if udp_dns::is_mux_udp_dns_request(&destination.destination, &packet) {
                         return udp_dns::handle_udp_mux_dns_new(
                             id,
@@ -290,14 +326,7 @@ async fn handle_client_frame(
                         )
                         .await;
                     }
-                    if packet_sessions
-                        .handle_keep(id, destination.destination, packet)
-                        .await?
-                    {
-                        Ok(mux_actions(Vec::new()))
-                    } else {
-                        Ok(mux_actions(vec![encode_mux_end(id)]))
-                    }
+                    Ok(mux_actions(vec![encode_mux_end(id)]))
                 }
                 _ => Ok(mux_actions(Vec::new())),
             }

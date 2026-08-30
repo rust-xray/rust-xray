@@ -23,7 +23,7 @@ pub(crate) enum XudpStatus {
 }
 
 struct XudpPacket {
-    destination: VlessDestination,
+    destination: Option<VlessDestination>,
     payload: Vec<u8>,
 }
 
@@ -171,10 +171,10 @@ impl XudpManager {
         let initialize = async {
             if !first_open {
                 Self::detach_response_target(&association).await;
-                if !Self::forward_packet(&association, &destination, &packet).await {
+                if !Self::forward_packet(&association, Some(&destination), &packet).await {
                     self.rebuild_outbound(&association, &destination, route_env)
                         .await?;
-                    if !Self::forward_packet(&association, &destination, &packet).await {
+                    if !Self::forward_packet(&association, Some(&destination), &packet).await {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::BrokenPipe,
                             "rebuilt xudp association rejected first packet",
@@ -184,7 +184,7 @@ impl XudpManager {
             } else {
                 self.create_routed_outbound(&association, &destination, route_env)
                     .await?;
-                if !Self::forward_packet(&association, &destination, &packet).await {
+                if !Self::forward_packet(&association, Some(&destination), &packet).await {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::BrokenPipe,
                         "new xudp association rejected first packet",
@@ -212,8 +212,8 @@ impl XudpManager {
         &self,
         mux_id: u16,
         global_id: MuxGlobalId,
-        destination: VlessDestination,
-        packet: Vec<u8>,
+        destination: Option<&VlessDestination>,
+        packet: &[u8],
     ) -> std::io::Result<()> {
         if packet.len() > XUDP_MAX_PACKET_LEN {
             return Err(std::io::Error::new(
@@ -235,7 +235,15 @@ impl XudpManager {
             .as_ref()
             .is_some_and(|attached| attached.mux_id == mux_id)
         {
-            Self::forward_packet(&association, &destination, &packet).await;
+            debug!(
+                path = "xudp",
+                mux_id,
+                global_id = ?global_id,
+                destination_override = destination.is_some(),
+                packet_len = packet.len(),
+                "mux keep routed to existing xudp association"
+            );
+            Self::forward_packet(&association, destination, packet).await;
         }
         Ok(())
     }
@@ -365,7 +373,7 @@ impl XudpManager {
 
     async fn forward_packet(
         association: &Arc<XudpAssociation>,
-        destination: &VlessDestination,
+        destination: Option<&VlessDestination>,
         packet: &[u8],
     ) -> bool {
         if !association.healthy.load(Ordering::Acquire) {
@@ -376,7 +384,7 @@ impl XudpManager {
             .lock()
             .await
             .send(XudpPacket {
-                destination: destination.clone(),
+                destination: destination.cloned(),
                 payload: packet.to_vec(),
             })
             .await
@@ -451,7 +459,10 @@ async fn start_association_workers(
             let Some(outbound) = outbound else {
                 continue;
             };
-            match outbound.send_to(&packet.destination, &packet.payload).await {
+            match outbound
+                .send_to(packet.destination.as_ref(), &packet.payload)
+                .await
+            {
                 Ok(()) => {
                     if let Some(stats) = uplink_association.stats.as_ref() {
                         stats.record_uplink(packet.payload.len() as u64);
@@ -461,7 +472,7 @@ async fn start_association_workers(
                     uplink_association.healthy.store(false, Ordering::Release);
                     warn!(
                         global_id = ?uplink_association.global_id,
-                        destination = ?packet.destination,
+                        destination_override = packet.destination.is_some(),
                         error = %err,
                         "xudp uplink send failed"
                     );

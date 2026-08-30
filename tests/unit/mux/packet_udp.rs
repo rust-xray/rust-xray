@@ -10,7 +10,8 @@ use uuid::Uuid;
 use crate::config::xray::raw::OutboundObject;
 use crate::dns::DnsEngine;
 use crate::mux::encoder::{
-    encode_mux_end, encode_mux_keep_udp, encode_mux_new_tcp, encode_mux_new_udp,
+    encode_mux_end, encode_mux_keep_data, encode_mux_keep_udp, encode_mux_new_tcp,
+    encode_mux_new_udp,
 };
 use crate::mux::parser::read_mux_frame;
 use crate::mux::route_env::MuxRouteEnv;
@@ -160,7 +161,7 @@ async fn generic_mux_udp_new_creates_one_routed_association() {
 }
 
 #[tokio::test]
-async fn generic_mux_udp_keep_reuses_association_without_second_dispatch() {
+async fn generic_mux_udp_destinationless_keep_reuses_association_without_second_dispatch() {
     let dispatch = Arc::new(AtomicUsize::new(0));
     let route_env = test_route_env(freedom_router(), Some(Arc::clone(&dispatch)));
     let echo = bind_echo_udp().await;
@@ -175,10 +176,9 @@ async fn generic_mux_udp_keep_reuses_association_without_second_dispatch() {
         .await
         .expect("new");
     let _ = read_mux_frame(&mut client).await.expect("first response");
-    client
-        .write_all(&encode_mux_keep_udp(2, &destination, b"b"))
-        .await
-        .expect("keep");
+    let keep = encode_mux_keep_data(2, b"b").expect("destination-less keep");
+    assert_eq!(&keep[2..6], &[0x00, 0x02, 0x02, 0x01]);
+    client.write_all(&keep).await.expect("keep");
     let _ = read_mux_frame(&mut client).await.expect("second response");
     assert_eq!(dispatch.load(Ordering::SeqCst), 1);
     drop(client);

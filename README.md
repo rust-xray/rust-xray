@@ -193,7 +193,7 @@ logs may include `client_version`, `unix_time`, and shortId **prefix length** on
 
 ```bash
 cargo fmt
-cargo build
+cargo build --release
 cargo test
 cargo clippy --all-targets
 make live-smoke
@@ -203,7 +203,8 @@ With `make` installed:
 
 ```bash
 make test          # cargo test
-make build         # cargo build
+make build         # cargo build --release
+make build-debug   # cargo build (debug profile)
 make live-smoke    # Xray-core compatibility/stress suite
 make fixture-test  # REALITY fixture integration test
 make fixture-decode       # decode tests/fixtures/reality/basic-xray
@@ -238,18 +239,23 @@ cargo install --locked cargo-zigbuild
 rustup target add x86_64-unknown-linux-gnu
 ```
 
-Build (default: **debug** profile — symbols preserved for gdb/readelf on the
-remote host):
+Build (default: **release** profile):
 
 ```bash
 scripts/build-linux-x86_64-gnu.sh
 # or: make build-linux-x86_64-gnu
 ```
 
+Debug profile (symbols preserved for gdb/readelf on the remote host):
+
+```bash
+scripts/build-linux-x86_64-gnu.sh --debug
+# or: make build-linux-x86_64-gnu-debug
+```
+
 Optional:
 
 ```bash
-RUST_XRAY_PROFILE=release scripts/build-linux-x86_64-gnu.sh
 RUST_XRAY_GLIBC_VERSION=2.31 scripts/build-linux-x86_64-gnu.sh
 RUST_XRAY_STRIP=0 scripts/build-linux-x86_64-gnu.sh
 ```

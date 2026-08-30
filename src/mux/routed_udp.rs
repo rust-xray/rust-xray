@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::UdpSocket;
@@ -24,6 +25,7 @@ pub(crate) enum RoutedUdpAssociation {
     Freedom {
         socket: Arc<UdpSocket>,
         runtime: Arc<OutboundConnectRuntime>,
+        default_target: SocketAddr,
     },
     Blackhole,
 }
@@ -65,9 +67,10 @@ impl RoutedUdpAssociation {
             )
             .await?
             {
-                RoutedOutbound::Udp { socket, .. } => Ok(Self::Freedom {
+                RoutedOutbound::Udp { socket, target } => Ok(Self::Freedom {
                     socket: Arc::new(socket),
                     runtime,
+                    default_target: target,
                 }),
                 RoutedOutbound::Blackhole => Ok(Self::Blackhole),
                 RoutedOutbound::Tcp(_) => Err(std::io::Error::new(
@@ -78,11 +81,12 @@ impl RoutedUdpAssociation {
         }
 
         let runtime = OutboundConnectRuntime::shared();
-        let (socket, _) =
+        let (socket, default_target) =
             connect_udp_destination_with_runtime(destination, Arc::clone(&runtime)).await?;
         Ok(Self::Freedom {
             socket: Arc::new(socket),
             runtime,
+            default_target,
         })
     }
 
@@ -92,13 +96,25 @@ impl RoutedUdpAssociation {
 
     pub(crate) async fn send_to(
         &self,
-        destination: &VlessDestination,
+        destination: Option<&VlessDestination>,
         payload: &[u8],
     ) -> std::io::Result<()> {
         match self {
             Self::Blackhole => Ok(()),
-            Self::Freedom { socket, runtime } => {
-                let target = resolve_udp_target(destination, Arc::clone(runtime)).await?;
+            Self::Freedom {
+                socket,
+                runtime,
+                default_target,
+            } => {
+                // Xray's packet writer uses the association's connected target when
+                // a Keep frame has no UDP destination metadata. An explicit packet
+                // destination is a one-packet override and does not replace it.
+                let target = match destination {
+                    Some(destination) => {
+                        resolve_udp_target(destination, Arc::clone(runtime)).await?
+                    }
+                    None => *default_target,
+                };
                 let sent = socket.send_to(payload, target).await?;
                 if sent != payload.len() {
                     return Err(std::io::Error::new(

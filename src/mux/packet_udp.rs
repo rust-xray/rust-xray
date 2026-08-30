@@ -20,7 +20,7 @@ enum MuxUdpSessionStatus {
 }
 
 struct UdpPacket {
-    destination: VlessDestination,
+    destination: Option<VlessDestination>,
     payload: Vec<u8>,
 }
 
@@ -89,7 +89,7 @@ impl MuxUdpSessionManager {
             .await?;
         start_session_workers(&session, uplink_rx, downlink_rx, udp_tx).await;
         if !packet.is_empty() {
-            forward_packet(&session, &destination, &packet).await;
+            forward_packet(&session, Some(&destination), &packet).await;
         }
         self.sessions.lock().await.insert(mux_id, session);
         debug!(mux_id, "generic mux udp session active");
@@ -99,8 +99,8 @@ impl MuxUdpSessionManager {
     pub async fn handle_keep(
         &self,
         mux_id: u16,
-        destination: VlessDestination,
-        packet: Vec<u8>,
+        destination: Option<&VlessDestination>,
+        packet: &[u8],
     ) -> std::io::Result<bool> {
         if packet.len() > XUDP_MAX_PACKET_LEN {
             return Err(std::io::Error::new(
@@ -119,9 +119,20 @@ impl MuxUdpSessionManager {
             return Ok(false);
         }
         if !packet.is_empty() {
-            forward_packet(&session, &destination, &packet).await;
+            debug!(
+                path = "mux_udp",
+                mux_id,
+                destination_override = destination.is_some(),
+                packet_len = packet.len(),
+                "mux keep routed to existing generic udp association"
+            );
+            forward_packet(&session, destination, packet).await;
         }
         Ok(true)
+    }
+
+    pub(crate) async fn contains_session(&self, mux_id: u16) -> bool {
+        self.sessions.lock().await.contains_key(&mux_id)
     }
 
     pub async fn handle_end(&self, mux_id: u16) -> bool {
@@ -170,7 +181,7 @@ impl MuxUdpSessionManager {
 
 async fn forward_packet(
     session: &Arc<MuxUdpSession>,
-    destination: &VlessDestination,
+    destination: Option<&VlessDestination>,
     packet: &[u8],
 ) {
     session
@@ -178,7 +189,7 @@ async fn forward_packet(
         .lock()
         .await
         .send(UdpPacket {
-            destination: destination.clone(),
+            destination: destination.cloned(),
             payload: packet.to_vec(),
         })
         .await
@@ -201,7 +212,10 @@ async fn start_session_workers(
             let Some(outbound) = outbound else {
                 continue;
             };
-            match outbound.send_to(&packet.destination, &packet.payload).await {
+            match outbound
+                .send_to(packet.destination.as_ref(), &packet.payload)
+                .await
+            {
                 Ok(()) => {
                     if let Some(stats) = uplink_session.stats.as_ref() {
                         stats.record_uplink(packet.payload.len() as u64);
@@ -211,7 +225,7 @@ async fn start_session_workers(
                     *uplink_session.status.lock().await = MuxUdpSessionStatus::Closing;
                     warn!(
                         mux_id = uplink_session.mux_id,
-                        destination = ?packet.destination,
+                        destination_override = packet.destination.is_some(),
                         error = %err,
                         "generic mux udp uplink send failed"
                     );

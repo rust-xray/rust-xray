@@ -1,4 +1,4 @@
-.PHONY: test build build-musl build-linux-x86_64-gnu fixture-test fixture-decode fixture-decode-write capture-clienthello live-smoke
+.PHONY: test build build-debug build-musl build-linux-x86_64-gnu build-linux-x86_64-gnu-debug fixture-test fixture-decode fixture-decode-write capture-clienthello live-smoke
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
 CC_x86_64_unknown_linux_musl=musl-gcc
 
@@ -6,6 +6,9 @@ test:
 	cargo test
 
 build:
+	cargo build --release
+
+build-debug:
 	cargo build
 
 build-musl:
@@ -16,6 +19,9 @@ build-musl-release:
 
 build-linux-x86_64-gnu:
 	bash scripts/build-linux-x86_64-gnu.sh
+
+build-linux-x86_64-gnu-debug:
+	bash scripts/build-linux-x86_64-gnu.sh --debug
 
 live-smoke:
 	bash scripts/live_reality_smoke/run-live-smoke.sh
