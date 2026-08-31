@@ -70,9 +70,10 @@ where
     loop {
         match parse_vless_request(&buffer) {
             Ok((request, consumed)) => {
+                let initial_payload = buffer.split_off(consumed);
                 return Ok(VlessInboundRequest {
                     request,
-                    initial_payload: buffer[consumed..].to_vec(),
+                    initial_payload,
                 });
             }
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
@@ -549,15 +550,19 @@ where
         is_vision_flow(request_flow.as_deref()) && is_vision_flow(auth.flow.as_deref());
     let user_uuid = *auth.id.as_bytes();
     let raw_initial_payload = inbound.initial_payload;
-    let mut initial_payload = raw_initial_payload.clone();
     let mut vision = None;
-
-    if vision_enabled {
+    let initial_payload = if vision_enabled {
         let traffic = new_shared_traffic_state(user_uuid);
-        initial_payload = {
+        let unpadded = {
             let mut state = traffic.lock().expect("vision traffic lock");
             state.unpad_uplink_chunk(&raw_initial_payload)?
         };
+        log_vless_request_diagnostics(
+            inbound.request.version,
+            inbound.request.additional_info.len(),
+            &raw_initial_payload,
+            &unpadded,
+        );
         vision = Some((traffic, user_uuid));
         debug!(
             stage = stages::VLESS_AUTH_OK,
@@ -565,14 +570,16 @@ where
             request_flow = request_flow.as_deref(),
             "vision enabled for vless tcp"
         );
-    }
-
-    log_vless_request_diagnostics(
-        inbound.request.version,
-        inbound.request.additional_info.len(),
-        &raw_initial_payload,
-        &initial_payload,
-    );
+        unpadded
+    } else {
+        log_vless_request_diagnostics(
+            inbound.request.version,
+            inbound.request.additional_info.len(),
+            &raw_initial_payload,
+            &raw_initial_payload,
+        );
+        raw_initial_payload
+    };
 
     debug!(
         stage = stages::VLESS_AUTH_OK,

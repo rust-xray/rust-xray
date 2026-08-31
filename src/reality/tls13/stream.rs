@@ -210,10 +210,10 @@ fn log_application_stream_decrypt_attempt(
     record: &TlsRecord,
 ) {
     let payload_len = u16::try_from(record.payload.len()).unwrap_or(u16::MAX);
-    let aad = tls13_record_aad_bytes(record.legacy_version, payload_len);
-    let aad_hex = hex_encode(&aad);
 
     if debug_tls_record_prefix_enabled() {
+        let aad = tls13_record_aad_bytes(record.legacy_version, payload_len);
+        let aad_hex = hex_encode(&aad);
         let nonce_hex = tls13_record_nonce_hex(&decryptor.keys.iv, decryptor.sequence)
             .unwrap_or_else(|_| "invalid".to_string());
         trace!(
@@ -235,7 +235,6 @@ fn log_application_stream_decrypt_attempt(
             stage = stages::TLS13_APPLICATION_STREAM_DECRYPT,
             direction = TLS13_APPLICATION_STREAM_DIRECTION,
             decrypt_sequence_before = meta.decrypt_sequence,
-            aad_hex,
             legacy_version_hex = meta.legacy_version_hex(),
             record_payload_len = meta.record_payload_len,
             record_total_len = meta.record_total_len,

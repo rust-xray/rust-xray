@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256, Sha384};
+
 use super::*;
 
 const SHA256_EMPTY_DIGEST: [u8; 32] = [
@@ -58,4 +60,151 @@ fn len_tracks_total_transcript_bytes() {
     assert_eq!(transcript.len(), 5);
     transcript.update(b" world");
     assert_eq!(transcript.len(), 11);
+}
+
+#[test]
+fn repeated_digest_does_not_advance_transcript_state() {
+    let mut transcript = TranscriptHash::new(Tls13HashAlgorithm::Sha256);
+    transcript.update(b"client");
+    transcript.update(b"server");
+
+    let first = transcript.digest();
+    let second = transcript.digest();
+    assert_eq!(first, second);
+
+    transcript.update(b"ee");
+    assert_ne!(transcript.digest(), first);
+}
+
+#[test]
+fn streaming_digest_matches_independent_sha256_reference() {
+    let messages: [&[u8]; 4] = [
+        b"client-hello",
+        b"server-hello",
+        b"certificate",
+        b"finished",
+    ];
+    let mut transcript = TranscriptHash::new(Tls13HashAlgorithm::Sha256);
+    for message in messages {
+        transcript.update(message);
+    }
+
+    let mut reference = Sha256::new();
+    for message in messages {
+        reference.update(message);
+    }
+
+    assert_eq!(transcript.digest(), reference.finalize().to_vec());
+}
+
+#[test]
+fn streaming_digest_matches_independent_sha384_reference() {
+    let messages: [&[u8]; 2] = [b"sha384-client", b"sha384-server"];
+    let mut transcript = TranscriptHash::new(Tls13HashAlgorithm::Sha384);
+    for message in messages {
+        transcript.update(message);
+    }
+
+    let mut reference = Sha384::new();
+    for message in messages {
+        reference.update(message);
+    }
+
+    assert_eq!(transcript.digest(), reference.finalize().to_vec());
+}
+
+/// Golden handshake-stage digests for a deterministic fixture sequence (SHA-256).
+#[test]
+fn handshake_stage_digests_match_golden_sha256_vectors() {
+    const CLIENT_HELLO: &[u8] = b"fixture-client-hello-message";
+    const SERVER_HELLO: &[u8] = b"fixture-server-hello-message";
+    const ENCRYPTED_EXTENSIONS: &[u8] = b"fixture-encrypted-extensions";
+    const CERTIFICATE: &[u8] = b"fixture-certificate-message";
+    const CERTIFICATE_VERIFY: &[u8] = b"fixture-certificate-verify";
+    const SERVER_FINISHED: &[u8] = b"fixture-server-finished";
+    const CLIENT_FINISHED: &[u8] = b"fixture-client-finished";
+
+    fn stage_digest(messages: &[&[u8]]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        for message in messages {
+            hasher.update(message);
+        }
+        hasher.finalize().into()
+    }
+
+    let golden = [
+        stage_digest(&[]),
+        stage_digest(&[CLIENT_HELLO]),
+        stage_digest(&[CLIENT_HELLO, SERVER_HELLO]),
+        stage_digest(&[
+            CLIENT_HELLO,
+            SERVER_HELLO,
+            ENCRYPTED_EXTENSIONS,
+            CERTIFICATE,
+            CERTIFICATE_VERIFY,
+        ]),
+        stage_digest(&[
+            CLIENT_HELLO,
+            SERVER_HELLO,
+            ENCRYPTED_EXTENSIONS,
+            CERTIFICATE,
+            CERTIFICATE_VERIFY,
+            SERVER_FINISHED,
+        ]),
+        stage_digest(&[
+            CLIENT_HELLO,
+            SERVER_HELLO,
+            ENCRYPTED_EXTENSIONS,
+            CERTIFICATE,
+            CERTIFICATE_VERIFY,
+            SERVER_FINISHED,
+            CLIENT_FINISHED,
+        ]),
+    ];
+
+    let mut transcript = TranscriptHash::new(Tls13HashAlgorithm::Sha256);
+    assert_eq!(transcript.digest(), golden[0]);
+
+    transcript.update(CLIENT_HELLO);
+    assert_eq!(transcript.digest(), golden[1]);
+
+    transcript.update(SERVER_HELLO);
+    assert_eq!(transcript.digest(), golden[2]);
+
+    transcript.update(ENCRYPTED_EXTENSIONS);
+    transcript.update(CERTIFICATE);
+    transcript.update(CERTIFICATE_VERIFY);
+    assert_eq!(transcript.digest(), golden[3]);
+
+    transcript.update(SERVER_FINISHED);
+    assert_eq!(transcript.digest(), golden[4]);
+
+    transcript.update(CLIENT_FINISHED);
+    assert_eq!(transcript.digest(), golden[5]);
+}
+
+/// Informational transcript throughput benchmark (not run in normal CI).
+#[ignore]
+#[test]
+fn transcript_digest_benchmark() {
+    use std::time::Instant;
+
+    const ITERATIONS: usize = 10_000;
+    const MESSAGE: &[u8] = b"deterministic-handshake-message-bytes-for-benchmark";
+
+    let mut transcript = TranscriptHash::new(Tls13HashAlgorithm::Sha256);
+    transcript.update(MESSAGE);
+    transcript.update(MESSAGE);
+    transcript.update(MESSAGE);
+
+    let start = Instant::now();
+    for _ in 0..ITERATIONS {
+        let digest = transcript.digest();
+        assert_eq!(digest.len(), 32);
+    }
+    let elapsed = start.elapsed();
+    eprintln!(
+        "MEASURED transcript digest bench iters={ITERATIONS} total={elapsed:?} per_digest={:?}",
+        elapsed / ITERATIONS as u32
+    );
 }

@@ -287,7 +287,7 @@ impl RealityTls13ServerState {
             self.accepted.sni.as_deref(),
             certificate_layout,
         )?;
-        let mut cert_der = ephemeral_cert.der.clone();
+        let mut cert_der = ephemeral_cert.der;
         if !certificate_der_has_ed25519_signature_tail(&cert_der) {
             return Err(Error::new(
                 ErrorKind::InvalidData,

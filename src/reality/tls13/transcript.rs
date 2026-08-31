@@ -7,20 +7,27 @@ pub enum Tls13HashAlgorithm {
     Sha384,
 }
 
-/// Running transcript buffer for TLS 1.3 handshake hash input.
+#[derive(Clone)]
+enum TranscriptHasher {
+    Sha256(Sha256),
+    Sha384(Sha384),
+}
+
+/// Incremental TLS 1.3 handshake transcript hasher.
 ///
-/// Handshake messages are accumulated in `buffer`; `digest()` computes the hash
-/// on demand. This can be replaced with a streaming hasher later.
+/// Handshake messages are fed to an internal SHA-256/SHA-384 state. `digest()`
+/// clones that state and finalizes the clone so repeated digests stay stable while
+/// appends continue to update the live transcript.
 #[derive(Clone)]
 pub struct TranscriptHash {
-    algorithm: Tls13HashAlgorithm,
-    buffer: Vec<u8>,
+    hasher: TranscriptHasher,
+    len: usize,
 }
 
 impl std::fmt::Debug for TranscriptHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TranscriptHash")
-            .field("algorithm", &self.algorithm)
+            .field("algorithm", &self.algorithm())
             .field("len", &self.len())
             .finish()
     }
@@ -28,41 +35,41 @@ impl std::fmt::Debug for TranscriptHash {
 
 impl TranscriptHash {
     pub fn new(algorithm: Tls13HashAlgorithm) -> Self {
-        Self {
-            algorithm,
-            buffer: Vec::new(),
-        }
+        let hasher = match algorithm {
+            Tls13HashAlgorithm::Sha256 => TranscriptHasher::Sha256(Sha256::new()),
+            Tls13HashAlgorithm::Sha384 => TranscriptHasher::Sha384(Sha384::new()),
+        };
+        Self { hasher, len: 0 }
     }
 
     pub fn update(&mut self, message: &[u8]) {
-        self.buffer.extend_from_slice(message);
+        self.len += message.len();
+        match &mut self.hasher {
+            TranscriptHasher::Sha256(hasher) => hasher.update(message),
+            TranscriptHasher::Sha384(hasher) => hasher.update(message),
+        }
     }
 
     pub fn digest(&self) -> Vec<u8> {
-        match self.algorithm {
-            Tls13HashAlgorithm::Sha256 => {
-                let mut hasher = Sha256::new();
-                hasher.update(&self.buffer);
-                hasher.finalize().to_vec()
-            }
-            Tls13HashAlgorithm::Sha384 => {
-                let mut hasher = Sha384::new();
-                hasher.update(&self.buffer);
-                hasher.finalize().to_vec()
-            }
+        match &self.hasher {
+            TranscriptHasher::Sha256(hasher) => hasher.clone().finalize().to_vec(),
+            TranscriptHasher::Sha384(hasher) => hasher.clone().finalize().to_vec(),
         }
     }
 
     pub fn algorithm(&self) -> Tls13HashAlgorithm {
-        self.algorithm
+        match self.hasher {
+            TranscriptHasher::Sha256(_) => Tls13HashAlgorithm::Sha256,
+            TranscriptHasher::Sha384(_) => Tls13HashAlgorithm::Sha384,
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.buffer.len()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.buffer.is_empty()
+        self.len == 0
     }
 }
 
