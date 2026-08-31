@@ -17,8 +17,14 @@ pub enum RealityCertificatePatchMode<'a> {
     HmacOnly,
     HmacPlusMldsa65 {
         mldsa65_seed: &'a crate::reality::mldsa65::Mldsa65Seed,
-        client_hello_original: &'a [u8],
-        server_hello_original: &'a [u8],
+        /// ClientHello handshake message bytes (`clientHello.original` upstream).
+        client_hello_handshake: &'a [u8],
+        /// ServerHello handshake message bytes sent on the wire to the client.
+        ///
+        /// Upstream REALITY signs with `hello.original` after in-place key_share patching
+        /// (dest template + generated server key material). rust-xray signs with the
+        /// generated ServerHello handshake message that matches the transcript and wire send.
+        wire_server_hello_handshake: &'a [u8],
     },
 }
 
@@ -31,29 +37,29 @@ pub struct RealityCertificatePatchInput<'a> {
 
 pub fn select_reality_certificate_patch_mode<'a>(
     mldsa65_seed: Option<&'a crate::reality::mldsa65::Mldsa65Seed>,
-    client_hello_original: &'a [u8],
-    server_hello_original: &'a [u8],
+    client_hello_handshake: &'a [u8],
+    wire_server_hello_handshake: &'a [u8],
 ) -> std::io::Result<RealityCertificatePatchMode<'a>> {
     match mldsa65_seed {
         Some(seed) => {
-            if client_hello_original.is_empty() {
+            if client_hello_handshake.is_empty() {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
-                    "REALITY ML-DSA-65 certificate patch requires non-empty ClientHello original bytes",
+                    "REALITY ML-DSA-65 certificate patch requires non-empty ClientHello handshake message",
                 ));
             }
 
-            if server_hello_original.is_empty() {
+            if wire_server_hello_handshake.is_empty() {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
-                    "REALITY ML-DSA-65 certificate patch requires non-empty ServerHello original bytes",
+                    "REALITY ML-DSA-65 certificate patch requires non-empty wire ServerHello handshake message",
                 ));
             }
 
             Ok(RealityCertificatePatchMode::HmacPlusMldsa65 {
                 mldsa65_seed: seed,
-                client_hello_original,
-                server_hello_original,
+                client_hello_handshake,
+                wire_server_hello_handshake,
             })
         }
         None => Ok(RealityCertificatePatchMode::HmacOnly),
@@ -166,8 +172,8 @@ pub fn patch_reality_certificate_der_with_mode(
         }
         RealityCertificatePatchMode::HmacPlusMldsa65 {
             mldsa65_seed,
-            client_hello_original,
-            server_hello_original,
+            client_hello_handshake,
+            wire_server_hello_handshake,
         } => {
             let extension_end = crate::reality::MLDSA65_REALITY_CERT_EXTENSION_DER_OFFSET
                 + crate::reality::MLDSA65_SIGNATURE_LEN;
@@ -192,8 +198,8 @@ pub fn patch_reality_certificate_der_with_mode(
                 mldsa65_seed,
                 input.ed25519_public_key,
                 input.auth_key,
-                client_hello_original,
-                server_hello_original,
+                client_hello_handshake,
+                wire_server_hello_handshake,
             )?;
 
             crate::reality::mldsa65::patch_reality_cert_der_with_mldsa65_signature(

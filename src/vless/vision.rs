@@ -484,15 +484,31 @@ pub struct VisionRelayReader<R> {
     inner: R,
     traffic: SharedTrafficState,
     pending_read: Vec<u8>,
+    direct_relay: Option<crate::reality::tls13::ApplicationStreamDirectRelay>,
 }
 
 impl<R> VisionRelayReader<R> {
-    pub fn new(inner: R, traffic: SharedTrafficState) -> Self {
+    pub fn new(
+        inner: R,
+        traffic: SharedTrafficState,
+        direct_relay: Option<crate::reality::tls13::ApplicationStreamDirectRelay>,
+    ) -> Self {
         Self {
             inner,
             traffic,
             pending_read: Vec::new(),
+            direct_relay,
         }
+    }
+
+    fn maybe_start_direct_relay(&self, signal: Option<VisionDirectStarted>) {
+        if signal != Some(VisionDirectStarted) {
+            return;
+        }
+        if let Some(direct_relay) = self.direct_relay.as_ref() {
+            direct_relay.enable_reader();
+        }
+        info!("vision direct relay started");
     }
 }
 
@@ -536,9 +552,7 @@ where
                         let mut traffic = self.traffic.lock().expect("vision traffic lock");
                         traffic.unpad_uplink_chunk_with_signal(read_buf.filled())?
                     };
-                    if direct_started == Some(VisionDirectStarted) {
-                        info!("vision direct relay started");
-                    }
+                    self.maybe_start_direct_relay(direct_started);
                     if unpadded.is_empty() {
                         continue;
                     }

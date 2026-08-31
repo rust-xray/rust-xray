@@ -6,6 +6,8 @@ use crate::routing::context::{NetworkKind, RouteContext};
 pub struct RouteMatchState<'a> {
     pub ctx: &'a mut RouteContext,
     resolve_on_demand: bool,
+    /// Lowercase target domain computed once per route decision for rule matching.
+    normalized_domain: Option<String>,
 }
 
 impl<'a> RouteMatchState<'a> {
@@ -13,7 +15,17 @@ impl<'a> RouteMatchState<'a> {
         Self {
             ctx,
             resolve_on_demand,
+            normalized_domain: None,
         }
+    }
+
+    /// Returns the lowercase target domain, computing and caching it on first use.
+    /// Original `ctx.target_domain` is preserved for outbound/SNI semantics.
+    pub fn normalized_target_domain(&mut self) -> &str {
+        if self.normalized_domain.is_none() && !self.ctx.target_domain.is_empty() {
+            self.normalized_domain = Some(self.ctx.target_domain.to_ascii_lowercase());
+        }
+        self.normalized_domain.as_deref().unwrap_or("")
     }
 
     pub fn target_ips(&self) -> &[IpAddr] {
@@ -168,6 +180,19 @@ pub struct DomainMatcher {
     regex: Vec<regex::Regex>,
 }
 
+fn normalize_domain_pattern(value: String) -> String {
+    value.to_ascii_lowercase()
+}
+
+fn domain_suffix_match(domain: &str, suffix: &str) -> bool {
+    domain == suffix
+        || domain.ends_with(suffix)
+            && domain
+                .as_bytes()
+                .get(domain.len().wrapping_sub(suffix.len()).wrapping_sub(1))
+                .is_some_and(|byte| *byte == b'.')
+}
+
 impl DomainMatcher {
     pub fn new(
         full: Vec<String>,
@@ -176,9 +201,9 @@ impl DomainMatcher {
         regex: Vec<regex::Regex>,
     ) -> Self {
         Self {
-            full,
-            domain,
-            substr,
+            full: full.into_iter().map(normalize_domain_pattern).collect(),
+            domain: domain.into_iter().map(normalize_domain_pattern).collect(),
+            substr: substr.into_iter().map(normalize_domain_pattern).collect(),
             regex,
         }
     }
@@ -186,31 +211,24 @@ impl DomainMatcher {
 
 impl Condition for DomainMatcher {
     fn matches(&self, state: &mut RouteMatchState<'_>) -> bool {
-        let domain = state.ctx.target_domain.to_ascii_lowercase();
+        let domain = state.normalized_target_domain();
         if domain.is_empty() {
             return false;
         }
-        if self
-            .full
-            .iter()
-            .any(|value| domain == value.to_ascii_lowercase())
-        {
-            return true;
-        }
-        if self.domain.iter().any(|value| {
-            let value = value.to_ascii_lowercase();
-            domain == value || domain.ends_with(&format!(".{value}"))
-        }) {
+        if self.full.iter().any(|value| domain == value) {
             return true;
         }
         if self
-            .substr
+            .domain
             .iter()
-            .any(|value| domain.contains(&value.to_ascii_lowercase()))
+            .any(|value| domain_suffix_match(domain, value))
         {
             return true;
         }
-        self.regex.iter().any(|re| re.is_match(&domain))
+        if self.substr.iter().any(|value| domain.contains(value)) {
+            return true;
+        }
+        self.regex.iter().any(|re| re.is_match(domain))
     }
 }
 

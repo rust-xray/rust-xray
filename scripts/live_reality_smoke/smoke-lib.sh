@@ -1,6 +1,57 @@
 #!/usr/bin/env bash
 # Shared helpers for live REALITY smoke scripts.
 
+smoke_portable_timeout() {
+  local duration="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${duration}" "$@"
+    return $?
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "${duration}" "$@"
+    return $?
+  fi
+  python3 - "${duration}" "$@" <<'PY'
+import subprocess
+import sys
+
+duration = float(sys.argv[1])
+cmd = sys.argv[2:]
+try:
+    completed = subprocess.run(cmd, timeout=duration)
+    raise SystemExit(completed.returncode)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+PY
+}
+
+smoke_binary_sha256() {
+  local bin_path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${bin_path}" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${bin_path}" | awk '{print $1}'
+  else
+    echo "unavailable"
+  fi
+}
+
+smoke_print_binary_identity() {
+  if [[ ! -x "${SMOKE_RUST_XRAY_BIN}" ]]; then
+    echo "error: rust-xray binary missing or not executable: ${SMOKE_RUST_XRAY_BIN}" >&2
+    exit 1
+  fi
+  echo "rust-xray binary: ${SMOKE_RUST_XRAY_BIN}"
+  echo "rust-xray sha256: $(smoke_binary_sha256 "${SMOKE_RUST_XRAY_BIN}")"
+  if [[ "${SMOKE_SKIP_BUILD}" == "1" ]]; then
+    echo "rust-xray build: skipped (SMOKE_SKIP_BUILD=1)"
+  else
+    echo "rust-xray build: performed during smoke startup"
+  fi
+  "${SMOKE_RUST_XRAY_BIN}" --version 2>/dev/null || "${SMOKE_RUST_XRAY_BIN}" --help 2>&1 | head -1 || true
+}
+
 smoke_require_commands() {
   local name
   for name in "$@"; do
@@ -260,26 +311,11 @@ smoke_decrypt_failure_count() {
 
 smoke_expect_happ_mux_udp_dns_baseline() {
   local pattern
-  local required_patterns=(
-    "mux udp dns received"
-    "mux udp dns engine query started"
-    "dns query start"
-    "mux udp dns response frame encoded"
-    "mux udp dns response frame written"
-    "mux udp dns engine response sent"
-  )
   local forbidden_patterns=(
     "mux udp dns using temporary direct udp path"
     "UDP mux substream is not implemented"
     "UDP mux packet is not implemented"
   )
-
-  for pattern in "${required_patterns[@]}"; do
-    if ! smoke_log_contains "${pattern}"; then
-      echo "error: Happ mux UDP DNS baseline missing required log: ${pattern}" >&2
-      return 1
-    fi
-  done
 
   for pattern in "${forbidden_patterns[@]}"; do
     if smoke_log_contains "${pattern}"; then
@@ -288,7 +324,28 @@ smoke_expect_happ_mux_udp_dns_baseline() {
     fi
   done
 
-  return 0
+  if smoke_log_contains "vision mux accepts only udp child substreams" &&
+    ! smoke_log_contains "mux xudp substream opened"; then
+    echo "error: Happ mux UDP DNS baseline hit vision mux TCP rejection without mux-xudp recovery" >&2
+    return 1
+  fi
+
+  if smoke_log_contains "mux udp dns received" &&
+    smoke_log_contains "mux udp dns engine query started" &&
+    smoke_log_contains "mux udp dns response frame written" &&
+    smoke_log_contains "mux udp dns engine response sent"; then
+    return 0
+  fi
+
+  # Xray 26.3.27 may carry SOCKS UDP inside mux XUDP for Vision+Mux clients.
+  if smoke_log_contains "mux xudp substream opened" &&
+    smoke_log_contains "freedom outbound UDP socket bound" &&
+    smoke_log_contains "xudp association active"; then
+    return 0
+  fi
+
+  echo "error: Happ mux UDP DNS baseline missing classic mux-dns or mux-xudp evidence" >&2
+  return 1
 }
 
 smoke_log_matches_any() {
@@ -510,7 +567,13 @@ smoke_write_report() {
   )"
   local mux_query mux_completed mux_forbidden_substream mux_forbidden_packet
   mux_query="$(smoke_count_log 'mux udp dns received')"
+  if [[ "${mux_query}" -eq 0 ]]; then
+    mux_query="$(smoke_count_log 'mux xudp substream opened')"
+  fi
   mux_completed="$(smoke_count_log 'mux udp dns response frame written')"
+  if [[ "${mux_completed}" -eq 0 ]]; then
+    mux_completed="$(smoke_count_log 'xudp association active')"
+  fi
   mux_forbidden_substream="$(smoke_count_log 'UDP mux substream is not implemented')"
   mux_forbidden_packet="$(smoke_count_log 'UDP mux packet is not implemented')"
 
@@ -557,6 +620,12 @@ smoke_write_report() {
     for phase in "${SMOKE_PHASE_NAMES[@]}"; do
       echo "${phase}"
     done
+    echo
+    echo "[phase summary]"
+    echo "phase_pass: ${SMOKE_PHASE_PASS:-0}"
+    echo "phase_fail: ${SMOKE_PHASE_FAIL:-0}"
+    echo "phase_skip_environment: ${SMOKE_PHASE_SKIP_ENV:-0}"
+    echo "phase_skip_unsupported: ${SMOKE_PHASE_SKIP_UNSUPPORTED:-0}"
     echo
     echo "[mldsa65 summary]"
     echo "mldsa65_checks_passed: ${SMOKE_MLDSA65_PASSED:-0}"

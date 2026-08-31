@@ -23,11 +23,28 @@
         },
         "realitySettings": {
           "dest": "www.microsoft.com:443",
-          "serverNames": ["www.microsoft.com"],
+          "serverNames": [
+            "www.microsoft.com"
+          ],
           "privateKey": "MKVGVTTvyEyI7hpl7vP7WKtRXLhH0JieCMHgFdn6A3s",
-          "shortIds": ["0123456789abcdef"]
+          "shortIds": [
+            "0123456789abcdef"
+          ]
         }
       }
     }
-  ]
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "rules": []
+  }
 }

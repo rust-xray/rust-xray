@@ -463,7 +463,7 @@ fn vision_split_relay_overflow_emits_encrypted_fatal_alert() {
         let split = stream.split_for_relay().expect("split");
         let user_uuid = [0x42; 16];
         let traffic = new_shared_traffic_state(user_uuid);
-        let vision_reader = VisionRelayReader::new(split.reader, Arc::clone(&traffic));
+        let vision_reader = VisionRelayReader::new(split.reader, Arc::clone(&traffic), None);
         let vision_writer =
             VisionRelayWriter::new(split.writer, traffic, user_uuid, Some(split.direct_relay));
 
@@ -593,7 +593,7 @@ fn vision_mux_split_overflow_emits_encrypted_fatal_alert() {
         let user_uuid = [0x43; 16];
         let traffic = new_shared_traffic_state(user_uuid);
         let mux_stream = SplitMuxInbound::new(
-            VisionRelayReader::new(split.reader, Arc::clone(&traffic)),
+            VisionRelayReader::new(split.reader, Arc::clone(&traffic), None),
             VisionRelayWriter::new(split.writer, traffic, user_uuid, Some(split.direct_relay)),
             Vec::new(),
         );

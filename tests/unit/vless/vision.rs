@@ -146,6 +146,39 @@ fn parse_vision_flow_from_protobuf_addons() {
     );
 }
 
+#[tokio::test]
+async fn vision_relay_reader_enables_tls_direct_relay_on_direct_command() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use crate::reality::tls13::ApplicationStreamDirectRelay;
+
+    let traffic = new_shared_traffic_state(USER_UUID);
+    let reader_flag = Arc::new(AtomicBool::new(false));
+    let writer_flag = Arc::new(AtomicBool::new(false));
+    let direct_relay =
+        ApplicationStreamDirectRelay::from_shared(Arc::clone(&reader_flag), writer_flag);
+
+    let mut framed = Vec::new();
+    framed.extend_from_slice(&USER_UUID);
+    framed.push(COMMAND_PADDING_DIRECT);
+    framed.extend_from_slice(&(4u16).to_be_bytes());
+    framed.extend_from_slice(&0u16.to_be_bytes());
+    framed.extend_from_slice(b"tail");
+
+    let (mut client, server) = tokio::io::duplex(4096);
+    client.write_all(&framed).await.expect("write framed");
+    drop(client);
+
+    let mut reader = VisionRelayReader::new(server, traffic, Some(direct_relay));
+    let mut out = [0u8; 16];
+    let read = reader.read(&mut out).await.expect("read unpadded");
+    assert_eq!(&out[..read], b"tail");
+    assert!(reader_flag.load(Ordering::SeqCst));
+}
+
 #[test]
 fn xtls_filter_detects_client_hello() {
     let mut state = TrafficState::new(USER_UUID);

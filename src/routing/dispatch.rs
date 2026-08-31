@@ -70,7 +70,11 @@ pub async fn connect_routed_outbound(
     let protocol = outbound_manager.get_protocol(outbound_tag).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("outbound tag not found: {outbound_tag}"),
+            format!(
+                "outbound tag not found: requested_outbound_tag={outbound_tag} default_outbound_tag={:?} registered_outbound_count={}",
+                outbound_manager.default_tag(),
+                outbound_manager.registered_outbound_count(),
+            ),
         )
     })?;
 

@@ -34,13 +34,12 @@ pub fn post_handshake_probe_key(
     }
 }
 
-/// Waits for cached CCS tolerance, returning [`UselessRecordTolerance::DEFAULT`] on timeout/absence.
+/// Waits for cached CCS tolerance after verified client Finished, returning
+/// [`UselessRecordTolerance::DEFAULT`] on timeout/absence.
 ///
-/// **Upstream timing note:** Xray REALITY loads probed `MaxUselessRecords` after verified client
-/// Finished (post-handshake camouflage polling). Rust resolves tolerance with the same bounded wait
-/// immediately before reading client Finished so detected target parity applies during
-/// `readClientFinished` when the cache is ready — wire-visible behavior differs only when probe
-/// completes before the client flight and returns a non-default tier.
+/// **Upstream timing (REALITY @9234c77 tls.go):** `readClientFinished` runs with default
+/// `maxUselessRecords` (32). Probed `GlobalMaxCSSMsgCount` is loaded only after verified
+/// client Finished in the post-handshake loop (alongside Stage 5B record emission).
 pub async fn resolve_ccs_tolerance(key: &PostHandshakeProbeKey) -> UselessRecordTolerance {
     ccs_tolerance_probe_cache()
         .wait_for_ready_tolerance(key, POST_HANDSHAKE_CACHE_WAIT_TIMEOUT)

@@ -91,48 +91,54 @@ pub async fn handle_accepted_reality_client_traced(
         %dest_addr,
         "connecting to dest"
     );
-    let mut dest = timeout(ACCEPTED_DEST_CONNECT_TIMEOUT, TcpStream::connect(dest_addr))
-        .await
-        .map_err(|_| {
-            stage_error(
-                RealityAcceptedStage::DestConnect,
-                std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!(
-                        "connect to {dest_addr} timed out after {:?}",
-                        ACCEPTED_DEST_CONNECT_TIMEOUT
+    let dest_handshake = {
+        let mut dest = timeout(ACCEPTED_DEST_CONNECT_TIMEOUT, TcpStream::connect(dest_addr))
+            .await
+            .map_err(|_| {
+                stage_error(
+                    RealityAcceptedStage::DestConnect,
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "connect to {dest_addr} timed out after {:?}",
+                            ACCEPTED_DEST_CONNECT_TIMEOUT
+                        ),
                     ),
-                ),
-            )
-        })?
-        .map_err(|err| stage_error(RealityAcceptedStage::DestConnect, err))?;
+                )
+            })?
+            .map_err(|err| stage_error(RealityAcceptedStage::DestConnect, err))?;
 
-    debug!(
-        conn_id = mux_trace.map(|trace| trace.conn_id),
-        elapsed_ms_since_conn_start = mux_trace.map(|trace| trace.conn_started.elapsed().as_millis()),
-        stage = stages::DEST_CONNECT_OK,
-        %dest_addr,
-        "dest TCP connected"
-    );
+        debug!(
+            conn_id = mux_trace.map(|trace| trace.conn_id),
+            elapsed_ms_since_conn_start =
+                mux_trace.map(|trace| trace.conn_started.elapsed().as_millis()),
+            stage = stages::DEST_CONNECT_OK,
+            %dest_addr,
+            "dest TCP connected"
+        );
 
-    debug!(
-        stage = stages::DEST_SERVER_HELLO_OBSERVED,
-        %dest_addr,
-        client_hello_record_len = record.raw_record.len(),
-        "forwarding ClientHello record to dest"
-    );
-    let dest_handshake = fetch_dest_handshake(&mut dest, &record.raw_record)
-        .await
-        .map_err(|err| stage_error(RealityAcceptedStage::DestServerHello, err))?;
-    let server_hello_original = dest_handshake.raw_server_bytes.clone();
+        debug!(
+            stage = stages::DEST_SERVER_HELLO_OBSERVED,
+            %dest_addr,
+            client_hello_record_len = record.raw_record.len(),
+            "forwarding ClientHello record to dest"
+        );
+        let dest_handshake = fetch_dest_handshake(&mut dest, &record.raw_record)
+            .await
+            .map_err(|err| stage_error(RealityAcceptedStage::DestServerHello, err))?;
 
-    debug!(
-        stage = stages::DEST_SERVER_HELLO_OBSERVED,
-        %dest_addr,
-        dest_record_count = dest_handshake.records.len(),
-        observed_server_bytes_len = dest_handshake.raw_server_bytes.len(),
-        "dest ServerHello observed"
-    );
+        debug!(
+            stage = stages::DEST_SERVER_HELLO_OBSERVED,
+            %dest_addr,
+            dest_record_count = dest_handshake.records.len(),
+            observed_server_bytes_len = dest_handshake.raw_server_bytes.len(),
+            "dest ServerHello observed; closing target observation socket"
+        );
+
+        // Observation data is copied into `dest_handshake`; drop the outbound target TCP socket.
+        drop(dest);
+        dest_handshake
+    };
 
     let mut state = prepare_reality_tls13_state(dest_handshake, accepted)
         .map_err(|err| stage_error(RealityAcceptedStage::Tls13State, err))?;
@@ -147,8 +153,6 @@ pub async fn handle_accepted_reality_client_traced(
         client,
         &client_hello_payload,
         &record.handshake_message,
-        &record.raw_record,
-        &server_hello_original,
         mldsa65_seed,
         state,
     )

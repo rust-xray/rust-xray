@@ -1103,9 +1103,7 @@ fn xudp_recv_buffer_capacity_stabilizes_after_mixed_packet_sizes() {
     assert!(capacities
         .iter()
         .all(|capacity| *capacity <= XUDP_MAX_PACKET_LEN));
-    assert!(
-        *capacities.last().expect("last capacity") <= XUDP_MAX_PACKET_LEN
-    );
+    assert!(*capacities.last().expect("last capacity") <= XUDP_MAX_PACKET_LEN);
     assert!(
         capacities
             .windows(2)

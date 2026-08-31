@@ -15,13 +15,35 @@
         ],
         "decryption": "none",
         "fallbacks": [
-          {"dest": 19501},
-          {"name": "name-fallback.test", "dest": 19502},
-          {"path": "/smoke-path", "dest": 19503},
-          {"name": "proxy-fallback.test", "dest": 19504, "xver": 1},
-          {"alpn": "http/1.1", "dest": 19505},
-          {"alpn": "h2", "dest": 19506},
-          {"name": "proxy-v2-fallback.test", "dest": 19507, "xver": 2}
+          {
+            "dest": 19501
+          },
+          {
+            "name": "name-fallback.test",
+            "dest": 19502
+          },
+          {
+            "path": "/smoke-path",
+            "dest": 19503
+          },
+          {
+            "name": "proxy-fallback.test",
+            "dest": 19504,
+            "xver": 1
+          },
+          {
+            "alpn": "http/1.1",
+            "dest": 19505
+          },
+          {
+            "alpn": "h2",
+            "dest": 19506
+          },
+          {
+            "name": "proxy-v2-fallback.test",
+            "dest": 19507,
+            "xver": 2
+          }
         ]
       },
       "streamSettings": {
@@ -29,12 +51,29 @@
         "security": "reality",
         "realitySettings": {
           "dest": "www.microsoft.com:443",
-          "serverNames": ["www.microsoft.com"],
+          "serverNames": [
+            "www.microsoft.com"
+          ],
           "privateKey": "MKVGVTTvyEyI7hpl7vP7WKtRXLhH0JieCMHgFdn6A3s",
-          "shortIds": ["0123456789abcdef"],
+          "shortIds": [
+            "0123456789abcdef"
+          ],
           "maxTimeDiff": 0
         }
       }
     }
-  ]
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "rules": []
+  }
 }

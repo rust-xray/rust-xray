@@ -519,3 +519,62 @@ fn prepare_reality_tls13_state_produces_server_handshake_records() {
         server_hello_record.len() + encrypted_handshake_records.len() > server_hello_record.len()
     );
 }
+
+fn dummy_client_hello_tls_record() -> Vec<u8> {
+    let body = vec![0x01, 0x00, 0x00, 0x04, 0x03, 0x03, 0x00, 0x00];
+    let mut record = Vec::with_capacity(5 + body.len());
+    record.push(0x16);
+    record.extend_from_slice(&[0x03, 0x01]);
+    record.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    record.extend_from_slice(&body);
+    record
+}
+
+#[tokio::test]
+async fn fetch_dest_handshake_closes_target_socket_when_client_drops() {
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+
+    let sh_record = handshake_record(&valid_tls13_x25519_server_hello_message());
+    let ccs = build_change_cipher_spec_record();
+    let mut target_response = sh_record.raw.clone();
+    target_response.extend_from_slice(&ccs);
+
+    let (peer_closed_tx, peer_closed_rx) = oneshot::channel();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 4096];
+        let _ = socket.read(&mut buf).await;
+        socket
+            .write_all(&target_response)
+            .await
+            .expect("write flight");
+        let mut drain = [0u8; 256];
+        loop {
+            match socket.read(&mut drain).await {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        let _ = peer_closed_tx.send(());
+    });
+
+    let mut dest = TcpStream::connect(addr).await.expect("connect");
+    let client_hello = dummy_client_hello_tls_record();
+    fetch_dest_handshake(&mut dest, &client_hello)
+        .await
+        .expect("observation");
+    drop(dest);
+
+    tokio::time::timeout(Duration::from_secs(2), peer_closed_rx)
+        .await
+        .expect("timed out waiting for target socket closure")
+        .expect("target side closed channel");
+}

@@ -251,8 +251,8 @@ fn hmac_plus_mldsa65_patch_mode_patches_der() {
         auth_key: &auth_key,
         mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
             mldsa65_seed: &seed,
-            client_hello_original: &client_hello,
-            server_hello_original: &server_hello,
+            client_hello_handshake: &client_hello,
+            wire_server_hello_handshake: &server_hello,
         },
     })
     .expect("ML-DSA patch");
@@ -306,8 +306,8 @@ fn mldsa65_live_patch_error_does_not_fallback_to_hmac() {
         auth_key: &auth_key,
         mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
             mldsa65_seed: &seed,
-            client_hello_original: &client_hello,
-            server_hello_original: &server_hello,
+            client_hello_handshake: &client_hello,
+            wire_server_hello_handshake: &server_hello,
         },
     })
     .unwrap_err();
@@ -340,8 +340,8 @@ fn seed_patch_error_does_not_fallback_to_hmac_only() {
         auth_key: &auth_key,
         mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
             mldsa65_seed: &seed,
-            client_hello_original: &client_hello,
-            server_hello_original: &server_hello,
+            client_hello_handshake: &client_hello,
+            wire_server_hello_handshake: &server_hello,
         },
     })
     .unwrap_err();
@@ -375,8 +375,8 @@ fn mldsa65_live_patch_does_not_fallback_to_hmac_when_placeholder_missing() {
         auth_key: &auth_key,
         mode: RealityCertificatePatchMode::HmacPlusMldsa65 {
             mldsa65_seed: &seed,
-            client_hello_original: &client_hello,
-            server_hello_original: &server_hello,
+            client_hello_handshake: &client_hello,
+            wire_server_hello_handshake: &server_hello,
         },
     })
     .unwrap_err();
@@ -407,4 +407,69 @@ fn no_seed_path_does_not_require_mldsa65_placeholder() {
     .expect("HMAC-only patch works without ML-DSA placeholder");
 
     assert_ne!(cert_der, cert.der);
+}
+
+#[test]
+fn mldsa65_patch_signs_wire_server_hello_not_observed_dest_template() {
+    use crate::reality::build_reality_mldsa65_message;
+    use crate::reality::mldsa65::sign_reality_cert_extension;
+
+    let seed = decode_mldsa65_seed(Some(VALID_SEED_B64), TEST_PRIVATE_KEY)
+        .expect("valid seed")
+        .expect("non-empty seed");
+    let client_hello_handshake = [0x01, 0x00, 0x00, 0x02, 0x03, 0x03];
+    let observed_dest_server_hello = [0x02, 0x00, 0x00, 0x10, 0x03, 0x03, 0xDE, 0xAD];
+    let wire_server_hello_handshake = [0x02, 0x00, 0x00, 0x10, 0x03, 0x03, 0xBE, 0xEF];
+    assert_ne!(observed_dest_server_hello, wire_server_hello_handshake);
+
+    let cert = generate_reality_ephemeral_ed25519_certificate_with_layout(
+        Some("example.com"),
+        RealityEphemeralCertificateLayout::Mldsa65ExtensionPlaceholder,
+    )
+    .expect("ML-DSA certificate");
+    let public_key = cert.public_key_raw;
+    let auth_key = [0x33; 32];
+
+    let wire_message = build_reality_mldsa65_message(
+        &auth_key,
+        &public_key,
+        &client_hello_handshake,
+        &wire_server_hello_handshake,
+    );
+    let observed_message = build_reality_mldsa65_message(
+        &auth_key,
+        &public_key,
+        &client_hello_handshake,
+        &observed_dest_server_hello,
+    );
+    assert_ne!(wire_message, observed_message);
+
+    let mode = select_reality_certificate_patch_mode(
+        Some(&seed),
+        &client_hello_handshake,
+        &wire_server_hello_handshake,
+    )
+    .expect("patch mode");
+    assert!(matches!(
+        mode,
+        RealityCertificatePatchMode::HmacPlusMldsa65 { .. }
+    ));
+
+    let signature = sign_reality_cert_extension(
+        &seed,
+        &public_key,
+        &auth_key,
+        &client_hello_handshake,
+        &wire_server_hello_handshake,
+    )
+    .expect("sign");
+    let wrong_signature = sign_reality_cert_extension(
+        &seed,
+        &public_key,
+        &auth_key,
+        &client_hello_handshake,
+        &observed_dest_server_hello,
+    )
+    .expect("sign observed");
+    assert_ne!(signature, wrong_signature);
 }

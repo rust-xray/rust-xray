@@ -1156,6 +1156,12 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
             })?;
     }
 
+    if handler_runtime.outbound.registered_outbound_count() == 0 {
+        warn!(
+            "routing active with zero registered outbounds; routed traffic will fail until an outbound is added"
+        );
+    }
+
     for inbound in &server_config.inbounds {
         let inbound_tag = inbound
             .inbound

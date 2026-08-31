@@ -1455,7 +1455,8 @@ where
     } = stream.split_for_relay()?;
     let relay_started = Instant::now();
     let relay_result = if let Some((traffic, user_uuid)) = vision {
-        let vision_reader = VisionRelayReader::new(reader, Arc::clone(&traffic));
+        let vision_reader =
+            VisionRelayReader::new(reader, Arc::clone(&traffic), Some(direct_relay.clone()));
         let vision_writer =
             VisionRelayWriter::new(writer, traffic, user_uuid, Some(direct_relay.clone()));
         relay_split_bidirectional_with_overflow_alert(vision_reader, vision_writer, outbound).await
@@ -1527,7 +1528,7 @@ where
 
     let mux_result = if let Some((traffic, user_uuid)) = prepared.vision {
         let mut mux_stream = SplitMuxInbound::new(
-            VisionRelayReader::new(reader, Arc::clone(&traffic)),
+            VisionRelayReader::new(reader, Arc::clone(&traffic), Some(direct_relay.clone())),
             VisionRelayWriter::new(writer, traffic, user_uuid, Some(direct_relay)),
             prepared.initial_payload,
         );

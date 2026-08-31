@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex, RwLock};
 
+use tracing::debug;
+
 use crate::api::proto::common::serial::TypedMessage;
 use crate::config::xray::raw::RoutingConfig;
 use crate::dns::engine::DnsEngine;
@@ -105,19 +107,38 @@ impl RuntimeRouter {
         &self.dns
     }
 
-    pub async fn pick_route(&self, ctx: RouteContext) -> Result<RouteDecision, RouteError> {
+    pub async fn pick_route(&self, mut ctx: RouteContext) -> Result<RouteDecision, RouteError> {
         let table = Arc::clone(&*self.table.read().expect("router table lock"));
-        self.pick_route_with_table(&table, ctx).await
+        self.pick_route_with_table(&table, &mut ctx).await
     }
 
     pub async fn pick_route_with_default(
         &self,
-        ctx: RouteContext,
+        mut ctx: RouteContext,
     ) -> Result<RouteDecision, RouteError> {
-        match self.pick_route(ctx.clone()).await {
+        let table = Arc::clone(&*self.table.read().expect("router table lock"));
+        match self.pick_route_with_table(&table, &mut ctx).await {
             Ok(decision) => Ok(decision),
             Err(RouteError::NoClue) => {
-                let outbound_tag = self.outbound.default_tag().ok_or(RouteError::NoClue)?;
+                let Some(outbound_tag) = self.outbound.default_tag() else {
+                    debug!(
+                        inbound_tag = %ctx.inbound_tag,
+                        network = ctx.network.as_str(),
+                        target_domain = %ctx.target_domain,
+                        target_port = ctx.target_port,
+                        outbound_count = self.outbound.registered_outbound_count(),
+                        "routing: no matching rule and no default outbound registered"
+                    );
+                    return Err(RouteError::NoClue);
+                };
+                debug!(
+                    inbound_tag = %ctx.inbound_tag,
+                    network = ctx.network.as_str(),
+                    target_domain = %ctx.target_domain,
+                    target_port = ctx.target_port,
+                    outbound_tag = %outbound_tag,
+                    "routing: no matching rule; using default outbound"
+                );
                 Ok(RouteDecision {
                     context: ctx,
                     outbound_tag,
@@ -216,21 +237,21 @@ impl RuntimeRouter {
     async fn pick_route_with_table(
         &self,
         table: &RouteTable,
-        mut ctx: RouteContext,
+        ctx: &mut RouteContext,
     ) -> Result<RouteDecision, RouteError> {
         let resolve_on_demand =
             self.domain_strategy == DomainStrategy::IpOnDemand && !ctx.skip_dns_resolve;
 
-        if let Some(decision) = self.match_rules(table, &mut ctx, resolve_on_demand).await? {
+        if let Some(decision) = self.match_rules(table, ctx, resolve_on_demand).await? {
             return Ok(decision);
         }
 
         if self.domain_strategy == DomainStrategy::IpIfNonMatch
             && !ctx.target_domain.is_empty()
             && !ctx.skip_dns_resolve
-            && self.resolve_target_ips(&mut ctx).await
+            && self.resolve_target_ips(ctx).await
         {
-            if let Some(decision) = self.match_rules(table, &mut ctx, false).await? {
+            if let Some(decision) = self.match_rules(table, ctx, false).await? {
                 return Ok(decision);
             }
         }
@@ -298,15 +319,15 @@ fn resolve_rule_target(
     table: &RouteTable,
     outbound_group_tags: &mut Vec<String>,
 ) -> Result<String, RouteError> {
-    if let Some(tag) = rule.outbound_tag.as_deref() {
-        return Ok(tag.to_string());
+    if let Some(tag) = &rule.outbound_tag {
+        return Ok(tag.clone());
     }
-    if let Some(balancer_tag) = rule.balancer_tag.as_deref() {
+    if let Some(balancer_tag) = &rule.balancer_tag {
         let balancer = table
             .balancers
             .get(balancer_tag)
-            .ok_or_else(|| RouteError::BalancerNotFound(balancer_tag.to_string()))?;
-        outbound_group_tags.push(balancer_tag.to_string());
+            .ok_or_else(|| RouteError::BalancerNotFound(balancer_tag.clone()))?;
+        outbound_group_tags.push(balancer_tag.clone());
         return balancer.pick_outbound().map_err(RouteError::Balancer);
     }
     Err(RouteError::NoClue)

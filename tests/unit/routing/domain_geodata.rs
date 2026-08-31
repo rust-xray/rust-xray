@@ -26,6 +26,19 @@ fn matches(matcher: &DomainMatcher, domain: &str) -> bool {
 }
 
 #[test]
+fn domain_matches_case_insensitive_candidate() {
+    let matcher = DomainMatcher::new(vec![], vec!["example.com".to_string()], vec![], vec![]);
+    assert!(matches(&matcher, "WWW.Example.COM"));
+    assert!(matches(&matcher, "example.com"));
+}
+
+#[test]
+fn domain_rule_patterns_normalized_at_compile_time() {
+    let matcher = DomainMatcher::new(vec![], vec!["Example.COM".to_string()], vec![], vec![]);
+    assert!(matches(&matcher, "www.example.com"));
+}
+
+#[test]
 fn substr_matches_substring() {
     let matcher = DomainMatcher::new(vec![], vec![], vec!["google".to_string()], vec![]);
     assert!(matches(&matcher, "www.google.com"));

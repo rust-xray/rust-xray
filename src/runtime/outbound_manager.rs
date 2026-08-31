@@ -39,19 +39,60 @@ pub struct OutboundEntry {
 }
 
 #[derive(Debug, Default)]
+struct OutboundRegistry {
+    entries: HashMap<String, OutboundEntry>,
+    /// Explicit registration order (first registered outbound is the initial default).
+    registration_order: Vec<String>,
+    default_tag: Option<String>,
+}
+
+impl OutboundRegistry {
+    fn first_registered_tag(&self) -> Option<String> {
+        self.registration_order
+            .iter()
+            .find(|tag| self.entries.contains_key(*tag))
+            .cloned()
+    }
+
+    fn reassign_default_if_removed(&mut self, removed_tag: &str) {
+        if self.default_tag.as_deref() == Some(removed_tag) {
+            self.default_tag = self.first_registered_tag();
+        }
+    }
+
+    fn append_registration(&mut self, tag: String) {
+        if !self
+            .registration_order
+            .iter()
+            .any(|existing| existing == &tag)
+        {
+            self.registration_order.push(tag);
+        }
+    }
+
+    fn remove_registration(&mut self, tag: &str) {
+        self.registration_order.retain(|existing| existing != tag);
+    }
+}
+
+#[derive(Debug)]
 pub struct RuntimeOutboundManager {
-    entries: RwLock<HashMap<String, OutboundEntry>>,
-    default_tag: RwLock<Option<String>>,
+    registry: RwLock<OutboundRegistry>,
     commander_listener: RwLock<Option<Arc<CommanderOutboundListener>>>,
+}
+
+impl Default for RuntimeOutboundManager {
+    fn default() -> Self {
+        Self {
+            registry: RwLock::new(OutboundRegistry::default()),
+            commander_listener: RwLock::new(None),
+        }
+    }
 }
 
 impl RuntimeOutboundManager {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            entries: RwLock::new(HashMap::new()),
-            default_tag: RwLock::new(None),
-            commander_listener: RwLock::new(None),
-        })
+        Arc::new(Self::default())
     }
 
     pub fn register_startup_outbound(
@@ -79,32 +120,23 @@ impl RuntimeOutboundManager {
                 message: "outbound tag is required".to_string(),
             });
         }
-        let removed = self
+
+        let mut registry = self.registry.write().expect("outbound registry lock");
+        registry
             .entries
-            .write()
-            .expect("outbound entries lock")
             .remove(tag)
             .ok_or_else(|| OutboundManagerError::NotFound {
                 tag: tag.to_string(),
             })?;
-
-        let mut default = self.default_tag.write().expect("default outbound tag lock");
-        if default.as_deref() == Some(tag) {
-            *default = self
-                .entries
-                .read()
-                .expect("outbound entries lock")
-                .keys()
-                .next()
-                .cloned();
-        }
-        let _ = removed;
+        registry.remove_registration(tag);
+        registry.reassign_default_if_removed(tag);
         Ok(())
     }
 
     pub fn list_outbounds(&self) -> Vec<OutboundHandlerConfig> {
-        let entries = self.entries.read().expect("outbound entries lock");
-        let mut outbounds: Vec<_> = entries
+        let registry = self.registry.read().expect("outbound registry lock");
+        let mut outbounds: Vec<_> = registry
+            .entries
             .values()
             .filter(|entry| entry.protocol != OutboundProtocol::Commander)
             .map(|entry| entry.handler_config.clone())
@@ -114,9 +146,10 @@ impl RuntimeOutboundManager {
     }
 
     pub fn is_commander_outbound(&self, tag: &str) -> bool {
-        self.entries
+        self.registry
             .read()
-            .expect("outbound entries lock")
+            .expect("outbound registry lock")
+            .entries
             .get(tag)
             .is_some_and(|entry| entry.protocol == OutboundProtocol::Commander)
     }
@@ -142,8 +175,9 @@ impl RuntimeOutboundManager {
         }
 
         let config = encode_commander_outbound(&tag);
-        let mut entries = self.entries.write().expect("outbound entries lock");
-        entries.insert(
+        let mut registry = self.registry.write().expect("outbound registry lock");
+        let replacing = registry.entries.contains_key(&tag);
+        registry.entries.insert(
             tag.clone(),
             OutboundEntry {
                 tag: tag.clone(),
@@ -151,10 +185,11 @@ impl RuntimeOutboundManager {
                 handler_config: config,
             },
         );
-
-        let mut default = self.default_tag.write().expect("default outbound tag lock");
-        if default.is_none() {
-            *default = Some(tag);
+        if !replacing {
+            registry.append_registration(tag.clone());
+        }
+        if registry.default_tag.is_none() {
+            registry.default_tag = Some(tag);
         }
         *self
             .commander_listener
@@ -164,37 +199,58 @@ impl RuntimeOutboundManager {
     }
 
     pub fn contains(&self, tag: &str) -> bool {
-        self.entries
+        self.registry
             .read()
-            .expect("outbound entries lock")
+            .expect("outbound registry lock")
+            .entries
             .contains_key(tag)
     }
 
     pub fn get_protocol(&self, tag: &str) -> Option<OutboundProtocol> {
-        self.entries
+        self.registry
             .read()
-            .expect("outbound entries lock")
+            .expect("outbound registry lock")
+            .entries
             .get(tag)
             .map(|entry| entry.protocol.clone())
     }
 
     pub fn default_tag(&self) -> Option<String> {
-        self.default_tag
+        self.registry
             .read()
-            .expect("default outbound tag lock")
+            .expect("outbound registry lock")
+            .default_tag
             .clone()
+    }
+
+    pub fn registered_outbound_count(&self) -> usize {
+        self.registry
+            .read()
+            .expect("outbound registry lock")
+            .entries
+            .len()
     }
 
     pub fn outbound_tags(&self) -> Vec<String> {
         let mut tags: Vec<_> = self
-            .entries
+            .registry
             .read()
-            .expect("outbound entries lock")
+            .expect("outbound registry lock")
+            .entries
             .keys()
             .cloned()
             .collect();
         tags.sort();
         tags
+    }
+
+    /// Registration order of outbound tags (includes Commander when installed).
+    pub fn registration_order(&self) -> Vec<String> {
+        self.registry
+            .read()
+            .expect("outbound registry lock")
+            .registration_order
+            .clone()
     }
 
     /// Select outbound tags whose tag starts with any of the selector prefixes (Xray HandlerSelector).
@@ -222,15 +278,16 @@ impl RuntimeOutboundManager {
 
         let (protocol, _) = decode_outbound_handler_config(&config).map_err(map_config_error)?;
 
-        let mut entries = self.entries.write().expect("outbound entries lock");
-        if entries.contains_key(&tag) {
+        let mut registry = self.registry.write().expect("outbound registry lock");
+        if registry.entries.contains_key(&tag) {
             if strict_duplicate {
                 return Err(OutboundManagerError::AlreadyExists { tag });
             }
             return Ok(());
         }
 
-        entries.insert(
+        registry.append_registration(tag.clone());
+        registry.entries.insert(
             tag.clone(),
             OutboundEntry {
                 tag: tag.clone(),
@@ -239,9 +296,8 @@ impl RuntimeOutboundManager {
             },
         );
 
-        let mut default = self.default_tag.write().expect("default outbound tag lock");
-        if default.is_none() {
-            *default = Some(tag);
+        if registry.default_tag.is_none() {
+            registry.default_tag = Some(tag);
         }
         Ok(())
     }
@@ -263,3 +319,7 @@ pub fn encode_freedom_outbound(tag: &str) -> OutboundHandlerConfig {
 pub fn encode_blackhole_outbound(tag: &str) -> OutboundHandlerConfig {
     encode_outbound_handler_config(tag, OutboundProtocol::Blackhole)
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/runtime/outbound_manager.rs"]
+mod tests;

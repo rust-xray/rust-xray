@@ -15,7 +15,7 @@ use crate::reality::handshake::RealityObservedServerHello;
 use crate::reality::mldsa65::Mldsa65Seed;
 use crate::reality::post_handshake::{
     emit_post_handshake_camouflage_records, post_handshake_probe_key, resolve_ccs_tolerance,
-    resolve_post_handshake_wire_lengths,
+    resolve_post_handshake_wire_lengths, UselessRecordTolerance,
 };
 use crate::reality::stages::{self, stage_error, RealityAcceptedStage};
 use crate::reality::target_server_flight::{
@@ -548,9 +548,7 @@ pub(crate) fn assemble_server_handshake_flight_out(
 pub async fn complete_reality_tls13_handshake<S>(
     mut stream: S,
     client_hello_payload: &ClientHelloPayload,
-    client_hello_message: &[u8],
-    _client_hello_original: &[u8],
-    _server_hello_original: &[u8],
+    client_hello_handshake: &[u8],
     mldsa65_seed: Option<&Mldsa65Seed>,
     mut state: RealityTls13ServerState,
 ) -> std::io::Result<RealityTls13ApplicationStream<S>>
@@ -561,7 +559,7 @@ where
         .prepare_server_hello(client_hello_payload)
         .map_err(|err| stage_error(RealityAcceptedStage::ServerHello, err))?;
 
-    let server_hello_message = state.server_hello_message.as_ref().ok_or_else(|| {
+    let server_hello_message = state.server_hello_message.clone().ok_or_else(|| {
         stage_error(
             RealityAcceptedStage::ServerHello,
             Error::new(
@@ -570,8 +568,7 @@ where
             ),
         )
     })?;
-    let server_hello_for_mldsa65 = server_hello_message.clone();
-    let server_hello_record = build_handshake_record(server_hello_message)
+    let server_hello_record = build_handshake_record(&server_hello_message)
         .map_err(|err| stage_error(RealityAcceptedStage::ServerHello, err))?;
 
     debug!(
@@ -584,7 +581,7 @@ where
     );
 
     let transcript_hash = state
-        .update_transcript_client_server_hello(client_hello_message)
+        .update_transcript_client_server_hello(client_hello_handshake)
         .map_err(|err| stage_error(RealityAcceptedStage::Transcript, err))?;
 
     debug!(
@@ -606,8 +603,8 @@ where
 
     let certificate_patch_mode = select_reality_certificate_patch_mode(
         mldsa65_seed,
-        client_hello_message,
-        &server_hello_for_mldsa65,
+        client_hello_handshake,
+        &server_hello_message,
     )
     .map_err(|err| stage_error(RealityAcceptedStage::ServerHandshakeRecords, err))?;
 
@@ -644,11 +641,15 @@ where
         state.accepted.sni.as_deref().unwrap_or(""),
         client_hello_payload,
     );
-    let useless_tolerance = resolve_ccs_tolerance(&probe_key).await;
+    // Upstream REALITY uses default maxUselessRecords (32) during readClientFinished and only
+    // loads probed GlobalMaxCSSMsgCount after verified client Finished (REALITY tls.go post-flight loop).
+    let client_finished_tolerance = UselessRecordTolerance::DEFAULT;
     let mut overflow_alert_sent = false;
     let mut overflow_alert_encryptor = state.server_application_alert_encryptor()?;
     let client_finished_record =
-        match read_client_finished_tls_record_from_stream(&mut stream, useless_tolerance).await {
+        match read_client_finished_tls_record_from_stream(&mut stream, client_finished_tolerance)
+            .await
+        {
             Err(ClientFinishedReadError::UselessOverflow(overflow)) => {
                 write_fatal_useless_overflow_alert(
                     &mut stream,
@@ -722,6 +723,8 @@ where
         cipher_suite = state.suite.name,
         "client Finished verified"
     );
+
+    let application_stream_tolerance = resolve_ccs_tolerance(&probe_key).await;
 
     state
         .derive_application_secrets()
@@ -799,7 +802,7 @@ where
         stream,
         read_decryptor,
         write_encryptor,
-        useless_tolerance,
+        application_stream_tolerance,
     ))
 }
 

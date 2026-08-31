@@ -249,3 +249,69 @@ fn too_many_error_message_matches_upstream_shape() {
     assert!(err.to_string().contains("too many ignored records"));
     assert!(err.to_string().contains("limit=32"));
 }
+
+/// Upstream REALITY uses default maxUselessRecords (32) during readClientFinished even when
+/// GlobalMaxCSSMsgCount probe is Ready(Finite(1)).
+#[test]
+fn client_finished_pre_verify_uses_default_not_probe_ready_finite_one() {
+    block_on(async {
+        read_client_finished_io(
+            &mut Cursor::new(finished_flight(2)),
+            UselessRecordTolerance::DEFAULT,
+        )
+        .await
+        .expect("default tolerance accepts two compatibility CCS records");
+
+        let err = read_client_finished_io(
+            &mut Cursor::new(finished_flight(2)),
+            UselessRecordTolerance::Finite(1),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(err.to_string().contains("limit=1"));
+    });
+}
+
+#[test]
+fn client_finished_does_not_wait_for_detecting_ccs_probe_cache() {
+    use std::time::{Duration, Instant};
+
+    use crate::reality::post_handshake::emission::resolve_ccs_tolerance_from_cache;
+    use crate::reality::post_handshake::{
+        CcsToleranceProbeCache, PostHandshakeProbeKey, RealityAlpnProfile,
+    };
+
+    block_on(async {
+        let key = PostHandshakeProbeKey {
+            dest_addr: "127.0.0.1:443".to_string(),
+            server_name: "example.com".to_string(),
+            alpn_profile: RealityAlpnProfile::None,
+        };
+        let cache = CcsToleranceProbeCache::new();
+        assert!(cache.try_begin_detection(key.clone()));
+
+        let start = Instant::now();
+        read_client_finished_io(
+            &mut Cursor::new(finished_flight(0)),
+            UselessRecordTolerance::DEFAULT,
+        )
+        .await
+        .expect("client Finished");
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "pre-Finished read must not wait on CCS probe cache"
+        );
+
+        cache.complete_detection(&key, UselessRecordTolerance::Finite(16));
+        let resolve_started = Instant::now();
+        assert_eq!(
+            resolve_ccs_tolerance_from_cache(&cache, &key).await,
+            UselessRecordTolerance::Finite(16)
+        );
+        assert!(
+            resolve_started.elapsed() < Duration::from_millis(200),
+            "post-Finished resolve uses ready cache without sleeping"
+        );
+    });
+}
