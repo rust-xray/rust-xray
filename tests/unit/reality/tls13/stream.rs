@@ -1236,3 +1236,142 @@ fn client_writer_poll_shutdown_does_not_shutdown_underlying_transport() {
 
     assert_eq!(writer.inner.shutdown_calls, 0);
 }
+
+#[test]
+fn tls_application_stream_clean_eof_between_records() {
+    block_on(async {
+        let (mut client_io, server_io) = duplex(4096);
+        let (mut client_encryptor, server_decryptor) = client_to_server_keys();
+        let (server_encryptor, _client_decryptor) = server_to_client_keys();
+
+        let encrypted = client_encryptor
+            .encrypt_application_data(b"only-record")
+            .expect("encrypted record");
+        client_io.write_all(&encrypted).await.expect("write");
+        drop(client_io);
+
+        let stream =
+            RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
+        let split = stream.split_for_relay().expect("split");
+        let mut reader = split.reader;
+
+        let mut buf = [0u8; 32];
+        let read = reader.read(&mut buf).await.expect("read record");
+        assert_eq!(&buf[..read], b"only-record");
+
+        let read = reader.read(&mut buf).await.expect("clean eof");
+        assert_eq!(read, 0);
+        assert!(reader.read.read_eof);
+    });
+}
+
+#[test]
+fn tls_application_stream_eof_mid_header_is_error() {
+    block_on(async {
+        let (mut client_io, server_io) = duplex(4096);
+        let (_client_encryptor, server_decryptor) = client_to_server_keys();
+        let (server_encryptor, _client_decryptor) = server_to_client_keys();
+
+        client_io
+            .write_all(&[TLS_RECORD_APPLICATION_DATA, 0x03, 0x03])
+            .await
+            .expect("partial header");
+        drop(client_io);
+
+        let stream =
+            RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
+        let split = stream.split_for_relay().expect("split");
+        let mut reader = split.reader;
+
+        let err = reader.read(&mut [0u8; 8]).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+        assert!(err.to_string().contains("eof mid TLS record header"));
+        assert!(err.to_string().contains("direct_reader_enabled=false"));
+    });
+}
+
+#[test]
+fn tls_application_stream_eof_mid_body_is_error() {
+    block_on(async {
+        let (mut client_io, server_io) = duplex(4096);
+        let (mut client_encryptor, server_decryptor) = client_to_server_keys();
+        let (server_encryptor, _client_decryptor) = server_to_client_keys();
+
+        let encrypted = client_encryptor
+            .encrypt_application_data(b"truncated-body-test")
+            .expect("encrypted record");
+        client_io
+            .write_all(&encrypted[..encrypted.len() / 2])
+            .await
+            .expect("partial record");
+        drop(client_io);
+
+        let stream =
+            RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
+        let split = stream.split_for_relay().expect("split");
+        let mut reader = split.reader;
+
+        let err = reader.read(&mut [0u8; 64]).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+        assert!(err.to_string().contains("eof mid TLS record body"));
+        assert!(err.to_string().contains("buffered_record_len="));
+    });
+}
+
+#[test]
+fn direct_relay_clean_eof_after_raw_relay() {
+    block_on(async {
+        let (mut client_io, server_io) = duplex(4096);
+        let (_client_encryptor, server_decryptor) = client_to_server_keys();
+        let (server_encryptor, _client_decryptor) = server_to_client_keys();
+
+        let stream =
+            RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
+        let split = stream.split_for_relay().expect("split");
+        split.direct_relay.enable_reader();
+        let mut reader = split.reader;
+
+        client_io
+            .write_all(b"raw-then-close")
+            .await
+            .expect("write raw");
+        drop(client_io);
+
+        let mut buf = [0u8; 32];
+        let read = reader.read(&mut buf).await.expect("read raw");
+        assert_eq!(&buf[..read], b"raw-then-close");
+
+        let read = reader
+            .read(&mut buf)
+            .await
+            .expect("clean eof in direct mode");
+        assert_eq!(read, 0);
+    });
+}
+
+#[test]
+fn partial_tls_record_before_direct_enable_still_rejected() {
+    block_on(async {
+        let (mut client_io, server_io) = duplex(4096);
+        let (_client_encryptor, server_decryptor) = client_to_server_keys();
+        let (server_encryptor, _client_decryptor) = server_to_client_keys();
+
+        let stream =
+            RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
+        let split = stream.split_for_relay().expect("split");
+        let mut reader = split.reader;
+
+        reader.read.ciphertext_read_buf.extend_from_slice(&[
+            TLS_RECORD_APPLICATION_DATA,
+            0x03,
+            0x03,
+            0x00,
+            0x10,
+        ]);
+        drop(client_io);
+
+        let err = reader.read(&mut [0u8; 8]).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+        assert!(!split.direct_relay.is_reader_enabled());
+    });
+}

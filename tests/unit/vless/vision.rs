@@ -312,3 +312,140 @@ fn vision_relay_write_survives_partial_write_backpressure() {
         "partial writes must deliver the full padded Vision frame"
     );
 }
+
+#[tokio::test]
+async fn vision_direct_after_complete_tls_record_reads_subsequent_bytes_raw() {
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+
+    use crate::reality::tls13::{
+        tls13_cipher_suite, RealityTls13ApplicationStream, Tls13RecordDecryptor,
+        Tls13RecordEncryptor, Tls13TrafficKeys, TLS_AES_128_GCM_SHA256,
+    };
+
+    fn keys(seed: u8) -> Tls13TrafficKeys {
+        Tls13TrafficKeys {
+            key: (seed..seed + 16).collect(),
+            iv: (0x01..0x0d).collect(),
+        }
+    }
+
+    let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("suite");
+    let c2s_keys = keys(0x10);
+    let s2c_keys = keys(0x20);
+    let mut client_encryptor =
+        Tls13RecordEncryptor::new(suite, c2s_keys.clone()).expect("client encryptor");
+    let server_decryptor = Tls13RecordDecryptor::new(suite, c2s_keys).expect("server decryptor");
+    let server_encryptor = Tls13RecordEncryptor::new(suite, s2c_keys).expect("server encryptor");
+
+    let mut framed = Vec::new();
+    framed.extend_from_slice(&USER_UUID);
+    framed.push(COMMAND_PADDING_DIRECT);
+    framed.extend_from_slice(&(0u16).to_be_bytes());
+    framed.extend_from_slice(&0u16.to_be_bytes());
+
+    let encrypted = client_encryptor
+        .encrypt_application_data(&framed)
+        .expect("encrypted direct command");
+
+    let (mut client_io, server_io) = duplex(8192);
+    client_io.write_all(&encrypted).await.expect("write record");
+    client_io
+        .write_all(b"raw-after-direct")
+        .await
+        .expect("write raw tail");
+
+    let stream = RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
+    let split = stream.split_for_relay().expect("split");
+    let direct_relay = split.direct_relay.clone();
+    let traffic = new_shared_traffic_state(USER_UUID);
+    let mut reader = VisionRelayReader::new(split.reader, traffic, Some(direct_relay.clone()));
+
+    let mut out = [0u8; 32];
+    let read = reader.read(&mut out).await.expect("read after direct");
+    assert_eq!(&out[..read], b"raw-after-direct");
+    assert!(direct_relay.is_reader_enabled());
+}
+
+#[tokio::test]
+async fn vision_writer_direct_first_reader_enables_on_direct_copy() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use tokio::io::AsyncReadExt;
+
+    use crate::reality::tls13::ApplicationStreamDirectRelay;
+
+    let traffic = new_shared_traffic_state(USER_UUID);
+    {
+        let mut locked = traffic.lock().expect("lock");
+        locked.inbound.direct_copy = true;
+    }
+
+    let reader_flag = Arc::new(AtomicBool::new(false));
+    let writer_flag = Arc::new(AtomicBool::new(false));
+    let direct_relay =
+        ApplicationStreamDirectRelay::from_shared(Arc::clone(&reader_flag), writer_flag);
+    direct_relay.enable_writer();
+
+    let (client, server) = tokio::io::duplex(4096);
+    drop(client);
+    let mut reader = VisionRelayReader::new(server, traffic, Some(direct_relay));
+    let mut out = [0u8; 8];
+    let _ = reader.read(&mut out).await;
+
+    assert!(
+        reader_flag.load(Ordering::SeqCst),
+        "reader must enable when direct_copy is already set"
+    );
+}
+
+#[tokio::test]
+async fn vision_fin_after_direct_transition_is_clean_eof() {
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+
+    use crate::reality::tls13::{
+        tls13_cipher_suite, RealityTls13ApplicationStream, Tls13RecordDecryptor,
+        Tls13RecordEncryptor, Tls13TrafficKeys, TLS_AES_128_GCM_SHA256,
+    };
+
+    fn keys(seed: u8) -> Tls13TrafficKeys {
+        Tls13TrafficKeys {
+            key: (seed..seed + 16).collect(),
+            iv: (0x01..0x0d).collect(),
+        }
+    }
+
+    let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("suite");
+    let c2s_keys = keys(0x10);
+    let s2c_keys = keys(0x20);
+    let mut client_encryptor =
+        Tls13RecordEncryptor::new(suite, c2s_keys.clone()).expect("client encryptor");
+    let server_decryptor = Tls13RecordDecryptor::new(suite, c2s_keys).expect("server decryptor");
+    let server_encryptor = Tls13RecordEncryptor::new(suite, s2c_keys).expect("server encryptor");
+
+    let mut framed = Vec::new();
+    framed.extend_from_slice(&USER_UUID);
+    framed.push(COMMAND_PADDING_DIRECT);
+    framed.extend_from_slice(&(0u16).to_be_bytes());
+    framed.extend_from_slice(&0u16.to_be_bytes());
+
+    let encrypted = client_encryptor
+        .encrypt_application_data(&framed)
+        .expect("encrypted direct command");
+
+    let (mut client_io, server_io) = duplex(4096);
+    client_io.write_all(&encrypted).await.expect("write record");
+    drop(client_io);
+
+    let stream = RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
+    let split = stream.split_for_relay().expect("split");
+    let traffic = new_shared_traffic_state(USER_UUID);
+    let mut reader = VisionRelayReader::new(split.reader, traffic, Some(split.direct_relay));
+
+    let mut out = [0u8; 16];
+    let read = reader.read(&mut out).await.expect("direct transition read");
+    assert_eq!(read, 0);
+
+    let read = reader.read(&mut out).await.expect("clean fin after direct");
+    assert_eq!(read, 0);
+}

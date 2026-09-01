@@ -837,22 +837,30 @@ impl Tls13ClientReadState {
         self.read_decryptor.sequence
     }
 
-    async fn read_tls_record<S>(&mut self, inner: &mut S) -> io::Result<TlsRecord>
+    async fn read_tls_record<S>(&mut self, inner: &mut S) -> io::Result<Option<TlsRecord>>
     where
         S: AsyncRead + Unpin,
     {
         loop {
             if let Some(record) = try_take_tls_record(&mut self.ciphertext_read_buf)? {
-                return Ok(record);
+                return Ok(Some(record));
             }
 
             let mut chunk = [0u8; 4096];
             let read = inner.read(&mut chunk).await?;
             if read == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "TLS 1.3 application stream closed before a complete record",
-                ));
+                return match classify_tls_ciphertext_eof(&self.ciphertext_read_buf) {
+                    TlsCiphertextEofKind::CleanBetweenRecords => {
+                        self.read_eof = true;
+                        Ok(None)
+                    }
+                    kind => Err(tls_incomplete_record_error(
+                        kind,
+                        &self.ciphertext_read_buf,
+                        false,
+                        false,
+                    )),
+                };
             }
             self.ciphertext_read_buf.extend_from_slice(&chunk[..read]);
         }
@@ -862,6 +870,8 @@ impl Tls13ClientReadState {
         &mut self,
         inner: &mut S,
         cx: &mut Context<'_>,
+        direct_reader_enabled: bool,
+        direct_writer_enabled: bool,
     ) -> Poll<io::Result<()>>
     where
         S: AsyncRead + Unpin,
@@ -875,11 +885,20 @@ impl Tls13ClientReadState {
                 return Poll::Ready(Ok(()));
             }
 
-            let record =
-                match poll_read_tls_record(Pin::new(inner), &mut self.ciphertext_read_buf, cx)? {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(record) => record,
-                };
+            let record = match poll_read_tls_record(
+                Pin::new(inner),
+                &mut self.ciphertext_read_buf,
+                cx,
+                direct_reader_enabled,
+                direct_writer_enabled,
+            )? {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    self.read_eof = true;
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Some(record)) => record,
+            };
 
             match classify_record_on_application_stream(&record) {
                 Ok(true) => {
@@ -1211,7 +1230,8 @@ where
     ) -> Poll<io::Result<()>> {
         let this = self.as_mut().get_mut();
 
-        if this.direct_relay.load(Ordering::SeqCst) {
+        let direct_reader_enabled = this.direct_relay.load(Ordering::SeqCst);
+        if direct_reader_enabled {
             if !this.direct_mode_active {
                 if !this.read.ciphertext_read_buf.is_empty() {
                     this.read
@@ -1231,7 +1251,12 @@ where
         }
 
         if this.read.plaintext_read_buf.is_empty() {
-            match this.read.fill_plaintext_read_buf(&mut this.inner, cx)? {
+            match this.read.fill_plaintext_read_buf(
+                &mut this.inner,
+                cx,
+                direct_reader_enabled,
+                false,
+            )? {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(()) => {}
             }
@@ -1517,7 +1542,10 @@ impl<S> RealityTls13ApplicationStream<S> {
                 return Ok(Vec::new());
             }
 
-            let record = self.read.read_tls_record(&mut self.inner).await?;
+            let record = match self.read.read_tls_record(&mut self.inner).await? {
+                Some(record) => record,
+                None => return Ok(Vec::new()),
+            };
             match self.read.decrypt_application_stream_record(&record)? {
                 ApplicationStreamRecord::Plaintext(plaintext) => return Ok(plaintext),
                 ApplicationStreamRecord::PeerClosed => {
@@ -1552,7 +1580,10 @@ where
         let this = self.as_mut().get_mut();
 
         if this.read.plaintext_read_buf.is_empty() {
-            match this.read.fill_plaintext_read_buf(&mut this.inner, cx)? {
+            match this
+                .read
+                .fill_plaintext_read_buf(&mut this.inner, cx, false, false)?
+            {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(()) => {}
             }
@@ -1763,17 +1794,88 @@ fn try_take_tls_record(buf: &mut BytesMut) -> io::Result<Option<TlsRecord>> {
     }))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TlsCiphertextEofKind {
+    CleanBetweenRecords,
+    TruncatedHeader,
+    TruncatedBody {
+        buffered_len: usize,
+        expected_record_len: usize,
+    },
+}
+
+fn classify_tls_ciphertext_eof(buf: &BytesMut) -> TlsCiphertextEofKind {
+    if buf.is_empty() {
+        return TlsCiphertextEofKind::CleanBetweenRecords;
+    }
+    if buf.len() < TLS_RECORD_HEADER_LEN {
+        return TlsCiphertextEofKind::TruncatedHeader;
+    }
+    let payload_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+    let record_len = TLS_RECORD_HEADER_LEN
+        .checked_add(payload_len)
+        .unwrap_or(TLS_RECORD_HEADER_LEN);
+    if buf.len() < record_len {
+        TlsCiphertextEofKind::TruncatedBody {
+            buffered_len: buf.len(),
+            expected_record_len: record_len,
+        }
+    } else {
+        TlsCiphertextEofKind::CleanBetweenRecords
+    }
+}
+
+fn tls_incomplete_record_error(
+    kind: TlsCiphertextEofKind,
+    buf: &BytesMut,
+    direct_reader_enabled: bool,
+    direct_writer_enabled: bool,
+) -> io::Error {
+    let mode = if direct_reader_enabled {
+        "direct_reader"
+    } else {
+        "tls_framed"
+    };
+    let buffered_header_len = buf.len().min(TLS_RECORD_HEADER_LEN);
+    let buffered_record_len = buf.len();
+    let (expected_record_len, detail) = match kind {
+        TlsCiphertextEofKind::CleanBetweenRecords => {
+            unreachable!("clean EOF must not produce incomplete-record error")
+        }
+        TlsCiphertextEofKind::TruncatedHeader => (None, "eof mid TLS record header"),
+        TlsCiphertextEofKind::TruncatedBody {
+            expected_record_len,
+            ..
+        } => (Some(expected_record_len), "eof mid TLS record body"),
+    };
+    let expected_record_len = expected_record_len
+        .map(|len| len.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        format!(
+            "TLS 1.3 application stream closed before a complete record ({detail}; \
+             mode={mode} buffered_header_len={buffered_header_len} \
+             buffered_record_len={buffered_record_len} expected_record_len={expected_record_len} \
+             direct_reader_enabled={direct_reader_enabled} \
+             direct_writer_enabled={direct_writer_enabled})",
+        ),
+    )
+}
+
 fn poll_read_tls_record<S>(
     mut inner: Pin<&mut S>,
     ciphertext_read_buf: &mut BytesMut,
     cx: &mut Context<'_>,
-) -> Poll<io::Result<TlsRecord>>
+    direct_reader_enabled: bool,
+    direct_writer_enabled: bool,
+) -> Poll<io::Result<Option<TlsRecord>>>
 where
     S: AsyncRead + Unpin,
 {
     loop {
         if let Some(record) = try_take_tls_record(ciphertext_read_buf)? {
-            return Poll::Ready(Ok(record));
+            return Poll::Ready(Ok(Some(record)));
         }
 
         let mut chunk = [0u8; 4096];
@@ -1783,10 +1885,15 @@ where
             Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             Poll::Ready(Ok(())) => {
                 if read_buf.filled().is_empty() {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "TLS 1.3 application stream closed before a complete record",
-                    )));
+                    return Poll::Ready(match classify_tls_ciphertext_eof(ciphertext_read_buf) {
+                        TlsCiphertextEofKind::CleanBetweenRecords => Ok(None),
+                        kind => Err(tls_incomplete_record_error(
+                            kind,
+                            ciphertext_read_buf,
+                            direct_reader_enabled,
+                            direct_writer_enabled,
+                        )),
+                    });
                 }
                 ciphertext_read_buf.extend_from_slice(read_buf.filled());
             }

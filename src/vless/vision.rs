@@ -596,6 +596,11 @@ where
                     )
                 };
                 if direct_copy || !within {
+                    if direct_copy {
+                        if let Some(direct_relay) = self.direct_relay.as_ref() {
+                            direct_relay.enable_reader();
+                        }
+                    }
                     return Pin::new(&mut self.inner).poll_read(cx, buf);
                 }
             }
@@ -856,6 +861,11 @@ where
                     )
                 };
                 if direct_copy || !within {
+                    if direct_copy {
+                        if let Some(direct_relay) = self.direct_relay.as_ref() {
+                            direct_relay.enable_reader();
+                        }
+                    }
                     return Pin::new(&mut self.inner).poll_read(cx, buf);
                 }
             }
