@@ -46,7 +46,7 @@ fn plain_vless_inbound(
             email: Some(user.email.clone()),
             flow: user.flow.clone(),
             level: user.level,
-            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
         transport: rust_xray::config::InboundTransportConfig::RawTcp,
         reality: rust_xray::config::RealityServerConfig {
@@ -85,7 +85,7 @@ fn reality_inbound_config(
             email: Some(user.email.clone()),
             flow: user.flow.clone(),
             level: user.level,
-            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
         transport: rust_xray::config::InboundTransportConfig::RawTcp,
         reality: rust_xray::config::RealityServerConfig {
@@ -216,6 +216,7 @@ async fn dynamic_add_inbound_routing_e2e_without_restart() {
             email: "dynamic-route@example.test".to_string(),
             flow: None,
             level: None,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             expiry_secs: None,
         },
     );
@@ -310,6 +311,7 @@ async fn dynamic_add_inbound_add_user_authenticates_on_data_plane() {
         email: "static@example.test".to_string(),
         flow: None,
         level: None,
+        testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     };
     let runtime = setup_routing_runtime().await;
@@ -358,6 +360,7 @@ async fn merged_reality_logical_inbound_tag_routing_e2e() {
         email: "user-a@example.test".to_string(),
         flow: None,
         level: None,
+        testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     };
     let user_b = ManagedUser {
@@ -365,6 +368,7 @@ async fn merged_reality_logical_inbound_tag_routing_e2e() {
         email: "user-b@example.test".to_string(),
         flow: None,
         level: None,
+        testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     };
 
@@ -496,6 +500,7 @@ async fn independent_listeners_allow_same_vless_uuid() {
         email: "shared-uuid@example.test".to_string(),
         flow: None,
         level: None,
+        testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     };
 
@@ -544,6 +549,7 @@ async fn merged_listener_rejects_duplicate_uuid_on_second_add_inbound() {
         email: "dup-a@example.test".to_string(),
         flow: None,
         level: None,
+        testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     };
     let user_b = ManagedUser {
@@ -551,6 +557,7 @@ async fn merged_listener_rejects_duplicate_uuid_on_second_add_inbound() {
         email: "dup-b@example.test".to_string(),
         flow: None,
         level: None,
+        testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     };
 
@@ -590,6 +597,7 @@ async fn merged_listener_add_user_duplicate_uuid_is_rejected() {
         email: "adduser-a@example.test".to_string(),
         flow: None,
         level: None,
+        testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     };
     let user_b = ManagedUser {
@@ -597,6 +605,7 @@ async fn merged_listener_add_user_duplicate_uuid_is_rejected() {
         email: "adduser-b@example.test".to_string(),
         flow: None,
         level: None,
+        testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     };
 
@@ -653,6 +662,7 @@ async fn merged_reality_shared_auth_set_routes_by_logical_inbound_tag() {
         email: "reality-a@example.test".to_string(),
         flow: None,
         level: None,
+        testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     };
     let user_b = ManagedUser {
@@ -660,6 +670,7 @@ async fn merged_reality_shared_auth_set_routes_by_logical_inbound_tag() {
         email: "reality-b@example.test".to_string(),
         flow: None,
         level: None,
+        testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     };
 

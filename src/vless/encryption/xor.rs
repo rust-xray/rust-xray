@@ -28,12 +28,3 @@ pub fn ctr_xor(united_key: &[u8], iv: &[u8; 16], data: &mut [u8]) {
     let mut stream = CtrStream::new(united_key, iv);
     stream.apply_keystream(data);
 }
-
-/// Apply upstream relay-chain XOR for intermediate hash verification bytes.
-pub fn xor_relay_hash(relay: &mut [u8], expected_hash: &[u8; 32], iv: &[u8; 16], nfs_key: &[u8]) {
-    let mut stream = CtrStream::new(nfs_key, iv);
-    stream.apply_keystream(relay);
-    if relay.len() >= 32 && &relay[..32] != expected_hash {
-        // Caller validates equality; this helper only applies the keystream.
-    }
-}

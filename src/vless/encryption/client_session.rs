@@ -245,14 +245,6 @@ impl<S> ClientEncryptedStream<S> {
             pending_frame: None,
         })
     }
-
-    pub fn inner_mut(&mut self) -> &mut S {
-        &mut self.inner
-    }
-
-    pub fn into_inner(self) -> S {
-        self.inner
-    }
 }
 
 impl<S> AsyncRead for ClientEncryptedStream<S>

@@ -1,4 +1,4 @@
-.PHONY: test build build-debug build-musl build-linux-x86_64-gnu build-linux-x86_64-gnu-debug fixture-test fixture-decode fixture-decode-write capture-clienthello live-smoke
+.PHONY: test build build-debug build-musl build-linux-x86_64-gnu build-linux-x86_64-gnu-debug fixture-test fixture-decode fixture-decode-write capture-clienthello live-smoke live-smoke-reality live-smoke-udp live-smoke-vless-encryption
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
 CC_x86_64_unknown_linux_musl=musl-gcc
 
@@ -24,8 +24,16 @@ build-linux-x86_64-gnu-debug:
 	bash scripts/build-linux-x86_64-gnu.sh --debug
 
 live-smoke:
-	bash scripts/live_reality_smoke/run-live-smoke.sh
-	bash scripts/live_xhttp_smoke/run-live-xhttp-smoke.sh
+	bash scripts/live_smoke/run-live-smoke.sh
+
+live-smoke-reality:
+	bash scripts/live_smoke/run-live-smoke.sh reality
+
+live-smoke-udp:
+	bash scripts/live_smoke/run-live-smoke.sh udp
+
+live-smoke-vless-encryption:
+	bash scripts/live_smoke/run-live-smoke.sh vless-encryption
 
 fixture-test:
 	cargo test --test reality_fixture -- --nocapture

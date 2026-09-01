@@ -13,8 +13,8 @@ use crate::vless::vision::{encode_vision_flow_addons_protobuf, wrap_vision_uplin
 use crate::vless::VlessClient;
 
 use super::client_sim::{
-    build_native_x25519_client_hello, client_1rtt_handshake_and_write,
-    client_complete_1rtt_handshake, server_config_from_single_x25519,
+    build_native_x25519_client_hello, client_complete_1rtt_handshake,
+    server_config_from_single_x25519,
 };
 use super::stream_common::build_client_frames;
 use super::stream_helpers::ScriptStream;
@@ -60,7 +60,7 @@ async fn encrypted_vision_path_has_no_tls_direct_relay() {
     vless_body.extend_from_slice(&[0x01, 127, 0, 0, 1]);
     vless_body.extend_from_slice(&vision_payload);
 
-    let (mut client_io, server_io) = duplex(65536);
+    let (client_io, server_io) = duplex(65536);
     let clients = vec![VlessClient {
         id: uuid::Uuid::from_bytes(USER_ID),
         email: Some("vision-enc@test".to_string()),

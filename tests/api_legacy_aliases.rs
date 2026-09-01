@@ -704,7 +704,7 @@ async fn legacy_alias_internal_commander() {
             email: Some("legacy-commander@example.test".to_string()),
             flow: None,
             level: None,
-            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     runtime.inbound.user_managers().register(Arc::clone(&users));

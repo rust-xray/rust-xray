@@ -26,7 +26,7 @@ fn reality_inbound_config(tag: &str, port: u16) -> rust_xray::config::VlessReali
             email: Some("dynamic-inbound@example.test".to_string()),
             flow: None,
             level: None,
-            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
         transport: rust_xray::config::InboundTransportConfig::RawTcp,
         reality: rust_xray::config::RealityServerConfig {
@@ -310,6 +310,7 @@ async fn dynamic_inbound_supports_alter_inbound_add_user() {
         email: "dynamic-inbound@example.test".to_string(),
         flow: None,
         level: None,
+        testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     }];
     let handler_config = encode_inbound_handler_config(&inbound, &users).expect("encode");

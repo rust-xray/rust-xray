@@ -7,7 +7,7 @@ use aes_gcm::{
 use chacha20poly1305::ChaCha20Poly1305;
 
 use super::kdf::derive_blake3_key;
-use super::nonce::{increase_nonce, is_max_nonce, NonceCounter, MAX_NONCE};
+use super::nonce::{increase_nonce, is_max_nonce, NonceCounter};
 
 const AEAD_KEY_LEN: usize = 32;
 const AEAD_NONCE_LEN: usize = 12;
@@ -332,8 +332,4 @@ impl TrafficAead {
             TrafficAeadKind::ChaCha20Poly1305,
         ))
     }
-}
-
-pub fn max_nonce_bytes() -> [u8; AEAD_NONCE_LEN] {
-    MAX_NONCE
 }

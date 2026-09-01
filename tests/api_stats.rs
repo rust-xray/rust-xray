@@ -513,7 +513,7 @@ async fn authenticated_vless_tcp_session_records_stats_and_online() {
             email: Some("remna-user@example.test".to_string()),
             flow: None,
             level: Some(0),
-            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     );
 
@@ -618,7 +618,7 @@ mod xhttp_stats {
                 email: Some("remna-user@example.test".to_string()),
                 flow: None,
                 level: Some(0),
-                testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+                testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             }],
         ))
     }

@@ -2,10 +2,7 @@ use crate::vless::encryption::{
     validate_inbound_decryption_with_fallbacks, VlessEncryptionServer, X25519SecretKey, XorMode,
 };
 
-use super::client_sim::{
-    build_native_x25519_client_hello, client_upload_writer, seal_client_traffic,
-    server_config_from_single_x25519,
-};
+use super::client_sim::{build_native_x25519_client_hello, server_config_from_single_x25519};
 use super::stream_helpers::{FragmentReader, ScriptStream};
 use super::test_rng::TestHandshakeRng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

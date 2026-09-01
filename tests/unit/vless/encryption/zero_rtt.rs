@@ -6,7 +6,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::vless::encryption::handshake::HandshakeError;
 use crate::vless::encryption::stream::VlessEncryptedStream;
-use crate::vless::encryption::{VlessEncryptionServer, X25519SecretKey, XorMode};
+use crate::vless::encryption::{VlessEncryptionServer, X25519SecretKey};
 
 use super::client_sim::{
     build_zero_rtt_client_hello, client_zero_rtt_upload_writer, perform_1rtt_and_capture_resume,

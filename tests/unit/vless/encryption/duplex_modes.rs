@@ -1,6 +1,6 @@
 //! Full-duplex xorpub/random 1-RTT tests using the shared client session adapter.
 
-use tokio::io::{duplex, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
 use crate::vless::encryption::client_session::{
     derive_client_session, read_server_1rtt_response, server_1rtt_response_len,
@@ -275,7 +275,6 @@ async fn random_direction_swap_fails_decrypt() {
 async fn direction_swap_negative(mode: XorMode, swap_xor_iv_ticket: bool) {
     let secret = server_secret();
     let config = config_with_xor_mode(mode);
-    let client_config = config.clone();
     let server = VlessEncryptionServer::from_config(config.clone()).expect("server");
     let (hello, parts) = build_native_x25519_client_hello(
         &config,
@@ -331,7 +330,6 @@ async fn random_fragmented_outer_xor_stream() {
     );
     let uplink = payload_a();
     let downlink = payload_b();
-    let uplink_expected = uplink.clone();
     let downlink_expected = downlink.clone();
 
     let (client_io, server_io) = duplex(512 * 1024);

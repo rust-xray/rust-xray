@@ -74,7 +74,7 @@ async fn encrypted_native_vless_udp_reaches_echo() {
     let (hello, parts) =
         build_native_x25519_client_hello(&config, &secret, &mut TestHandshakeRng::new(42));
 
-    let (mut client_io, server_io) = duplex(65536);
+    let (client_io, server_io) = duplex(65536);
     let clients = vec![VlessClient {
         id: uuid::Uuid::from_bytes(USER_ID),
         email: Some("enc-udp@test".to_string()),
@@ -148,7 +148,7 @@ async fn encrypted_generic_mux_udp_persistent_association() {
     let (hello, parts) =
         build_native_x25519_client_hello(&config, &secret, &mut TestHandshakeRng::new(42));
 
-    let (mut client_io, server_io) = duplex(65536);
+    let (client_io, server_io) = duplex(65536);
     let clients = vec![VlessClient {
         id: uuid::Uuid::from_bytes(USER_ID),
         email: Some("enc-mux-udp@test".to_string()),

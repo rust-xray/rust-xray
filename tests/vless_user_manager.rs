@@ -16,7 +16,7 @@ fn static_manager() -> VlessUserManager {
             email: Some("static@example.test".to_string()),
             flow: None,
             level: None,
-            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     )
 }
@@ -40,6 +40,7 @@ fn add_user_preserves_vision_flow() {
             email: "vision@example.test".to_string(),
             flow: Some("xtls-rprx-vision".to_string()),
             level: None,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             expiry_secs: None,
         })
         .expect("add user");
@@ -69,6 +70,7 @@ fn add_user_enables_authentication() {
             email: "dynamic@example.test".to_string(),
             flow: None,
             level: None,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             expiry_secs: None,
         })
         .expect("add user");
@@ -88,6 +90,7 @@ fn remove_user_disables_future_authentication() {
             email: "dynamic@example.test".to_string(),
             flow: None,
             level: None,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             expiry_secs: None,
         })
         .expect("add user");
@@ -110,6 +113,7 @@ fn duplicate_uuid_is_rejected() {
             email: "other@example.test".to_string(),
             flow: None,
             level: None,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             expiry_secs: None,
         })
         .unwrap_err();
@@ -125,6 +129,7 @@ fn add_user_updates_existing_user_flow() {
             email: "static@example.test".to_string(),
             flow: Some("xtls-rprx-vision".to_string()),
             level: None,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             expiry_secs: None,
         })
         .expect("upsert flow");
@@ -144,6 +149,7 @@ fn duplicate_email_is_rejected() {
             email: "static@example.test".to_string(),
             flow: None,
             level: None,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             expiry_secs: None,
         })
         .unwrap_err();
@@ -159,6 +165,7 @@ fn list_managed_users_includes_static_and_dynamic_entries() {
             email: "dynamic@example.test".to_string(),
             flow: None,
             level: None,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             expiry_secs: None,
         })
         .expect("add user");
@@ -187,6 +194,7 @@ fn concurrent_duplicate_uuid_add_is_safe() {
                 email: format!("dup{index}@example.test"),
                 flow: None,
                 level: None,
+                testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
                 expiry_secs: None,
             })
         }));

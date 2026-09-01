@@ -157,10 +157,6 @@ impl From<HandshakeError> for Error {
     }
 }
 
-pub(crate) fn handshake_invalid_data(message: &'static str) -> HandshakeError {
-    HandshakeError::CryptoFailure(message)
-}
-
 pub(crate) fn map_crypto_err(err: Error) -> HandshakeError {
     match err.kind() {
         ErrorKind::UnexpectedEof => HandshakeError::Truncated,

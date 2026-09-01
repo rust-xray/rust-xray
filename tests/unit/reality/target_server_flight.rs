@@ -10,7 +10,7 @@ use crate::reality::key_share::{
 use crate::tls::TLS_LEGACY_VERSION_1_2 as TLS_RECORD_LEGACY_VERSION;
 use crate::tls::{
     build_change_cipher_spec_record, EXTENSION_KEY_SHARE, EXTENSION_SUPPORTED_VERSIONS,
-    TLS_LEGACY_VERSION_1_2, TLS_MAX_RECORD_WIRE_LEN, TLS_RECORD_HEADER_LEN,
+    TLS_RECORD_HEADER_LEN,
 };
 use std::io::ErrorKind;
 

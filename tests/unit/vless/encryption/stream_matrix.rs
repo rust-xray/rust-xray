@@ -7,9 +7,7 @@ use crate::vless::encryption::header::{
     decode_traffic_header, MAX_TRAFFIC_PAYLOAD_LEN, MIN_TRAFFIC_PAYLOAD_LEN,
 };
 use crate::vless::encryption::stream::MAX_TRAFFIC_PLAINTEXT_PER_RECORD;
-use crate::vless::encryption::{
-    reset_test_seal_count, test_seal_count, EncryptedReader, EncryptedWriter, MAX_NONCE,
-};
+use crate::vless::encryption::{EncryptedReader, EncryptedWriter};
 
 use super::stream_common::{
     build_client_frames, client_writer_keys, dummy_handshake_result, expected_server_frame,
@@ -369,7 +367,7 @@ fn maxnonce_reader_rotation_through_encrypted_reader() {
     let second = b"nonce-ff-rotate";
     let mut near_max = [0u8; 12];
     near_max[11] = 0xfe;
-    let (mut client_keys, united) = client_writer_keys();
+    let (mut client_keys, _united) = client_writer_keys();
     client_keys.aead.set_nonce_for_test(near_max);
     let mut client_writer = EncryptedWriter::new(client_keys);
     let mut wire = client_writer.build_record(first).expect("seal1").to_vec();

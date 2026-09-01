@@ -1,76 +1,78 @@
-# VLESS Encryption 0-RTT Wire Format (Xray-core cd4ce973)
+# VLESS Encryption 0RTT
 
-Upstream reference: `proxy/vless/encryption/client.go`, `server.go` @ `cd4ce973e9f6ef3a7acf9a7030927b4143f9ea47`.
+This document describes the implemented **inbound** `mlkem768x25519plus` 0RTT
+behavior against Xray-core `main` at
+`cd4ce973e9f6ef3a7acf9a7030927b4143f9ea47`. It does not document or claim
+VLESS outbound encryption.
 
-## Client → Server (0-RTT hello)
+## Handshake and traffic semantics
 
-| Offset | Length | Field | Notes |
-|--------|--------|-------|-------|
-| 0 | 16 | IV | Random; seeds NFS CTR/AEAD |
-| 16 | `RelaysLength` | NFS relay material | Same chain as 1-RTT (X25519/ML-KEM hybrid) |
-| 16+Relays | 18 | Encrypted length | NFS AEAD; plaintext `EncodeLength(32)` → sentinel **32** |
-| +18 | 32 | Encrypted ticket | NFS AEAD; plaintext 16-byte ticket |
-| (coalesced) | var | First upload record(s) | Optional; client may append encrypted traffic immediately |
+A successful 1RTT inbound handshake derives NFS/PFS/UnitedKey material, creates
+the CommonConn encrypted traffic layer, and issues a 16-byte session ticket when
+the configured ticket lifetime is non-zero. The server stores the associated PFS
+state in its bounded session cache.
 
-**Total fixed prefix:** `16 + RelaysLength + 18 + 32` bytes before optional application records.
+A 0RTT client presents that ticket through the current NFS-protected hello and
+uses the cached state to derive CommonConn keys immediately. The server sends a
+16-byte random prewrite value before its first encrypted traffic record; this is
+especially relevant to `random` mode, whose CTR state consumes the configured
+prewrite offset before normal traffic.
 
-## Ticket format (16 bytes plaintext)
+| Item | Current behavior |
+| ---- | ---------------- |
+| 1RTT | Issues a ticket and stores resumable server state when lifetime permits |
+| 0RTT | Resumes with stored PFS state; does not issue a replacement ticket |
+| Ticket reuse | A ticket may be reused while valid with fresh valid NFS material |
+| Replay key | Exact NFS shared secret from the current hello, scoped to its ticket |
+| Replay | Same ticket + same NFS key is rejected |
+| Expiry | Resume allowed only while `now < expires_at`; expired entries are pruned |
+| Unknown/expired ticket | Writes invalid-ticket noise then fails the encrypted handshake |
+| Replay failure | Fails the encrypted handshake without fallback |
+| Disabled lifetime | 0RTT rejected as `ResumeNotAllowed` |
+| Cache bound | At most 1024 stored sessions; overflow clears the bounded store |
+| Cleanup | Expiry and minute-bucket pruning remove sessions and replay keys |
 
-| Bytes | Content |
-|-------|---------|
-| 0–1 | `EncodeLength(lifetime_seconds)` — big-endian u16 |
-| 2–15 | Random session id |
+Unknown, expired, malformed, AEAD-failed, or replayed encrypted handshakes never
+fall back to the REALITY destination. After REALITY acceptance, they close.
 
-- Full 16 bytes are the server cache key (`Sessions[ticket]`).
-- Lifetime prefix is **not** used for lookup; expiry uses server minute buckets + client-side `Expire`.
-- Ticket is NFS-AEAD encrypted on the wire (32 bytes ciphertext); client presents **decrypted** ticket bytes inside NFS AEAD during 0-RTT.
+## Wire outline
 
-## Server → Client (after 0-RTT accept)
+The initial 0RTT hello is:
 
-| Field | Notes |
-|-------|-------|
-| 16-byte server random (`PreWrite`) | Prepended to first server upload record; download AEAD context |
-| Encrypted upload records | AEAD context = server random |
-| Client download AEAD context | 32-byte **encrypted ticket ciphertext** from hello |
+| Field | Wire role |
+| ----- | --------- |
+| 16-byte IV | Seeds the NFS exchange |
+| NFS relay material | Same chain used by 1RTT |
+| NFS-AEAD length | Plaintext sentinel selects 0RTT |
+| NFS-AEAD ticket | Encrypts the 16-byte cached session key |
+| Optional coalesced encrypted traffic | May follow the hello immediately |
 
-## Replay key
+The 16-byte plaintext ticket includes an encoded lifetime prefix and random
+session bytes; the complete ticket is the cache key. The lifetime prefix is not
+a standalone authorization check: the server cache expiry is authoritative.
 
-`ReplayKey = NFS shared secret (32 bytes)` from **this** connection's IV+relay exchange.
+## Forward inbound matrix
 
-`ServerSession.NfsKeys.LoadOrStore(nfsKey)` — identical full hello replay rejected; fresh IV (new nfsKey) allowed within ticket lifetime.
+| Feature | Status | Verification | Notes |
+| ------- | ------ | ------------ | ----- |
+| TCP | Working | LIVE PASS | Native 0RTT TCP smoke resumes after 1RTT |
+| Vision TCP | Working | DETERMINISTIC PASS | Direct remains blocked under encryption |
+| Native UDP | Working | DETERMINISTIC PASS | Vision native UDP is REJECTED BY PROTOCOL |
+| Mux TCP | Working | DETERMINISTIC PASS | CommonConn transport reuse |
+| Generic Mux UDP | Working | DETERMINISTIC PASS | Persistent associations |
+| XUDP | Working | DETERMINISTIC PASS | GlobalID lifecycle |
+| DNS fast path | Working | UPSTREAM CLIENT HARNESS LIMITATION | No corresponding upstream 0RTT client harness row |
+| `native` / `xorpub` / `random` | Working | unit + 1RTT LIVE PASS | Traffic appearance modes |
 
-## Failure behavior
+The 1RTT encryption harness exercises live TCP, Vision, Mux, generic UDP, XUDP,
+native UDP, and the modes. The separate 0RTT live harness proves native TCP
+resumption; other 0RTT transport rows are deterministic coverage, not live
+claims.
 
-| Condition | Server action |
-|-----------|---------------|
-| Unknown / expired ticket | Write random noise 1279–2279 bytes (invalid TLS header), return error |
-| Replay (duplicate nfsKey) | Close with replay error (no noise) |
-| `ticket_lifetime = 0` | 0-RTT disallowed (`ResumeNotAllowed`) |
-| AEAD / malformed | Crypto error, no fallback |
+## Security notes
 
-## Session rotation
-
-Ticket is **reusable** within lifetime; no replacement ticket on 0-RTT success (upstream cd4ce973).
-
-## Expiry comparison (rust-xray)
-
-Resume is allowed while **`expires_at > now`** (strict). At **`now >= expires_at`**, the session entry is pruned and subsequent lookups return **`UnknownSession`** (wire-equivalent to unknown ticket after prune). Per-entry `ExpiredSession` is returned only if a stale entry is observed before minute-bucket / instant prune removes it.
-
-## Session cache bounds
-
-- `MAX_STORED_SESSIONS = 1024`; overflow clears the entire map (rust-xray policy; upstream bounded strategy not byte-matched).
-- Replay keys (`HashSet` per session) are dropped when the session is removed (expiry, bucket prune, or overflow clear).
-
-## Forward inbound matrix (VLESS-4E.1 baseline)
-
-| Feature | Plain | Vision | Encryption 1-RTT | Encryption 0-RTT |
-|---------|-------|--------|------------------|------------------|
-| TCP | LIVE PASS | LIVE PASS | LIVE PASS | LIVE PASS (deterministic + live smoke) |
-| Native UDP | LIVE PASS | REJECTED BY PROTOCOL | LIVE PASS | DETERMINISTIC PASS |
-| Mux TCP | Experimental | Experimental | LIVE PASS | DETERMINISTIC PASS |
-| Generic Mux UDP | LIVE PASS | N/A | LIVE PASS | DETERMINISTIC PASS |
-| XUDP | Experimental | N/A | LIVE PASS | DETERMINISTIC PASS |
-| DNS fast path | Experimental | N/A | LIVE PASS | UNSUPPORTED BY UPSTREAM CLIENT HARNESS |
-
-Vision **DIRECT** remains blocked under VLESS Encryption (`VisionDirectCapability::BlockedByVlessEncryption`) for both 1-RTT and 0-RTT.
-
+NFS supplies the non-forward-secret component and the one-time PFS exchange
+supplies the forward-secret component used by the traffic layer. The bounded
+session/replay store prevents unbounded retention. `xorpub` and `random` affect
+traffic appearance only; they are not authentication mechanisms. Secret-bearing
+types are zeroized and secret values are not logged.

@@ -1,7 +1,8 @@
 # Remna / Remnawave compatibility smoke
 
 **Project compatibility status:** [compatibility-status.md](./compatibility-status.md)  
-**Scope here:** gRPC API, panel-like config load, dynamic users — not full routing.
+**Scope here:** gRPC API, panel-like config load, dynamic users, and the
+currently implemented routing/runtime surface — not future-version parity.
 
 End-to-end smoke that checks whether `rust-xray` can replace the upstream **Xray**
 binary for Remna/Remnawave-style deployments (CLI, panel-like config, gRPC API,
@@ -264,7 +265,9 @@ After a musl `rw-core` drop-in, supervisor logs should include (tokens redacted)
 
 On failure, look for `config loaded FAIL`, `Xray API bind FAIL`, `failed to configure API transport`, or `REALITY runtime loaded FAIL`.
 
-`ObservatoryService` in `api.services` is accepted but not mounted (warn only); `StatsService` must be present for Remna health checks.
+`ObservatoryService` is mounted when enabled in `api.services`; it supplies the
+implemented standard/Burst health surface. `StatsService` must be present for
+Remna health checks.
 
 ### `ECONNREFUSED 127.0.0.1:61000`
 

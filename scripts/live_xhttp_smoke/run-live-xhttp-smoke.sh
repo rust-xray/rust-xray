@@ -9,12 +9,13 @@ XHTTP_SERVER_PORT="${XHTTP_SERVER_PORT:-24443}"
 XHTTP_SOCKS_PORT="${XHTTP_SOCKS_PORT:-10808}"
 XHTTP_HTTP_PORT="${XHTTP_HTTP_PORT:-10809}"
 XHTTP_TARGET_URL="${XHTTP_TARGET_URL:-https://example.com/}"
-XHTTP_WORK_DIR="${XHTTP_WORK_DIR:-/tmp/rust-xray-live-xhttp-smoke-$$}"
+XHTTP_WORK_DIR="${XHTTP_WORK_DIR:-${SMOKE_WORK_DIR:-/tmp/rust-xray-live-xhttp-smoke-$$}}"
 XHTTP_REPORT_PATH="${XHTTP_REPORT_PATH:-${XHTTP_WORK_DIR}/report.txt}"
-XHTTP_SKIP_BUILD="${XHTTP_SKIP_BUILD:-0}"
-XHTTP_MODE_TIMEOUT="${XHTTP_MODE_TIMEOUT:-90}"
+XHTTP_SKIP_BUILD="${XHTTP_SKIP_BUILD:-${SMOKE_SKIP_BUILD:-0}}"
+XHTTP_MODE_TIMEOUT="${XHTTP_MODE_TIMEOUT:-${SMOKE_TIMEOUT:-90}}"
 XHTTP_RUST_LOG="${XHTTP_RUST_LOG:-rust_xray::transport::xhttp=debug,rust_xray::xhttp::diagnostics=warn,rust_xray::xhttp::bridge=debug,rust_xray::app=debug,rust_xray::vless=debug,warn}"
-XHTTP_RUST_XRAY_BIN="${REPO_ROOT}/target/debug/rust-xray"
+XHTTP_RUST_XRAY_BIN="${XHTTP_RUST_XRAY_BIN:-${SMOKE_RUST_XRAY_BIN:-${RUST_XRAY_BIN:-${REPO_ROOT}/target/debug/rust-xray}}}"
+XHTTP_XRAY_BIN="${XHTTP_XRAY_BIN:-${SMOKE_XRAY_BIN:-${XRAY_BIN:-xray}}}"
 
 SERVER_TEMPLATE="${SCRIPT_DIR}/rust-xray-server-xhttp.json"
 CLIENT_TEMPLATE="${SCRIPT_DIR}/xray-client-xhttp.json"
@@ -22,9 +23,10 @@ CLIENT_TEMPLATE="${SCRIPT_DIR}/xray-client-xhttp.json"
 SERVER_PID=""
 CLIENT_PID=""
 
-declare -A MODE_RESULT=()
-declare -A MODE_CLASSIFICATION=()
-declare -A MODE_HTTP_VERSION=()
+# Indexed arrays keep the runner compatible with the Bash 3 shipped by macOS.
+MODE_RESULT=()
+MODE_CLASSIFICATION=()
+MODE_HTTP_VERSION=()
 
 CURL_CHECKS_PASSED=0
 CURL_CHECKS_FAILED=0
@@ -68,6 +70,39 @@ require_command() {
   fi
 }
 
+mode_slot() {
+  case "$1" in
+    default) printf '0' ;;
+    auto) printf '1' ;;
+    stream_one) printf '2' ;;
+    packet_up) printf '3' ;;
+    stream_up) printf '4' ;;
+    auto_download) printf '5' ;;
+    packet_down) printf '6' ;;
+    *) echo "error: unknown XHTTP mode: $1" >&2; return 1 ;;
+  esac
+}
+
+mode_result() {
+  local slot
+  slot="$(mode_slot "$1")"
+  printf '%s' "${MODE_RESULT[slot]:-${2:-FAIL}}"
+}
+
+mode_classification() {
+  local slot
+  slot="$(mode_slot "$1")"
+  printf '%s' "${MODE_CLASSIFICATION[slot]:-${2:-unknown}}"
+}
+
+set_mode_result() {
+  local slot
+  slot="$(mode_slot "$1")"
+  MODE_RESULT[slot]="$2"
+  MODE_CLASSIFICATION[slot]="$3"
+  MODE_HTTP_VERSION[slot]="${4:-unknown}"
+}
+
 stop_process() {
   local pid="${1:-}"
   if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
@@ -84,9 +119,17 @@ stop_process() {
   fi
 }
 
-free_tcp_port() {
-  if command -v fuser >/dev/null 2>&1; then
-    fuser -k "$1/tcp" >/dev/null 2>&1 || true
+assert_tcp_port_available() {
+  local port="$1"
+  local label="$2"
+  if (echo >/dev/tcp/127.0.0.1/"${port}") >/dev/null 2>&1; then
+    echo "error: ${label} requires 127.0.0.1:${port}, but it is already in use" >&2
+    if command -v lsof >/dev/null 2>&1; then
+      lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null >&2 || true
+    elif command -v ss >/dev/null 2>&1; then
+      ss -ltnp "sport = :${port}" 2>/dev/null >&2 || true
+    fi
+    return 1
   fi
 }
 
@@ -112,9 +155,6 @@ stop_stack() {
   stop_process "${SERVER_PID}"
   CLIENT_PID=""
   SERVER_PID=""
-  free_tcp_port "${XHTTP_SOCKS_PORT}"
-  free_tcp_port "${XHTTP_HTTP_PORT}"
-  free_tcp_port "${XHTTP_SERVER_PORT}"
 }
 
 cleanup() {
@@ -341,9 +381,7 @@ finalize_mode_result() {
   local classification="$3"
   local http_version="${4:-unknown}"
 
-  MODE_RESULT["${mode_key}"]="${outcome}"
-  MODE_CLASSIFICATION["${mode_key}"]="${classification}"
-  MODE_HTTP_VERSION["${mode_key}"]="${http_version}"
+  set_mode_result "${mode_key}" "${outcome}" "${classification}" "${http_version}"
 
   case "${outcome}" in
     PASS)
@@ -372,6 +410,9 @@ run_mode_impl() {
   : >"${curl_socks_log}"
   : >"${curl_http_log}"
 
+  assert_tcp_port_available "${XHTTP_SERVER_PORT}" "XHTTP server"
+  assert_tcp_port_available "${XHTTP_SOCKS_PORT}" "XHTTP SOCKS client"
+  assert_tcp_port_available "${XHTTP_HTTP_PORT}" "XHTTP HTTP client"
   RUST_LOG="${XHTTP_RUST_LOG}" "${XHTTP_RUST_XRAY_BIN}" "${server_config}" >"${server_log}" 2>&1 &
   SERVER_PID=$!
   sleep 0.3
@@ -394,7 +435,7 @@ run_mode_impl() {
   local client_start=SKIP
 
   if [[ "${server_start}" == "PASS" ]]; then
-    xray run -config "${client_config}" >"${client_log}" 2>&1 &
+  "${XHTTP_XRAY_BIN}" run -config "${client_config}" >"${client_log}" 2>&1 &
     CLIENT_PID=$!
     if wait_port 127.0.0.1 "${XHTTP_SOCKS_PORT}" "official xray client SOCKS" 40 \
       && wait_port 127.0.0.1 "${XHTTP_HTTP_PORT}" "official xray client HTTP" 40; then
@@ -530,8 +571,7 @@ run_mode() {
   local mode_elapsed=$(( $(date +%s) - mode_started ))
   if (( mode_elapsed > XHTTP_MODE_TIMEOUT )); then
     echo "mode ${label}: FAIL classification=timeout (mode exceeded ${XHTTP_MODE_TIMEOUT}s)" >&2
-    MODE_RESULT["${mode_key}"]=FAIL
-    MODE_CLASSIFICATION["${mode_key}"]=timeout
+    set_mode_result "${mode_key}" FAIL timeout
     CURL_CHECKS_FAILED=$((CURL_CHECKS_FAILED + 2))
     {
       echo "[mode ${label} timeout]"
@@ -645,13 +685,13 @@ write_summary() {
   {
     echo
     echo "[xhttp summary]"
-    echo "mode_default: ${MODE_RESULT[default]:-FAIL}"
-    echo "mode_auto: ${MODE_RESULT[auto]:-FAIL}"
-    echo "mode_stream_one: ${MODE_RESULT[stream_one]:-FAIL}"
-    echo "mode_packet_up: ${MODE_RESULT[packet_up]:-FAIL}"
-    echo "mode_stream_up: ${MODE_RESULT[stream_up]:-FAIL}"
-    echo "mode_auto_download: ${MODE_RESULT[auto_download]:-FAIL}"
-    echo "mode_packet_down: ${MODE_RESULT[packet_down]:-FAIL}"
+    echo "mode_default: $(mode_result default)"
+    echo "mode_auto: $(mode_result auto)"
+    echo "mode_stream_one: $(mode_result stream_one)"
+    echo "mode_packet_up: $(mode_result packet_up)"
+    echo "mode_stream_up: $(mode_result stream_up)"
+    echo "mode_auto_download: $(mode_result auto_download)"
+    echo "mode_packet_down: $(mode_result packet_down)"
     echo "curl_checks_passed: ${CURL_CHECKS_PASSED}"
     echo "curl_checks_failed: ${CURL_CHECKS_FAILED}"
     echo "http_version_observed: ${versions}"
@@ -672,13 +712,13 @@ write_summary() {
     write_download_recon_summary
     echo
     echo "[failure classifications]"
-    echo "mode_default: ${MODE_CLASSIFICATION[default]:-unknown}"
-    echo "mode_auto: ${MODE_CLASSIFICATION[auto]:-unknown}"
-    echo "mode_stream_one: ${MODE_CLASSIFICATION[stream_one]:-unknown}"
-    echo "mode_packet_up: ${MODE_CLASSIFICATION[packet_up]:-unknown}"
-    echo "mode_stream_up: ${MODE_CLASSIFICATION[stream_up]:-unknown}"
-    echo "mode_auto_download: ${MODE_CLASSIFICATION[auto_download]:-unknown}"
-    echo "mode_packet_down: ${MODE_CLASSIFICATION[packet_down]:-unknown}"
+    echo "mode_default: $(mode_classification default)"
+    echo "mode_auto: $(mode_classification auto)"
+    echo "mode_stream_one: $(mode_classification stream_one)"
+    echo "mode_packet_up: $(mode_classification packet_up)"
+    echo "mode_stream_up: $(mode_classification stream_up)"
+    echo "mode_auto_download: $(mode_classification auto_download)"
+    echo "mode_packet_down: $(mode_classification packet_down)"
     echo
     echo "known classifications:"
     echo "- config_parse_failure"
@@ -701,21 +741,21 @@ assert_acceptance() {
   local failures=0
 
   for required_mode in default auto stream_one packet_up auto_download stream_up; do
-    if [[ "${MODE_RESULT[${required_mode}]:-FAIL}" != "PASS" ]]; then
+    if [[ "$(mode_result "${required_mode}")" != "PASS" ]]; then
       echo "acceptance failed: mode_${required_mode} must PASS" >&2
       failures=1
     fi
   done
 
   for unsupported_mode in packet_down; do
-    case "${MODE_RESULT[${unsupported_mode}]:-FAIL}" in
+    case "$(mode_result "${unsupported_mode}")" in
       PASS|UNSUPPORTED) ;;
       *)
-        echo "acceptance failed: mode_${unsupported_mode} must be PASS or UNSUPPORTED, got ${MODE_RESULT[${unsupported_mode}]:-FAIL}" >&2
+        echo "acceptance failed: mode_${unsupported_mode} must be PASS or UNSUPPORTED, got $(mode_result "${unsupported_mode}")" >&2
         failures=1
         ;;
     esac
-    if [[ "${MODE_CLASSIFICATION[${unsupported_mode}]:-}" == "timeout" ]]; then
+    if [[ "$(mode_classification "${unsupported_mode}" '')" == "timeout" ]]; then
       echo "acceptance failed: mode_${unsupported_mode} hung (timeout)" >&2
       failures=1
     fi
@@ -736,7 +776,7 @@ assert_acceptance() {
 
 main() {
   require_command cargo
-  require_command xray
+  require_command "${XHTTP_XRAY_BIN}"
   require_command curl
   require_command python3
   mkdir -p "${XHTTP_WORK_DIR}"

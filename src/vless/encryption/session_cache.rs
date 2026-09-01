@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::config::TicketLifetimeRange;
@@ -193,13 +195,6 @@ impl SessionCache {
             return Err(SessionLookupError::ReplayDetected);
         }
         Ok(session.pfs_key.clone())
-    }
-
-    pub(crate) fn prune_expired(&self) {
-        if let Ok(mut guard) = self.inner.lock() {
-            Self::prune_expired_locked(&mut guard, self.time.instant());
-            Self::maybe_prune_minute_buckets_locked(&mut guard, self.time.unix_secs());
-        }
     }
 
     #[cfg(test)]

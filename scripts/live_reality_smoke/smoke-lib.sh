@@ -66,7 +66,7 @@ smoke_wait_port() {
   local host="$1"
   local port="$2"
   local label="$3"
-  local timeout="${4:-60}"
+  local timeout="${4:-${SMOKE_TIMEOUT:-60}}"
   local elapsed=0
 
   while (( elapsed < timeout )); do
@@ -81,11 +81,33 @@ smoke_wait_port() {
   return 1
 }
 
+smoke_port_owner_diagnostic() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltnp "sport = :${port}" 2>/dev/null || true
+  else
+    echo "process diagnostics unavailable (install lsof or ss)" >&2
+  fi
+}
+
+smoke_assert_port_available() {
+  local host="$1"
+  local port="$2"
+  local suite="$3"
+  if (echo >/dev/tcp/"${host}"/"${port}") >/dev/null 2>&1; then
+    echo "error: ${suite} requires ${host}:${port}, but it is already in use" >&2
+    smoke_port_owner_diagnostic "${port}" >&2
+    return 1
+  fi
+}
+
 smoke_wait_port_closed() {
   local host="$1"
   local port="$2"
   local label="$3"
-  local timeout="${4:-60}"
+  local timeout="${4:-${SMOKE_TIMEOUT:-60}}"
   local elapsed=0
 
   while (( elapsed < timeout )); do
@@ -102,9 +124,9 @@ smoke_wait_port_closed() {
 
 smoke_free_port() {
   local port="$1"
-  if command -v fuser >/dev/null 2>&1; then
-    fuser -k "${port}/tcp" >/dev/null 2>&1 || true
-  fi
+  # Never kill an unrelated developer process. Callers own their child PIDs and
+  # stop them explicitly; a remaining listener is diagnosed at the next start.
+  smoke_assert_port_available 127.0.0.1 "${port}" "live smoke" || true
 }
 
 smoke_free_ports() {
@@ -157,8 +179,7 @@ smoke_verify_server_started() {
 smoke_start_server() {
   local server_config="$1"
   smoke_stop_process "${SMOKE_SERVER_PID:-}"
-  smoke_free_port "${SMOKE_SERVER_PORT}"
-  smoke_wait_port_closed 127.0.0.1 "${SMOKE_SERVER_PORT}" "rust-xray server" 20 || true
+  smoke_assert_port_available 127.0.0.1 "${SMOKE_SERVER_PORT}" "rust-xray server"
   : >>"${SMOKE_SERVER_LOG}"
   RUST_LOG="${SMOKE_RUST_LOG:-info}" "${SMOKE_RUST_XRAY_BIN}" "${server_config}" >>"${SMOKE_SERVER_LOG}" 2>&1 &
   SMOKE_SERVER_PID=$!
@@ -170,8 +191,9 @@ smoke_start_server() {
 smoke_start_client() {
   local client_config="$1"
   smoke_stop_process "${SMOKE_CLIENT_PID:-}"
+  smoke_assert_port_available 127.0.0.1 "${SMOKE_SOCKS_PORT}" "Xray SOCKS client"
   : >>"${SMOKE_CLIENT_LOG}"
-  xray run -config "${client_config}" >>"${SMOKE_CLIENT_LOG}" 2>&1 &
+  "${SMOKE_XRAY_BIN:-xray}" run -config "${client_config}" >>"${SMOKE_CLIENT_LOG}" 2>&1 &
   SMOKE_CLIENT_PID=$!
   smoke_wait_port 127.0.0.1 "${SMOKE_SOCKS_PORT}" "xray client SOCKS"
 }

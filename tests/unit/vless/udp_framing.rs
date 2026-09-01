@@ -29,7 +29,7 @@ fn multiple_packets_coalesced() {
 #[test]
 fn length_prefix_fragmented() {
     let payload = b"xy";
-    let mut framed = encode_vless_udp_packet(payload).expect("frame");
+    let framed = encode_vless_udp_packet(payload).expect("frame");
     let mut decoder = VlessUdpPacketDecoder::new();
     decoder.push(&framed[..1]);
     assert!(decoder.next_packet().expect("partial len").is_none());

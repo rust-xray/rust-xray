@@ -12,25 +12,29 @@ TEST_PUBLIC_KEY="${TEST_PUBLIC_KEY:-oU1MbEgszawWQJa0S_DxLsNt9G2zyE4rF-CrqvJjTmg}
 
 SMOKE_SERVER_PORT="${SMOKE_ENC_0RTT_SERVER_PORT:-25443}"
 SMOKE_SOCKS_PORT="${SMOKE_ENC_0RTT_SOCKS_PORT:-10818}"
-SMOKE_WORK_DIR="${SMOKE_ENC_0RTT_WORK_DIR:-/tmp/rust-xray-vless-enc-0rtt-smoke-$$}"
-SMOKE_RUST_XRAY_BIN="${SMOKE_RUST_XRAY_BIN:-${REPO_ROOT}/target/release/rust-xray}"
+SMOKE_WORK_DIR="${SMOKE_ENC_0RTT_WORK_DIR:-${SMOKE_WORK_DIR:-/tmp/rust-xray-vless-enc-0rtt-smoke-$$}}"
+SMOKE_RUST_XRAY_BIN="${SMOKE_RUST_XRAY_BIN:-${RUST_XRAY_BIN:-${REPO_ROOT}/target/release/rust-xray}}"
 SMOKE_SKIP_BUILD="${SMOKE_SKIP_BUILD:-0}"
+SMOKE_XRAY_BIN="${SMOKE_XRAY_BIN:-${XRAY_BIN:-xray}}"
 SMOKE_LOCAL_HTTP_PORT="${SMOKE_ENC_0RTT_HTTP_PORT:-28080}"
 
 SERVER_LOG="${SMOKE_WORK_DIR}/server.log"
 CLIENT_LOG="${SMOKE_WORK_DIR}/client.log"
 HTTP_LOG="${SMOKE_WORK_DIR}/http.log"
 HTTP_PID=""
+SERVER_PID=""
+CLIENT_PID=""
 
 cleanup() {
-  smoke_free_ports "${SMOKE_SERVER_PORT}" "${SMOKE_SOCKS_PORT}" "${SMOKE_LOCAL_HTTP_PORT}"
+  smoke_stop_process "${CLIENT_PID}"
+  smoke_stop_process "${SERVER_PID}"
   smoke_stop_process "${HTTP_PID}"
 }
 trap cleanup EXIT
 
 mkdir -p "${SMOKE_WORK_DIR}"
 
-smoke_require_commands cargo xray curl python3
+smoke_require_commands cargo "${SMOKE_XRAY_BIN}" curl python3
 
 if [[ "${SMOKE_SKIP_BUILD}" != "1" ]]; then
   echo "Building release rust-xray..."
@@ -67,7 +71,7 @@ SERVER_PID=$!
 smoke_wait_port 127.0.0.1 "${SMOKE_SERVER_PORT}" "encrypted server" 40
 sleep 1
 
-xray run -config "${CLIENT_CFG}" >"${CLIENT_LOG}" 2>&1 &
+"${SMOKE_XRAY_BIN}" run -config "${CLIENT_CFG}" >"${CLIENT_LOG}" 2>&1 &
 CLIENT_PID=$!
 smoke_wait_port 127.0.0.1 "${SMOKE_SOCKS_PORT}" "xray client" 40
 sleep 1
@@ -90,7 +94,8 @@ echo "curl2 http=${HTTP2}"
 
 smoke_stop_process "${CLIENT_PID}"
 smoke_stop_process "${SERVER_PID}"
-smoke_free_ports "${SMOKE_SERVER_PORT}" "${SMOKE_SOCKS_PORT}"
+CLIENT_PID=""
+SERVER_PID=""
 
 if [[ "${HTTP1}" != "200" || "${HTTP2}" != "200" ]]; then
   echo "FAIL: HTTP not 200 (http1=${HTTP1} http2=${HTTP2})" >&2

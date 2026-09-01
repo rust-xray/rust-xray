@@ -199,7 +199,7 @@ fn fatal_alert_uses_expected_sequence_after_prior_server_records() {
 
 #[test]
 fn fatal_alert_follows_normal_application_write_sequence() {
-    let (mut encryptor, mut decryptor) = server_to_client_pair(TLS_AES_128_GCM_SHA256, 0x20);
+    let (mut encryptor, decryptor) = server_to_client_pair(TLS_AES_128_GCM_SHA256, 0x20);
 
     let normal = encryptor
         .encrypt_application_data(b"server-app-data")

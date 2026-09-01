@@ -152,9 +152,6 @@ where
     }
 }
 
-// Backward-compatible alias used during migration.
-pub type HandshakeReader<S> = HandshakeStream<S>;
-
 impl<S> AsyncWrite for HandshakeStream<S>
 where
     S: AsyncWrite + Unpin,

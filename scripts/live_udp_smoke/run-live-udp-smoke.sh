@@ -24,7 +24,7 @@ UDP_BLOCK_PORT="${UDP_BLOCK_PORT:-37999}"
 
 SMOKE_SERVER_LOG="${SMOKE_WORK_DIR}/server.log"
 SMOKE_CLIENT_LOG="${SMOKE_WORK_DIR}/client.log"
-SMOKE_RUST_XRAY_BIN="${REPO_ROOT}/target/release/rust-xray"
+SMOKE_RUST_XRAY_BIN="${SMOKE_RUST_XRAY_BIN:-${RUST_XRAY_BIN:-${REPO_ROOT}/target/release/rust-xray}}"
 SMOKE_UDP_SERVICES_PID=""
 SMOKE_FAILED=0
 declare -a MATRIX_ROWS=()
@@ -127,7 +127,30 @@ start_local_udp_services() {
     --stun-port "${UDP_STUN_PORT}" \
     >"${SMOKE_WORK_DIR}/local-udp-services.log" 2>&1 &
   SMOKE_UDP_SERVICES_PID=$!
-  sleep 0.5
+  local ready=0 attempt
+  for ((attempt = 0; attempt < 40; attempt++)); do
+    if grep -Fq "local-udp-services echo=${UDP_ECHO_PORT}" "${SMOKE_WORK_DIR}/local-udp-services.log" \
+      && python3 - "${UDP_ECHO_PORT}" <<'PY'
+import socket
+import sys
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(0.25)
+sock.sendto(b"udp-ready", ("127.0.0.1", int(sys.argv[1])))
+if sock.recvfrom(128)[0] != b"udp-ready":
+    raise SystemExit(1)
+PY
+    then
+      ready=1
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ "${ready}" != "1" ]]; then
+    echo "error: local UDP echo readiness probe failed on 127.0.0.1:${UDP_ECHO_PORT}" >&2
+    tail -20 "${SMOKE_WORK_DIR}/local-udp-services.log" >&2 || true
+    return 1
+  fi
 }
 
 cleanup() {

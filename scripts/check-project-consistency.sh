@@ -4,16 +4,41 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}" || exit 1
 
-declare -A STATUS
+# Indexed arrays keep this developer check compatible with macOS Bash 3.
+STATUS_KEYS=()
+STATUS_VALUES=()
 OVERALL=0
+
+status_set() {
+  local key="$1" value="$2" index
+  for ((index = 0; index < ${#STATUS_KEYS[@]}; index++)); do
+    if [[ "${STATUS_KEYS[index]}" == "${key}" ]]; then
+      STATUS_VALUES[index]="${value}"
+      return
+    fi
+  done
+  STATUS_KEYS+=("${key}")
+  STATUS_VALUES+=("${value}")
+}
+
+status_get() {
+  local key="$1" index
+  for ((index = 0; index < ${#STATUS_KEYS[@]}; index++)); do
+    if [[ "${STATUS_KEYS[index]}" == "${key}" ]]; then
+      printf '%s' "${STATUS_VALUES[index]}"
+      return
+    fi
+  done
+  printf 'FAIL'
+}
 
 run_check() {
   local key="$1"
   shift
   if "$@"; then
-    STATUS["${key}"]="PASS"
+    status_set "${key}" PASS
   else
-    STATUS["${key}"]="FAIL"
+    status_set "${key}" FAIL
     OVERALL=1
   fi
 }
@@ -26,7 +51,7 @@ maybe_run_script() {
   elif [[ -f "${script}" ]]; then
     run_check "${key}" bash "${script}"
   else
-    STATUS["${key}"]="SKIP"
+    status_set "${key}" SKIP
   fi
 }
 
@@ -109,9 +134,9 @@ run_check packet_up_status_consistent check_packet_up_status_consistent
 run_check docs_xhttp_status_consistent check_docs_xhttp_status_consistent
 
 if [[ "${OVERALL}" -eq 0 ]]; then
-  STATUS["overall"]="PASS"
+  status_set overall PASS
 else
-  STATUS["overall"]="FAIL"
+  status_set overall FAIL
 fi
 
 echo "[project consistency]"
@@ -128,7 +153,7 @@ for key in \
   docs_xhttp_status_consistent \
   overall
 do
-  echo "${key}: ${STATUS[${key}]:-FAIL}"
+  echo "${key}: $(status_get "${key}")"
 done
 
 exit "${OVERALL}"

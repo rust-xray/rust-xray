@@ -5,8 +5,7 @@ use tokio::net::TcpListener;
 
 use crate::runtime::VlessInboundAuthContext;
 use crate::vless::encryption::{
-    build_encryption_server, handshake::ENCRYPTED_TICKET_LEN, handshake::PFS_SERVER_EXCHANGE_LEN,
-    handshake_and_wrap_with_rng, X25519SecretKey,
+    build_encryption_server, handshake_and_wrap_with_rng, X25519SecretKey,
 };
 use crate::vless::handle_vless_tcp_inbound_with_auth_context;
 use crate::vless::user_manager::VlessUserManager;
@@ -15,7 +14,7 @@ use crate::vless::VlessClient;
 
 use super::client_sim::{
     build_native_x25519_client_hello, client_complete_1rtt_handshake, client_upload_writer,
-    read_server_handshake_response, seal_client_traffic, server_config_from_single_x25519,
+    read_server_handshake_response, server_config_from_single_x25519,
 };
 use super::test_rng::TestHandshakeRng;
 
@@ -90,7 +89,7 @@ async fn encrypted_vless_header_parsed_by_runtime() {
     let (hello, parts) =
         build_native_x25519_client_hello(&config, &secret, &mut TestHandshakeRng::new(42));
 
-    let (mut client_io, server_io) = duplex(65536);
+    let (client_io, server_io) = duplex(65536);
     let vless_body = build_vless_tcp_request(&USER_ID, target_port, b"ping");
     let auth = test_auth_context();
 
@@ -150,7 +149,7 @@ async fn encrypted_initial_payload_reaches_target_once() {
 
     let vless_body = build_vless_tcp_request(&USER_ID, target_port, initial_payload);
     // Header-only portion ends before initial payload; entire blob is one encrypted record.
-    let (mut client_io, server_io) = duplex(65536);
+    let (client_io, server_io) = duplex(65536);
     let auth = test_auth_context();
 
     let client = tokio::spawn(async move {
@@ -206,7 +205,7 @@ async fn fragmented_vless_header_across_encrypted_records() {
     let record_one = full[..split_at].to_vec();
     let record_two = full[split_at..].to_vec();
 
-    let (mut client_io, server_io) = duplex(65536);
+    let (client_io, server_io) = duplex(65536);
     let auth = test_auth_context();
     let hello_clone = hello.clone();
     let parts_clone = parts;
@@ -280,7 +279,7 @@ async fn encrypted_vision_flow_reaches_runtime() {
     let mut vless_body = build_vless_tcp_request_with_addons(&USER_ID, &addons, target_port, &[]);
     vless_body.extend_from_slice(&vision_payload);
 
-    let (mut client_io, server_io) = duplex(65536);
+    let (client_io, server_io) = duplex(65536);
     let auth = vision_auth_context();
 
     let client = tokio::spawn(async move {

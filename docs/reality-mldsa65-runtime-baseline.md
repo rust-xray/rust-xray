@@ -7,22 +7,20 @@ This document records the confirmed live smoke baseline for built-in ML-DSA-65
 REALITY support. It is intended as a regression guard for later REALITY/Vision
 work.
 
-## Baseline
+## Historical baseline and current coverage
 
-- generated_at: 2026-05-29T16:55:28Z
-- curl_checks_passed: 34
-- curl_checks_failed: 0
-- aes_gcm_decrypt_failed: 0
-- mldsa65_checks_passed: 4
-- mldsa65_checks_failed: 0
-
-Confirmed PASS coverage:
+The numbers in the former local smoke capture are historical and are not used as
+a current verification snapshot. Current live evidence must come from the
+repository smoke harness. Its relevant coverage includes:
 
 - full mldsa65 raw vision curl succeeded
 - fallback matrix PASS: default, SNI/name, HTTP path, ALPN http/1.1, ALPN h2,
   ALPN h2 curl, xver=1 PROXY v1, xver=2 PROXY v2
 - cipher matrix PASS: AES128, AES256, ChaCha20
-- UDP/Mux/XUDP unsupported probes PASS with TCP regressions (non-Mux UDP / XUDP rejected; Mux Happ baseline + non-DNS UDP unsupported probe — see [compatibility-status.md](../../docs/compatibility-status.md))
+- UDP/Mux/XUDP are documented and exercised separately by the current UDP smoke;
+  native UDP, generic Mux UDP, and XUDP are supported forward-inbound behavior,
+  while Vision native UDP is intentionally rejected. See
+  [compatibility-status.md](./compatibility-status.md).
 
 ## Invariants
 

@@ -19,6 +19,7 @@ const TLS13_SUPPORTED_VERSIONS: [u8; 6] = [0x00, 0x2b, 0x00, 0x02, 0x03, 0x04];
 const TLS_HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 0x01;
 const TLS_HANDSHAKE_TYPE_SERVER_HELLO: u8 = 0x02;
 const MAX_VISION_FRAME: usize = 8192;
+#[cfg(test)]
 use crate::vless::config::UPSTREAM_DEFAULT_TESTSEED;
 
 /// Per-direction Vision padding / unpadding state.
@@ -69,6 +70,7 @@ pub struct TrafficState {
 }
 
 impl TrafficState {
+    #[cfg(test)]
     pub fn new(user_uuid: [u8; 16]) -> Self {
         Self::with_testseed(user_uuid, UPSTREAM_DEFAULT_TESTSEED)
     }
@@ -162,6 +164,7 @@ impl TrafficState {
 
 pub type SharedTrafficState = Arc<Mutex<TrafficState>>;
 
+#[cfg(test)]
 pub fn new_shared_traffic_state(user_uuid: [u8; 16]) -> SharedTrafficState {
     new_shared_traffic_state_with_testseed(user_uuid, UPSTREAM_DEFAULT_TESTSEED)
 }
@@ -171,10 +174,6 @@ pub fn new_shared_traffic_state_with_testseed(
     testseed: [u32; 4],
 ) -> SharedTrafficState {
     Arc::new(Mutex::new(TrafficState::with_testseed(user_uuid, testseed)))
-}
-
-pub fn new_shared_traffic_state_default(user_uuid: [u8; 16]) -> SharedTrafficState {
-    new_shared_traffic_state(user_uuid)
 }
 
 pub fn is_vision_flow(flow: Option<&str>) -> bool {
@@ -531,6 +530,7 @@ impl VisionDirectCapability {
         }
     }
 
+    #[cfg(test)]
     pub fn is_blocked(&self) -> bool {
         matches!(self, Self::BlockedByVlessEncryption)
     }

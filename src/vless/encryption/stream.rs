@@ -89,7 +89,7 @@ impl<S> VlessEncryptedStream<S> {
             xor_reader,
             xor_writer,
             pending_frame,
-            pending_prewrite,
+            pending_prewrite: _,
         } = self;
         let (reader_inner, writer_inner, direct_relay) = split(inner)?;
         Ok(VlessEncryptedRelaySplit {
@@ -160,6 +160,7 @@ impl EncryptedReader {
 
     /// Reader for client-side post-1RTT traffic when cipher choice is known and
     /// the directional AEAD may already have advanced (e.g. after ticket open).
+    #[cfg(test)]
     pub(crate) fn new_post_handshake(
         keys: TrafficDirectionKeys,
         united_key: [u8; UNITED_KEY_LEN],
@@ -290,11 +291,6 @@ pub(crate) fn reset_test_seal_count() {
     TEST_SEAL_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
-#[cfg(test)]
-pub(crate) fn test_seal_count() -> usize {
-    TEST_SEAL_COUNT.load(std::sync::atomic::Ordering::SeqCst)
-}
-
 impl EncryptedWriter {
     pub(crate) fn new(keys: TrafficDirectionKeys) -> Self {
         Self {
@@ -394,10 +390,7 @@ pub(crate) struct XorTrafficWriter {
 }
 
 impl XorTrafficReader {
-    pub(crate) fn new_client_download(united: &[u8; UNITED_KEY_LEN], ticket: &[u8; 16]) -> Self {
-        Self::new_client_download_with_skip(united, ticket, 0)
-    }
-
+    #[cfg(test)]
     pub(crate) fn new_client_download_with_skip(
         united: &[u8; UNITED_KEY_LEN],
         ticket: &[u8; 16],
@@ -412,6 +405,7 @@ impl XorTrafficReader {
 }
 
 impl XorTrafficWriter {
+    #[cfg(test)]
     pub(crate) fn new_client_upload(united: &[u8; UNITED_KEY_LEN], client_iv: &[u8; 16]) -> Self {
         Self {
             ctr: CtrStream::new(united, client_iv),

@@ -90,6 +90,7 @@ pub fn encapsulate_mlkem768(
 }
 
 /// Test helper: encapsulate against the public key derived from a decap seed.
+#[cfg(test)]
 pub(crate) fn encapsulate_mlkem768_with_seed(
     decapsulation_key_seed: &[u8; 64],
 ) -> Result<([u8; MLKEM768_CIPHERTEXT_LEN], MlKem768SharedSecret), Error> {

@@ -86,12 +86,13 @@ impl VlessEncryptionServer {
         self.nfs_chain.key_count()
     }
 
-    pub fn session_cache(&self) -> &SessionCache {
+    #[cfg(test)]
+    pub(crate) fn session_cache(&self) -> &SessionCache {
         &self.session_cache
     }
 
     #[cfg(test)]
-    pub fn from_config_with_session_cache(
+    pub(crate) fn from_config_with_session_cache(
         config: Mlkem768X25519PlusConfig,
         session_cache: SessionCache,
     ) -> Result<Self, HandshakeError> {
@@ -160,7 +161,7 @@ impl VlessEncryptionServer {
             .read_exact(NFS_ENCRYPTED_LENGTH_LEN)
             .await
             .map_err(HandshakeError::from)?;
-        let (plaintext_len, mut nfs_aead) = TrafficAead::open_auto_kind_with_state(
+        let (plaintext_len, nfs_aead) = TrafficAead::open_auto_kind_with_state(
             &iv,
             nfs_key.as_bytes(),
             prefer_aes,
@@ -190,7 +191,7 @@ impl VlessEncryptionServer {
         iv: [u8; IV_LEN],
         nfs_key: super::keys::SecretBytes<32>,
         mut nfs_aead: TrafficAead,
-        prefer_aes: bool,
+        _prefer_aes: bool,
     ) -> Result<(ServerHandshakeResult, PrefixStream<S>), HandshakeError>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -289,7 +290,7 @@ impl VlessEncryptionServer {
         iv: [u8; IV_LEN],
         nfs_key: super::keys::SecretBytes<32>,
         mut nfs_aead: TrafficAead,
-        prefer_aes: bool,
+        _prefer_aes: bool,
         plaintext_len: u16,
     ) -> Result<(ServerHandshakeResult, PrefixStream<S>), HandshakeError>
     where
@@ -333,8 +334,7 @@ impl VlessEncryptionServer {
         pfs_public_key.extend_from_slice(server_x25519_public.as_bytes());
 
         let mut upload_aead = TrafficAead::new(&pfs_public_key, united_key.as_bytes(), use_aes);
-        let mut download_aead =
-            TrafficAead::new(&client_pfs_public, united_key.as_bytes(), use_aes);
+        let download_aead = TrafficAead::new(&client_pfs_public, united_key.as_bytes(), use_aes);
 
         let mut ticket = [0u8; 16];
         rng.fill(&mut ticket);

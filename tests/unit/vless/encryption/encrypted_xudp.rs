@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{duplex, AsyncWriteExt};
+use tokio::io::duplex;
 use tokio::net::UdpSocket;
 
 use crate::config::xray::raw::OutboundObject;
@@ -83,7 +83,7 @@ async fn encrypted_xudp_association_returns_response() {
     let (hello, parts) =
         build_native_x25519_client_hello(&config, &secret, &mut TestHandshakeRng::new(42));
 
-    let (mut client_io, server_io) = duplex(65536);
+    let (client_io, server_io) = duplex(65536);
     let clients = vec![VlessClient {
         id: uuid::Uuid::from_bytes(USER_ID),
         email: Some("enc-xudp@test".to_string()),
@@ -162,7 +162,7 @@ async fn encrypted_destinationless_xudp_keep_reuses_association() {
         build_native_x25519_client_hello(&config, &secret, &mut TestHandshakeRng::new(42));
 
     let vless_body = build_vless_mux_request(&USER_ID, &mux_payload);
-    let (mut client_io, server_io) = duplex(65536);
+    let (client_io, server_io) = duplex(65536);
     let clients = vec![VlessClient {
         id: uuid::Uuid::from_bytes(USER_ID),
         email: Some("enc-xudp-keep@test".to_string()),

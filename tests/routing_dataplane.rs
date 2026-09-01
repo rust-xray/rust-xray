@@ -655,7 +655,7 @@ mod e2e {
                 email: Some("route-user@example.com".to_string()),
                 flow: None,
                 level: None,
-                testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+                testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             }],
         ));
         let router = Arc::clone(&runtime.router);
@@ -767,14 +767,14 @@ mod e2e {
                     email: Some("static-route@example.test".to_string()),
                     flow: None,
                     level: None,
-                    testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+                    testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
                 },
                 VlessClient {
                     id: outside_uuid,
                     email: Some("outside-route@example.test".to_string()),
                     flow: None,
                     level: None,
-                    testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+                    testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
                 },
             ],
         ));
@@ -902,7 +902,7 @@ mod e2e {
                 email: Some("other@example.test".to_string()),
                 flow: None,
                 level: None,
-                testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+                testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             }],
         ));
         runtime.inbound.user_managers().register(Arc::clone(&users));
@@ -1003,7 +1003,7 @@ mod e2e {
                 email: Some("user@example.com".to_string()),
                 flow: None,
                 level: None,
-                testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+                testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             }],
         ));
         let router = Arc::clone(&runtime.router);
@@ -1103,7 +1103,7 @@ mod e2e {
                 email: Some("dynamic-outbound@example.test".to_string()),
                 flow: None,
                 level: None,
-                testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+                testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             }],
         ));
         let router = Arc::clone(&runtime.router);
@@ -1199,7 +1199,7 @@ mod e2e {
                     email: Some("protocol@example.com".to_string()),
                     flow: None,
                     level: None,
-                    testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+                    testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
                 }],
                 sniffing_enabled,
             ));
@@ -1321,7 +1321,7 @@ mod e2e {
                 email: Some("geo@example.test".to_string()),
                 flow: None,
                 level: None,
-                testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+                testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             }],
         ));
         let router = Arc::clone(&runtime.router);
@@ -1443,7 +1443,7 @@ mod e2e {
                 email: Some("webhook@example.test".to_string()),
                 flow: None,
                 level: None,
-                testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+                testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             }],
         ));
         let router = Arc::clone(&runtime.router);
@@ -1549,7 +1549,7 @@ mod e2e {
                 email: Some("balancer@example.test".to_string()),
                 flow: None,
                 level: None,
-                testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+                testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
             }],
         ));
         let router = Arc::clone(&runtime.router);

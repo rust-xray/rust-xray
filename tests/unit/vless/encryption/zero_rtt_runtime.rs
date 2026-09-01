@@ -31,9 +31,9 @@ use crate::vless::VlessClient;
 
 use super::client_sim::{
     build_zero_rtt_client_hello, build_zero_rtt_coalesced_wire, client_zero_rtt_duplex_stream,
-    client_zero_rtt_stream, client_zero_rtt_upload_writer, config_with_ticket_lifetime_and_xor,
-    perform_1rtt_and_capture_resume, read_zero_rtt_random_download_payload, seal_client_traffic,
-    server_config_with_ticket_lifetime, server_secret_for_tests, ClientResumeState,
+    client_zero_rtt_stream, config_with_ticket_lifetime_and_xor, perform_1rtt_and_capture_resume,
+    read_zero_rtt_random_download_payload, seal_client_traffic, server_config_with_ticket_lifetime,
+    server_secret_for_tests, ClientResumeState,
 };
 use super::stream_helpers::{ScriptStream, StripServerPrewriteReader};
 use super::test_rng::TestHandshakeRng;
@@ -371,7 +371,7 @@ async fn zero_rtt_mux_tcp_child_reaches_local_target() {
     });
 
     client.await.expect("client");
-    tokio::time::timeout(Duration::from_secs(5), relay)
+    let _ = tokio::time::timeout(Duration::from_secs(5), relay)
         .await
         .expect("timeout")
         .expect("mux inbound");
@@ -629,7 +629,7 @@ async fn zero_rtt_random_download_decrypt_matrix_finds_working_combo() {
     let config = config_with_ticket_lifetime_and_xor(&secret, 600, 600, XorMode::Random);
     let server = Arc::new(VlessEncryptionServer::from_config(config.clone()).expect("server"));
     let (resume, _) = perform_1rtt_and_capture_resume(server.as_ref(), &config, 99).await;
-    let (coalesced, parts, enc_ticket) = build_zero_rtt_coalesced_wire(
+    let (coalesced, parts, _enc_ticket) = build_zero_rtt_coalesced_wire(
         &config,
         &resume,
         &secret,

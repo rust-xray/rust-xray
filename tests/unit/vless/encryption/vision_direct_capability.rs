@@ -113,7 +113,7 @@ async fn encrypted_vision_runtime_never_enables_tls_direct_relay() {
     vless_body.extend_from_slice(&[0x01, 127, 0, 0, 1]);
     vless_body.extend_from_slice(&vision_payload);
 
-    let (mut client_io, server_io) = duplex(65536);
+    let (client_io, server_io) = duplex(65536);
     let clients = vec![VlessClient {
         id: uuid::Uuid::from_bytes(USER_ID),
         email: Some("vision-enc@test".to_string()),

@@ -8,8 +8,8 @@ use crate::vless::encryption::keys::SecretBytes;
 
 #[test]
 fn pfs_key_zeroizes_on_drop() {
-    let mut mlkem = [0x11u8; MLKEM768_SHARED_SECRET_LEN];
-    let mut x25519 = [0x22u8; 32];
+    let mlkem = [0x11u8; MLKEM768_SHARED_SECRET_LEN];
+    let x25519 = [0x22u8; 32];
     let key = compose_pfs_key(&mlkem, &x25519);
     let mut material = *key.as_bytes();
     drop(key);

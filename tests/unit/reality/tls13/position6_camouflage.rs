@@ -179,7 +179,7 @@ fn position6_dummy_plaintext_is_empty_application_data_with_zero_padding() {
 
 #[test]
 fn position6_does_not_alter_handshake_transcript() {
-    let mut state = state_with_handshake_secrets();
+    let state = state_with_handshake_secrets();
     let digest_before = state.transcript.digest();
 
     let server_secret = server_application_traffic_secret_at_server_finished(&state);

@@ -1,9 +1,6 @@
 use crate::vless::encryption::aead::{TrafficAead, TrafficAeadKind};
 use crate::vless::encryption::header::encode_traffic_header;
-use crate::vless::encryption::{
-    increase_nonce, reset_test_seal_count, test_seal_count, EncryptedReader, EncryptedWriter,
-    MAX_NONCE,
-};
+use crate::vless::encryption::{increase_nonce, EncryptedReader, EncryptedWriter, MAX_NONCE};
 
 use super::stream_common::{client_writer_keys, test_direction_keys, test_united};
 

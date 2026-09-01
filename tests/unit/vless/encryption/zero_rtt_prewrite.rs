@@ -1,6 +1,6 @@
 //! 0-RTT server PreWrite (pending_prewrite) and 1-RTT CommonConn regression.
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use crate::vless::encryption::aead::{TrafficAead, TrafficAeadKind};
 use crate::vless::encryption::header::encode_traffic_header;

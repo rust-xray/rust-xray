@@ -1,38 +1,51 @@
-# VLESS Mux.Cool Compatibility Notes
+# VLESS Mux.Cool compatibility notes
 
-Scope: this documents the subset implemented by `src/vless/mux.rs`, cross-checked against Xray-core `common/mux` writer/reader semantics.
+This records the current Mux.Cool inbound implementation in `src/mux/`, checked
+against Xray-core wire semantics. It is a scoped inbound status document, not a
+claim of complete Mux.Cool or Xray-core parity.
 
-Reference points:
-- Xray-core Go package docs: <https://pkg.go.dev/github.com/xtls/xray-core/common/mux>
-- Mux.Cool protocol notes: <https://xtls.github.io/en/development/protocols/muxcool.html>
+| Wire item | rust-xray behavior |
+| --------- | ------------------ |
+| Frame metadata | Reads bounded metadata and optional data payload |
+| Session ID | 16-bit `mux_id`; retained in child/association responses |
+| Statuses | `New`, `Keep`, `End`, and `KeepAlive` |
+| Network metadata | TCP and UDP, with IPv4, domain, and IPv6 destinations |
+| TCP | Concurrent children with split readers and a bounded downlink queue |
+| Generic UDP | Persistent per-SessionID association; routed outbound and stats |
+| XUDP | GlobalID-managed association with reattach, expiry, and rebuild |
+| DNS `:53` | Numeric destinations use the in-process DNS fast path |
 
-| Field | Xray-core / Mux.Cool semantics | rust-xray expectation |
-| --- | --- | --- |
-| Frame length | 2-byte big-endian metadata length, followed by metadata. If `OptionData` is set, a 2-byte big-endian data length and payload follow. | `read_mux_frame` reads metadata first, then optional data. |
-| Session id | 16-bit unsigned mux/session id. | `mux_id: u16`. |
-| Status | `New = 0x01`, `Keep = 0x02`, `End = 0x03`, `KeepAlive = 0x04`. | `MuxStatus`. |
-| Option | `OptionData = 0x01` means a data payload follows. Other bits are not used by this implementation. | `MuxOption { has_data }`. |
-| Network | In address metadata: `TCP = 0x01`, `UDP = 0x02`. | `MuxNetwork`. |
-| Address metadata | `network`, `port`, `address type`, address bytes. Address types match VLESS-style IPv4/domain/IPv6. | `MuxDestination`. |
-| TCP open/data/close | Client sends `New + TCP + destination` with optional initial data; later `Keep + Data`; close is `End`. Server responds with `Keep + Data` and `End`. | One active TCP substream is supported today. |
-| UDP packet flow | UDP packet frames carry destination metadata and data. Server response is also a UDP `Keep + Data` frame with destination metadata. | Used for Mux UDP DNS. |
-| UDP close/end | Xray-core response writer writes `Keep + Data`; `Close()` writes a separate `End`. | rust-xray does not send `End` after a successful UDP response by default; `RUST_XRAY_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE=1` restores the diagnostic old behavior. |
-| mux_id reuse | A mux id is scoped to one substream/datagram lifecycle and must be preserved in all response frames for that lifecycle. | DNS response and end preserve request `mux_id`. |
+A TCP `New` creates a child relay. Multiple TCP children can be active at once.
+A duplicate TCP `New` SessionID replaces its existing child; this is an explicit
+intentional divergence documented in the compatibility matrix.
 
-Mux.Cool UDP semantics:
-- Frame length format: `u16be(metadata_len) || metadata || optional u16be(data_len) || data`.
-- mux_id/session id: `u16`, preserved across UDP response and `End`.
-- Status values: `New=0x01`, `Keep=0x02`, `End=0x03`, `KeepAlive=0x04`.
-- Option values: `OptionData=0x01`; set when the frame carries the optional data section.
-- network=udp value: `0x02` in address metadata.
-- UDP request frame shape: `New` or `Keep` with UDP destination metadata and packet payload.
-- UDP response frame shape: `Keep + OptionData` with UDP destination metadata and packet payload.
-- Response address metadata: present; rust-xray echoes the peer destination metadata used by the request.
-- Close/end requirement: successful UDP responses are data frames only by default; `End` is reserved for explicit close/error/timeout paths or diagnostic compatibility mode.
-- mux_id reuse rules: clients may send more UDP packets on the same mux id; rust-xray keeps the id usable after a successful response.
-- Timeout/cleanup behavior: timeout closes only the UDP mux id with `End`; it must not close the whole mux session or block unrelated mux frames.
+A generic UDP `New` creates a persistent association. Subsequent `Keep` frames
+can supply a destination override or reuse the existing association. Replies are
+encoded as UDP `Keep + Data` frames. `End` or session shutdown cleans up workers
+without stopping unrelated children.
 
-Compatibility constraints:
-- Do not use system resolver for Mux UDP DNS.
-- Do not close the whole mux session after a UDP DNS packet.
-- Keep response payload and close ordering observable in logs.
+XUDP associations are keyed by GlobalID rather than only the parent Mux ID. A
+detached association can reattach to a new parent, destination-less `Keep` is
+valid for the attached association, broken outbounds are rebuilt, and detached
+associations expire.
+
+Numeric Mux DNS `:53` is a special in-process `DnsEngine` route and intentionally
+bypasses the normal router. The special domain-name `:53` resolver hook is
+deferred; generic UDP domain destinations are independently supported through
+their routed UDP association.
+
+## Vision and VLESS Encryption
+
+Vision native UDP is rejected. Vision ordinary Mux is rejected at flow validation;
+the implemented XUDP form is permitted. VLESS Encryption is transparent to the
+Mux dispatcher: 1RTT is live-covered and 0RTT transport combinations have
+deterministic coverage. Vision `COMMAND_DIRECT` is blocked under VLESS Encryption,
+so encrypted traffic cannot bypass CommonConn.
+
+## Evidence
+
+- `tests/unit/mux/` covers parsing, TCP children, packet UDP, and XUDP lifecycle.
+- `scripts/live_udp_smoke/run-live-udp-smoke.sh` covers native UDP, generic Mux
+  UDP, XUDP, persistence, and routing with local services.
+- `scripts/live_vless_encryption_smoke/` covers encrypted 1RTT Mux/XUDP and
+  deterministic 0RTT transport cases.

@@ -212,7 +212,7 @@ Live matrix remains `scripts/live_reality_smoke/run-live-smoke.sh` unchanged.
 - **MirrorConn-style concurrent mirror** during pre-auth ClientHello phase (upstream timing/shape sampling beyond dest ServerHello observation)
 - **Vision splice / zero-copy** beyond DIRECT MVP
 - **`mldsa65Seed`** — experimental runtime baseline when configured ([baseline doc](./reality-mldsa65-runtime-baseline.md))
-- **X25519MLKEM768 on REALITY accepted TLS path** — Stage 2 implements **pre-auth carrier parsing only** (`src/reality/key_share.rs`): ClientHello group `0x11EC` with 1216-byte `key_exchange` (1184-byte opaque ML-KEM prefix + 32-byte X25519) may supply the REALITY auth X25519 public key when no valid standalone `X25519` entry exists. Upstream two-pass selection: standalone `X25519`/32 first, then hybrid trailing 32 bytes. **Not yet:** ML-KEM-768 crypto, hybrid ServerHello generation, 64-byte TLS shared secret, dest ServerHello group mirroring (`src/reality/tls13/key_share.rs` remains X25519-only).
+- **X25519MLKEM768 accepted TLS path:** implemented separately from REALITY auth. Pre-auth uses the upstream-compatible two-pass X25519 selection; accepted TLS observes the target group, generates the ML-KEM-768 ciphertext plus X25519 server share, and feeds the 64-byte hybrid secret into the TLS 1.3 schedule. A client share that cannot match the observed target group is rejected on the accepted path.
 - **Fallback limits** — `limitFallbackUpload` / `limitFallbackDownload` on the pre-auth fallback
   relay; no `MirrorConn` timing or `s2cSaved` prebuffer parity
 - **TLS 1.3 CCM cipher suites** (0x1304, 0x1305) — rejected on accepted path
@@ -273,7 +273,7 @@ Remaining work (roughly by dependency):
 1. **MirrorConn / camouflage timing** — upstream-style concurrent mirror during pre-auth.
 2. **Dest handshake shape sampling** — record timing/length behavior beyond ServerHello observation.
 3. **Vision splice / zero-copy** — beyond DIRECT MVP padding relay.
-4. **ML-KEM / X25519MLKEM768 TLS negotiation** — Stage 2: pre-auth hybrid `key_share` carrier parsing only; accepted-path TLS 1.3 KEX remains X25519-only (Stage 3+).
+4. **ML-KEM / X25519MLKEM768 TLS negotiation** — implemented; remaining work is live interop breadth rather than the accepted-path hybrid KEX implementation.
 5. **Fallback parity refinements** — `MirrorConn` timing and `s2cSaved` prebuffer behavior.
 
 ## Required implementation blocks
@@ -336,7 +336,7 @@ Use this as a checklist. Items are ordered roughly by dependency.
 | T11 | C | VLESS response header exact semantics | Mostly done | Vision DIRECT MVP |
 | T12 | D | Ensure failed REALITY after mirror → transparent fallback | Partial | Policy fail before accept uses fallback |
 | T13 | — | Vision splice / zero-copy | Not implemented | DIRECT MVP only |
-| T14 | — | ML-KEM hybrid KEM | Not implemented | Out of scope |
+| T14 | — | ML-KEM hybrid KEM | Done | Target-selected hybrid ServerHello and 64-byte TLS secret |
 
 ## Anti-patterns (do not implement)
 
@@ -388,5 +388,5 @@ upstream code here; read upstream when starting block A/B.
 **Summary:** rust-xray **detects** valid REALITY ClientHello clients, **observes**
 dest ServerHello shape, runs the **full TLS 1.3 server handshake**, and hands
 the decrypted application stream to VLESS/transport. Remaining work is upstream
-camouflage parity (MirrorConn timing), Vision splice, ML-KEM, and fallback rate
-limits — not basic handshake completion.
+camouflage parity (MirrorConn timing), Vision splice, and fallback rate-limit
+timing refinements — not basic handshake completion or hybrid KEX.

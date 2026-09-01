@@ -34,9 +34,9 @@ use crate::vless::udp_relay::{
 use crate::vless::udp_session::VlessUdpRelayOptions;
 use crate::vless::user_manager::{user_id_hint, VlessAuthenticatedClient, VlessUserManager};
 use crate::vless::vision::{
-    is_vision_flow, new_shared_traffic_state, new_shared_traffic_state_with_testseed,
-    parse_vless_request_flow, SharedTrafficState, VisionDirectCapability, VisionRelayReader,
-    VisionRelayStream, VisionRelayWriter, FLOW_XTLS_RPRX_VISION,
+    is_vision_flow, new_shared_traffic_state_with_testseed, parse_vless_request_flow,
+    SharedTrafficState, VisionDirectCapability, VisionRelayReader, VisionRelayStream,
+    VisionRelayWriter, FLOW_XTLS_RPRX_VISION,
 };
 use std::net::IpAddr;
 use std::time::Instant;

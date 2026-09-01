@@ -23,7 +23,8 @@ SMOKE_SKIP_LIVE="${SMOKE_SKIP_LIVE:-0}"
 SMOKE_SERVER_LOG="${SMOKE_WORK_DIR}/server.log"
 SMOKE_CLIENT_LOG="${SMOKE_WORK_DIR}/client.log"
 SMOKE_FALLBACK_HIT_DIR="${SMOKE_WORK_DIR}/fallback-hits"
-SMOKE_RUST_XRAY_BIN="${SMOKE_RUST_XRAY_BIN:-${REPO_ROOT}/target/release/rust-xray}"
+SMOKE_RUST_XRAY_BIN="${SMOKE_RUST_XRAY_BIN:-${RUST_XRAY_BIN:-${REPO_ROOT}/target/release/rust-xray}}"
+SMOKE_XRAY_BIN="${SMOKE_XRAY_BIN:-${XRAY_BIN:-xray}}"
 SMOKE_LOCAL_DNS_PORT="${SMOKE_LOCAL_DNS_PORT:-37053}"
 SMOKE_LOCAL_DNS_PID=""
 
@@ -1038,7 +1039,7 @@ main() {
     exit 0
   fi
 
-  smoke_require_commands cargo xray curl python3 nc
+  smoke_require_commands cargo "${SMOKE_XRAY_BIN}" curl python3
   if ! command -v openssl >/dev/null 2>&1; then
     echo "warning: openssl not found; openssl fallback phase will be skipped" >&2
   fi

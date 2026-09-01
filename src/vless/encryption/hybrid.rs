@@ -76,10 +76,6 @@ pub fn decode_length(bytes: &[u8; 2]) -> u16 {
 }
 
 /// Validate ticket lifetime seconds encoded in ticket prefix (upstream `EncodeLength`).
-pub fn decode_ticket_lifetime_seconds(ticket_prefix: &[u8; 2]) -> u64 {
-    u64::from(decode_length(ticket_prefix))
-}
-
 pub fn encode_ticket_lifetime_seconds(seconds: u64) -> Result<[u8; 2], Error> {
     let value = u16::try_from(seconds).map_err(|_| {
         Error::new(

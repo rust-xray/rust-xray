@@ -1,4 +1,5 @@
 mod aead;
+#[cfg(test)]
 mod client_session;
 mod config;
 mod handshake;
@@ -20,11 +21,6 @@ mod x25519;
 mod xor;
 
 pub use aead::{TrafficAead, TrafficAeadKind};
-#[cfg(test)]
-pub(crate) use client_session::{
-    derive_client_session, read_server_1rtt_response, server_1rtt_response_len,
-    ClientEncryptedStream, ClientHelloMaterial, ClientSessionMaterial,
-};
 pub use config::{
     parse_inbound_decryption, parse_outbound_encryption,
     validate_inbound_decryption_with_fallbacks, ClientHandshakeMode, Mlkem768X25519PlusConfig,
@@ -61,7 +57,7 @@ pub(crate) use session_cache::{
     INVALID_TICKET_NOISE_MIN, MAX_STORED_SESSIONS,
 };
 #[cfg(test)]
-pub(crate) use stream::{reset_test_seal_count, test_seal_count, EncryptedReader, EncryptedWriter};
+pub(crate) use stream::{reset_test_seal_count, EncryptedReader, EncryptedWriter};
 pub use stream::{
     VlessEncryptedReader, VlessEncryptedRelaySplit, VlessEncryptedStream, VlessEncryptedWriter,
     MAX_TRAFFIC_PLAINTEXT_PER_RECORD,
@@ -71,4 +67,5 @@ pub use xor::{ctr_xor, CtrStream};
 
 #[cfg(test)]
 #[path = "../../../tests/unit/vless/encryption/mod.rs"]
+#[allow(dead_code)]
 mod tests;

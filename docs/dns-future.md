@@ -23,8 +23,10 @@ follow-ups.
 ## FakeDNS / full Xray parity
 
 - **FakeDNS** — map domains to fake IPs and reverse lookup in routing.
-- **Full routing execution** — apply domain/IP rules before outbound dial (today: strategy
-  + freedom connect only).
+- **Remaining routing/DNS integration** — `RuntimeRouter` already applies supported
+  domain/IP rules before VLESS and routed outbound dispatch. This future work is
+  full Xray DNS parity: FakeDNS, DNS inbound/hijack, and additional DNS egress
+  modes rather than a missing routing skeleton.
 - **Parallel DNS / balancer** — not planned on current branch.
 
 ## References

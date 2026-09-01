@@ -12,8 +12,8 @@ TEST_PUBLIC_KEY="${TEST_PUBLIC_KEY:-oU1MbEgszawWQJa0S_DxLsNt9G2zyE4rF-CrqvJjTmg}
 
 SMOKE_SERVER_PORT="${SMOKE_ENC_SERVER_PORT:-25443}"
 SMOKE_SOCKS_PORT="${SMOKE_ENC_SOCKS_PORT:-10818}"
-SMOKE_WORK_DIR="${SMOKE_ENC_WORK_DIR:-/tmp/rust-xray-vless-enc-smoke-$$}"
-SMOKE_RUST_XRAY_BIN="${SMOKE_RUST_XRAY_BIN:-${REPO_ROOT}/target/release/rust-xray}"
+SMOKE_WORK_DIR="${SMOKE_ENC_WORK_DIR:-${SMOKE_WORK_DIR:-/tmp/rust-xray-vless-enc-smoke-$$}}"
+SMOKE_RUST_XRAY_BIN="${SMOKE_RUST_XRAY_BIN:-${RUST_XRAY_BIN:-${REPO_ROOT}/target/release/rust-xray}}"
 SMOKE_SKIP_BUILD="${SMOKE_SKIP_BUILD:-0}"
 SMOKE_SKIP_LIVE="${SMOKE_SKIP_LIVE:-0}"
 SMOKE_LOCAL_HTTP_PORT="${SMOKE_ENC_LOCAL_HTTP_PORT:-28080}"
@@ -36,7 +36,7 @@ matrix_row() {
 }
 
 cleanup() {
-  smoke_free_ports "${SMOKE_SERVER_PORT}" "${SMOKE_SOCKS_PORT}" "${SMOKE_LOCAL_HTTP_PORT}" "${SMOKE_UDP_ECHO_PORT}"
+  smoke_stop_stack
   smoke_stop_process "${HTTP_PID}"
   smoke_stop_process "${UDP_SERVICES_PID}"
 }
@@ -44,7 +44,8 @@ trap cleanup EXIT
 
 mkdir -p "${SMOKE_WORK_DIR}"
 
-smoke_require_commands cargo xray curl python3
+SMOKE_XRAY_BIN="${SMOKE_XRAY_BIN:-${XRAY_BIN:-xray}}"
+smoke_require_commands cargo "${SMOKE_XRAY_BIN}" curl python3
 
 if [[ "${SMOKE_SKIP_BUILD}" != "1" ]]; then
   echo "Building release rust-xray..."
@@ -54,7 +55,7 @@ else
 fi
 
 smoke_print_binary_identity
-echo "xray client version: $(xray version 2>/dev/null | head -n1 || echo unknown)"
+echo "xray client version: $("${SMOKE_XRAY_BIN}" version 2>/dev/null | head -n1 || echo unknown)"
 echo "xray-core compatibility baseline: ${XRAY_COMPAT_BASELINE}"
 echo "test mode: vless-encryption-live"
 
@@ -117,10 +118,12 @@ run_encrypted_case() {
   echo "--- case: mode=${mode} flow=${flow} ---"
   RUST_LOG="${SMOKE_RUST_LOG:-info}" "${SMOKE_RUST_XRAY_BIN}" "${server_config}" >"${server_log}" 2>&1 &
   server_pid=$!
+  SMOKE_SERVER_PID="${server_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SERVER_PORT}" "rust-xray encrypted VLESS server (${label})" 40
 
-  xray run -config "${client_config}" >"${client_log}" 2>&1 &
+  "${SMOKE_XRAY_BIN}" run -config "${client_config}" >"${client_log}" 2>&1 &
   client_pid=$!
+  SMOKE_CLIENT_PID="${client_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SOCKS_PORT}" "xray socks inbound (${label})" 40
 
   local target_url="http://127.0.0.1:${SMOKE_LOCAL_HTTP_PORT}/"
@@ -130,6 +133,8 @@ run_encrypted_case() {
 
   smoke_stop_process "${client_pid}"
   smoke_stop_process "${server_pid}"
+  SMOKE_CLIENT_PID=""
+  SMOKE_SERVER_PID=""
   smoke_free_ports "${SMOKE_SERVER_PORT}" "${SMOKE_SOCKS_PORT}"
 
   echo "curl http_code=${http_code}"
@@ -165,10 +170,12 @@ run_encrypted_mux_tcp_case() {
     "${SMOKE_RUST_XRAY_BIN}" "${SCRIPT_DIR}/rust-xray-server.encryption.fixture.json" \
     >"${server_log}" 2>&1 &
   server_pid=$!
+  SMOKE_SERVER_PID="${server_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SERVER_PORT}" "encrypted mux server" 40
 
-  xray run -config "${client_cfg}" >"${client_log}" 2>&1 &
+  "${SMOKE_XRAY_BIN}" run -config "${client_cfg}" >"${client_log}" 2>&1 &
   client_pid=$!
+  SMOKE_CLIENT_PID="${client_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SOCKS_PORT}" "encrypted mux client" 40
 
   local http_code
@@ -178,6 +185,8 @@ run_encrypted_mux_tcp_case() {
 
   smoke_stop_process "${client_pid}"
   smoke_stop_process "${server_pid}"
+  SMOKE_CLIENT_PID=""
+  SMOKE_SERVER_PID=""
   smoke_free_ports "${SMOKE_SERVER_PORT}" "${SMOKE_SOCKS_PORT}"
 
   local evidence=""
@@ -223,10 +232,12 @@ run_encrypted_xudp_case() {
     "${SMOKE_RUST_XRAY_BIN}" "${SCRIPT_DIR}/rust-xray-server.encryption.fixture.json" \
     >"${server_log}" 2>&1 &
   server_pid=$!
+  SMOKE_SERVER_PID="${server_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SERVER_PORT}" "encrypted xudp server" 40
 
-  xray run -config "${client_cfg}" >"${client_log}" 2>&1 &
+  "${SMOKE_XRAY_BIN}" run -config "${client_cfg}" >"${client_log}" 2>&1 &
   client_pid=$!
+  SMOKE_CLIENT_PID="${client_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SOCKS_PORT}" "encrypted xudp client" 40
 
   local probe_out="${SMOKE_WORK_DIR}/udp-${label}.txt"
@@ -240,6 +251,8 @@ run_encrypted_xudp_case() {
 
   smoke_stop_process "${client_pid}"
   smoke_stop_process "${server_pid}"
+  SMOKE_CLIENT_PID=""
+  SMOKE_SERVER_PID=""
   smoke_free_ports "${SMOKE_SERVER_PORT}" "${SMOKE_SOCKS_PORT}"
 
   local evidence=""
@@ -289,10 +302,12 @@ run_encrypted_native_udp_attempt() {
     "${SMOKE_RUST_XRAY_BIN}" "${SCRIPT_DIR}/rust-xray-server.encryption.fixture.json" \
     >"${server_log}" 2>&1 &
   server_pid=$!
+  SMOKE_SERVER_PID="${server_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SERVER_PORT}" "encrypted native udp server" 40
 
-  xray run -config "${client_cfg}" >"${client_log}" 2>&1 &
+  "${SMOKE_XRAY_BIN}" run -config "${client_cfg}" >"${client_log}" 2>&1 &
   client_pid=$!
+  SMOKE_CLIENT_PID="${client_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SOCKS_PORT}" "encrypted native udp client" 40
 
   local probe_ok=0
@@ -304,6 +319,8 @@ run_encrypted_native_udp_attempt() {
 
   smoke_stop_process "${client_pid}"
   smoke_stop_process "${server_pid}"
+  SMOKE_CLIENT_PID=""
+  SMOKE_SERVER_PID=""
   smoke_free_ports "${SMOKE_SERVER_PORT}" "${SMOKE_SOCKS_PORT}"
 
   if [[ "${probe_ok}" -eq 1 ]] &&
@@ -394,11 +411,13 @@ run_encrypted_vision_sequential_100() {
   RUST_LOG="${SMOKE_RUST_LOG:-info}" "${SMOKE_RUST_XRAY_BIN}" \
     "${SCRIPT_DIR}/rust-xray-server.encryption-vision.fixture.json" >"${server_log}" 2>&1 &
   server_pid=$!
+  SMOKE_SERVER_PID="${server_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SERVER_PORT}" "rust-xray encrypted vision server" 40
 
-  xray run -config "${SCRIPT_DIR}/xray-client-encryption-vision.fixture.json" \
+  "${SMOKE_XRAY_BIN}" run -config "${SCRIPT_DIR}/xray-client-encryption-vision.fixture.json" \
     >"${client_log}" 2>&1 &
   client_pid=$!
+  SMOKE_CLIENT_PID="${client_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SOCKS_PORT}" "xray socks inbound (vision seq100)" 40
 
   local target_url="http://127.0.0.1:${SMOKE_LOCAL_HTTP_PORT}/"
@@ -416,6 +435,8 @@ run_encrypted_vision_sequential_100() {
 
   smoke_stop_process "${client_pid}"
   smoke_stop_process "${server_pid}"
+  SMOKE_CLIENT_PID=""
+  SMOKE_SERVER_PID=""
   smoke_free_ports "${SMOKE_SERVER_PORT}" "${SMOKE_SOCKS_PORT}"
 
   echo "vision sequential: ${pass}/100"

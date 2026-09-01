@@ -3,7 +3,6 @@ use std::io::{Error, ErrorKind};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -51,6 +50,7 @@ impl MuxTcpSubstreams {
         mpsc::channel(TCP_DOWNLINK_QUEUE)
     }
 
+    #[cfg(test)]
     pub fn contains(&self, mux_id: u16) -> bool {
         self.streams.contains_key(&mux_id)
     }

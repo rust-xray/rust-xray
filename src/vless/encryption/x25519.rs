@@ -3,8 +3,6 @@ use std::io::{Error, ErrorKind};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
-use crate::reality::key_share::X25519_PUBLIC_KEY_LEN;
-
 /// X25519 secret key wrapper.
 #[derive(Clone, Zeroize)]
 #[zeroize(drop)]
@@ -65,20 +63,4 @@ pub fn validate_x25519_public_key(public: &[u8; 32]) -> Result<(), Error> {
         ));
     }
     Ok(())
-}
-
-pub fn validate_x25519_public_key_slice(public: &[u8]) -> Result<[u8; 32], Error> {
-    if public.len() != X25519_PUBLIC_KEY_LEN {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "X25519 public key must be {X25519_PUBLIC_KEY_LEN} bytes, got {}",
-                public.len()
-            ),
-        ));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(public);
-    validate_x25519_public_key(&arr)?;
-    Ok(arr)
 }

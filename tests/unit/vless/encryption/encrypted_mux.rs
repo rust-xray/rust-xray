@@ -63,7 +63,7 @@ async fn encrypted_mux_tcp_child_reaches_local_target() {
     let (hello, parts) =
         build_native_x25519_client_hello(&config, &secret, &mut TestHandshakeRng::new(42));
 
-    let (mut client_io, server_io) = duplex(65536);
+    let (client_io, server_io) = duplex(65536);
     let clients = vec![VlessClient {
         id: uuid::Uuid::from_bytes(USER_ID),
         email: Some("enc-mux@test".to_string()),

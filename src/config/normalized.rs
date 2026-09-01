@@ -16,8 +16,7 @@ use crate::dns::{DnsConfig, DnsServerConfig, QueryStrategy};
 use crate::reality::MLDSA65_SEED_LEN;
 use crate::vless::encryption::VlessDecryption;
 use crate::vless::{
-    apply_inbound_vless_client_flows, build_vless_clients, validate_vless_client_flows,
-    FallbackConfig, VlessClient,
+    apply_inbound_vless_client_flows, validate_vless_client_flows, FallbackConfig, VlessClient,
 };
 
 pub type VlessUser = VlessClient;

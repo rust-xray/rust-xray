@@ -47,7 +47,7 @@ async fn geosite_tonic_add_and_remove_routes_real_vless_traffic() {
             email: Some("geosite@example.test".to_string()),
             flow: None,
             level: None,
-            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let router = Arc::clone(&runtime.router);
@@ -187,7 +187,7 @@ async fn geoip_ipv6_tonic_rule_matches_test_route_and_optional_data_plane() {
             email: Some("geoipv6@example.test".to_string()),
             flow: None,
             level: None,
-            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let loopback_file = NamedTempFile::new().expect("loopback geoip file");
@@ -299,7 +299,7 @@ async fn webhook_slow_endpoint_does_not_block_routing() {
             email: Some("slow-webhook@example.test".to_string()),
             flow: None,
             level: None,
-            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let router = Arc::clone(&runtime.router);
@@ -350,7 +350,7 @@ async fn random_balancer_routes_only_to_candidate_outbounds() {
             email: Some("random@example.test".to_string()),
             flow: None,
             level: None,
-            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let router = Arc::clone(&runtime.router);
@@ -478,7 +478,7 @@ async fn round_robin_test_route_matches_live_sequence_with_override() {
             email: Some("rr@example.test".to_string()),
             flow: None,
             level: None,
-            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
+            testseed: rust_xray::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let router = Arc::clone(&runtime.router);
