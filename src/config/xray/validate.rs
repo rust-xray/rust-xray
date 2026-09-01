@@ -3,6 +3,9 @@ use tracing::warn;
 use super::raw::{InboundObject, InboundPortValue, RealitySettingsObject, StreamSettingsObject};
 use super::transport::{validate_reality_transport_network, TransportNetwork};
 use crate::reality::parse_reality_client_version;
+use crate::vless::encryption::VlessDecryption;
+use crate::vless::validate_inbound_decryption_with_fallbacks;
+use crate::vless::FallbackConfig;
 
 pub(crate) fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
@@ -217,13 +220,18 @@ pub fn format_listen_host(listen: Option<&str>) -> std::io::Result<String> {
     Ok(listen.to_string())
 }
 
-pub(crate) fn validate_vless_decryption(decryption: Option<&str>) -> std::io::Result<String> {
-    match decryption.map(str::trim).filter(|value| !value.is_empty()) {
-        None => Ok("none".to_string()),
-        Some(value) if eq_ignore_ascii_case(value, "none") => Ok("none".to_string()),
-        Some(value) => Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            format!("unsupported VLESS decryption: {value}; only 'none' is supported"),
-        )),
-    }
+pub(crate) fn validate_vless_decryption(
+    decryption: Option<&str>,
+    fallbacks: &[FallbackConfig],
+) -> std::io::Result<VlessDecryption> {
+    validate_inbound_decryption_with_fallbacks(decryption, !fallbacks.is_empty()).map_err(|err| {
+        std::io::Error::new(
+            if err.to_string().contains("unsupported") {
+                std::io::ErrorKind::Unsupported
+            } else {
+                std::io::ErrorKind::InvalidInput
+            },
+            err.to_string(),
+        )
+    })
 }

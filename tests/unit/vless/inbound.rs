@@ -1,4 +1,5 @@
 use super::*;
+use crate::mux::{encode_mux_new_tcp, encode_mux_new_udp_xudp};
 use crate::vless::config::VlessClient;
 use crate::vless::protocol::{VlessCommand, VlessDestination};
 use std::net::{IpAddr, Ipv4Addr};
@@ -15,6 +16,7 @@ fn vless_client(email: Option<&str>, flow: Option<&str>) -> VlessClient {
         email: email.map(str::to_string),
         flow: flow.map(str::to_string),
         level: None,
+        testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
     }
 }
 
@@ -100,16 +102,21 @@ fn is_supported_vless_flow_accepts_none_empty_and_vision() {
 
 #[test]
 fn validate_flow_rejects_empty_account_with_vision_request() {
-    let err =
-        validate_vless_flow_for_command(Some(FLOW_XTLS_RPRX_VISION), Some(""), VlessCommand::Tcp)
-            .unwrap_err();
+    let err = validate_vless_flow_for_command(
+        Some(FLOW_XTLS_RPRX_VISION),
+        Some(""),
+        VlessCommand::Tcp,
+        &[],
+    )
+    .unwrap_err();
     assert_eq!(err.kind(), ErrorKind::PermissionDenied);
 }
 
 #[test]
 fn validate_flow_rejects_vision_account_with_empty_request() {
-    let err = validate_vless_flow_for_command(None, Some(FLOW_XTLS_RPRX_VISION), VlessCommand::Tcp)
-        .unwrap_err();
+    let err =
+        validate_vless_flow_for_command(None, Some(FLOW_XTLS_RPRX_VISION), VlessCommand::Tcp, &[])
+            .unwrap_err();
     assert_eq!(err.kind(), ErrorKind::PermissionDenied);
     assert!(err.to_string().contains("empty"));
 }
@@ -120,6 +127,7 @@ fn validate_flow_rejects_vision_udp() {
         Some(FLOW_XTLS_RPRX_VISION),
         Some(FLOW_XTLS_RPRX_VISION),
         VlessCommand::Udp,
+        &[],
     )
     .unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Unsupported);
@@ -132,15 +140,47 @@ fn validate_flow_rejects_unknown_flow() {
         Some("xtls-rprx-direct"),
         Some("xtls-rprx-direct"),
         VlessCommand::Tcp,
+        &[],
     )
     .unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Unsupported);
 }
 
 #[test]
+fn validate_flow_rejects_vision_account_with_empty_mux_tcp() {
+    let tcp_open = encode_mux_new_tcp(
+        1,
+        &VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+        b"",
+    );
+    let err = validate_vless_flow_for_command(
+        None,
+        Some(FLOW_XTLS_RPRX_VISION),
+        VlessCommand::Mux,
+        &tcp_open,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::PermissionDenied);
+}
+
+#[test]
+fn validate_flow_allows_vision_account_with_xudp_mux() {
+    let destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), 53);
+    let global_id = [1u8; 8];
+    let xudp_open = encode_mux_new_udp_xudp(0, &destination, &global_id, b"ping");
+    validate_vless_flow_for_command(
+        None,
+        Some(FLOW_XTLS_RPRX_VISION),
+        VlessCommand::Mux,
+        &xudp_open,
+    )
+    .expect("vision mux xudp allowed");
+}
+
+#[test]
 fn validate_flow_empty_regression_unchanged() {
-    validate_vless_flow_for_command(None, None, VlessCommand::Tcp).unwrap();
-    validate_vless_flow_for_command(Some(""), Some(""), VlessCommand::Tcp).unwrap();
+    validate_vless_flow_for_command(None, None, VlessCommand::Tcp, &[]).unwrap();
+    validate_vless_flow_for_command(Some(""), Some(""), VlessCommand::Tcp, &[]).unwrap();
 }
 
 #[tokio::test]
@@ -180,6 +220,7 @@ async fn mux_route_environment_keeps_authenticated_connection_stats() {
         email: Some("user@example.com".to_string()),
         flow: None,
         level: None,
+        testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         inbound_tag: "test-in".to_string(),
     };
 
@@ -211,12 +252,14 @@ fn flow_matching_selects_user_by_uuid_not_first() {
             email: None,
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         },
         VlessClient {
             id: USER_B,
             email: None,
             flow: Some("xtls-rprx-vision".to_string()),
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         },
     ]);
 
@@ -229,6 +272,7 @@ fn flow_matching_selects_user_by_uuid_not_first() {
         parse_vless_request_flow(&request_b.additional_info).as_deref(),
         auth_b.flow.as_deref(),
         request_b.command,
+        &[],
     )
     .expect("user B vision flow");
 
@@ -239,6 +283,7 @@ fn flow_matching_selects_user_by_uuid_not_first() {
         parse_vless_request_flow(&request_a.additional_info).as_deref(),
         auth_a.flow.as_deref(),
         request_a.command,
+        &[],
     )
     .unwrap_err();
     assert_eq!(err.kind(), ErrorKind::PermissionDenied);

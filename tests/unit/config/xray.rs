@@ -1,4 +1,5 @@
 use super::*;
+use crate::vless::encryption::VlessDecryption;
 use std::collections::BTreeMap;
 
 const TEST_REALITY_PRIVATE_KEY: &str = "CMZoLYnNxeaUoLn7LwK4RzBIdpzBXI5TOIlZ3tEfOn4";
@@ -150,7 +151,7 @@ fn builds_first_reality_inbound_runtime() {
         runtime.vless_clients[0].id,
         "00000000-0000-0000-0000-000000000001"
     );
-    assert_eq!(runtime.vless_decryption, "none");
+    assert_eq!(runtime.vless_decryption, VlessDecryption::None);
 }
 
 #[test]
@@ -535,7 +536,7 @@ fn parses_realistic_xray_vless_tcp_reality_server_config() {
 
     assert_eq!(runtime.listen_addr, "127.0.0.1:24443");
     assert_eq!(runtime.dest_addr, "www.microsoft.com:443");
-    assert_eq!(runtime.vless_decryption, "none");
+    assert_eq!(runtime.vless_decryption, VlessDecryption::None);
     assert!(config.log.is_some());
     assert!(config.routing.is_some());
     assert_eq!(config.outbounds.len(), 2);
@@ -1025,13 +1026,13 @@ fn rejects_non_hex_short_id() {
 }
 
 #[test]
-fn defaults_missing_vless_decryption_to_none() {
+fn rejects_missing_vless_decryption() {
     let inbound: InboundObject = serde_json::from_str(
             r#"{"protocol":"vless","settings":{"clients":[{"id":"00000000-0000-0000-0000-000000000001"}]}}"#,
         )
         .unwrap();
-    let settings = inbound_vless_settings(&inbound).unwrap().unwrap();
-    assert!(settings.decryption.is_none());
+    let err = inbound_vless_settings(&inbound).unwrap_err();
+    assert!(err.to_string().contains("decryption"));
 
     let json = format!(
         r#"{{
@@ -1054,8 +1055,8 @@ fn defaults_missing_vless_decryption_to_none() {
         }}"#
     );
     let config: XrayConfig = serde_json::from_str(&json).unwrap();
-    let runtime = first_reality_inbound_runtime(&config).unwrap();
-    assert_eq!(runtime.vless_decryption, "none");
+    let err = first_reality_inbound_runtime(&config).unwrap_err();
+    assert!(err.to_string().contains("decryption"));
 }
 
 #[test]
@@ -1065,7 +1066,7 @@ fn rejects_decryption_other_than_none() {
     )
     .unwrap();
     let err = inbound_vless_settings(&inbound).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 }
 
 #[test]
@@ -1939,9 +1940,10 @@ fn reality_inbound_runtime_debug_does_not_expose_secrets() {
             email: None,
             flow: None,
             level: None,
+            testseed: None,
             extra: BTreeMap::new(),
         }],
-        vless_decryption: "none".to_string(),
+        vless_decryption: VlessDecryption::None,
         vless_fallbacks: Vec::new(),
         transport: TransportNetwork::RawTcp,
         xhttp_settings: None,

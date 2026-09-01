@@ -297,12 +297,17 @@ impl RuntimeInboundManager {
         };
         let auth = VlessInboundAuthContext::from_single_manager(Arc::clone(&user_manager), stats);
 
+        let encryption_server = crate::vless::encryption::build_encryption_server_from_decryption(
+            &inbound.reality.decryption,
+        )
+        .map_err(|err| InboundManagerError::invalid(err.to_string()))?;
         let mut listener_config = Arc::new(InboundListenerConfig {
             inbound: inbound.clone(),
             merged_inbound_tags: vec![tag.clone()],
             auth,
             plain_vless: decoded.plain_vless,
             router: Some(Arc::clone(&self.router)),
+            encryption_server,
         });
         if !listener_config.plain_vless {
             validate_reality_runtime_feature_gates(&listener_config)

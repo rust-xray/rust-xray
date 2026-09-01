@@ -564,6 +564,7 @@ fn vision_mux_flow_combination_is_allowed_by_validation() {
         Some(FLOW_XTLS_RPRX_VISION),
         Some(FLOW_XTLS_RPRX_VISION),
         VlessCommand::Mux,
+        &[],
     )
     .expect("vision + mux is reachable when both sides require vision");
 }

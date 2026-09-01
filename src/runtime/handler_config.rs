@@ -367,6 +367,11 @@ fn vless_client_from_proto(user: &ProtoUser) -> Result<VlessClientObject, Handle
         } else {
             Some(user.level)
         },
+        testseed: if vless.testseed.is_empty() {
+            None
+        } else {
+            Some(vless.testseed.clone())
+        },
         extra: Default::default(),
     })
 }
@@ -421,6 +426,7 @@ fn inbound_object_from_handler_config(
         } else {
             Some(proxy.decryption)
         },
+        testseed: None,
         fallbacks: proxy
             .fallbacks
             .iter()
@@ -668,7 +674,7 @@ pub fn encode_plain_vless_inbound_handler_config(
 
     let vless = VlessInboundConfig {
         users: users.iter().map(managed_user_to_proto).collect(),
-        decryption: inbound.reality.decryption.clone(),
+        decryption: inbound.reality.decryption.config_string().to_string(),
         ..Default::default()
     };
 
@@ -705,7 +711,7 @@ pub fn encode_inbound_handler_config(
 
     let vless = VlessInboundConfig {
         users: users.iter().map(managed_user_to_proto).collect(),
-        decryption: inbound.reality.decryption.clone(),
+        decryption: inbound.reality.decryption.config_string().to_string(),
         ..Default::default()
     };
 

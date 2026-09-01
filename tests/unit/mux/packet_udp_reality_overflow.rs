@@ -115,6 +115,7 @@ fn reality_mux_generic_udp_overflow_emits_encrypted_fatal_alert() {
                 email: None,
                 flow: None,
                 level: None,
+                testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
                 inbound_tag: "vless-in".to_string(),
             },
             socket_meta: RouteSocketMeta::default(),

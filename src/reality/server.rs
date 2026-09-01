@@ -12,6 +12,7 @@ use crate::routing::{RouteSocketMeta, RuntimeRouter};
 use crate::runtime::VlessInboundAuthContext;
 use crate::tls::{PrefixedStream, TlsClientHelloRecord};
 use crate::transport::{run_inbound_transport, AcceptedTransport, VlessHandler};
+use crate::vless::encryption::SharedVlessEncryptionServer;
 
 use super::decision::RealityAccepted;
 use super::handshake::{fetch_dest_handshake, prepare_reality_tls13_state};
@@ -51,6 +52,7 @@ pub async fn handle_accepted_reality_client(
             ..Default::default()
         },
         None,
+        None,
     )
     .await
 }
@@ -67,6 +69,7 @@ pub async fn handle_accepted_reality_client_traced(
     mux_trace: Option<MuxSessionTrace>,
     socket_meta: RouteSocketMeta,
     router: Option<std::sync::Arc<RuntimeRouter>>,
+    encryption_server: Option<SharedVlessEncryptionServer>,
 ) -> std::io::Result<()> {
     let path_started = Instant::now();
     let logical_inbound_count = auth.auth_set().manager_count();
@@ -168,7 +171,13 @@ pub async fn handle_accepted_reality_client_traced(
     );
 
     let accepted_transport = AcceptedTransport::from_inbound_transport_config(transport)?;
-    let vless_handler = VlessHandler::new_with_auth_context(auth, mux_trace, socket_meta, router);
+    let vless_handler = VlessHandler::new_with_auth_context(
+        auth,
+        mux_trace,
+        socket_meta,
+        router,
+        encryption_server,
+    );
 
     run_inbound_transport(accepted_transport, tls_app_stream, &vless_handler).await?;
 

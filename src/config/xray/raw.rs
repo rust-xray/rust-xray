@@ -42,9 +42,17 @@ pub struct PolicyLevel {
     pub stats_user_downlink: bool,
     #[serde(rename = "statsUserOnline", default)]
     pub stats_user_online: bool,
+    #[serde(default)]
+    pub handshake: Option<u32>,
 
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl PolicyLevel {
+    pub fn handshake_secs(&self) -> Option<u32> {
+        self.handshake
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -202,6 +210,9 @@ pub struct VlessInboundSettings {
     pub decryption: Option<String>,
 
     #[serde(default)]
+    pub testseed: Option<Vec<u32>>,
+
+    #[serde(default)]
     pub fallbacks: Vec<FallbackConfig>,
 
     #[serde(flatten)]
@@ -214,6 +225,9 @@ pub struct VlessClientObject {
     pub email: Option<String>,
     pub flow: Option<String>,
     pub level: Option<u32>,
+
+    #[serde(default)]
+    pub testseed: Option<Vec<u32>>,
 
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,

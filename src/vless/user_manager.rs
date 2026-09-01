@@ -5,18 +5,21 @@ use uuid::Uuid;
 
 use crate::vless::config::{
     format_vless_flow_distribution, normalize_vless_flow, parse_vless_user_id,
-    validate_vless_client_flow, VlessClient,
+    resolve_vless_testseed, validate_vless_client_flow, VlessClient,
 };
 use crate::vless::protocol::VlessRequest;
+use crate::vless::uuid_lookup::vless_lookup_uuid;
 use crate::vless::vision::vision_relay_supported;
 
 /// Authenticated VLESS client metadata used by the inbound relay path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VlessAuthenticatedClient {
+    /// Wire UUID from the client request (routing hints, logs, stats).
     pub id: Uuid,
     pub email: Option<String>,
     pub flow: Option<String>,
     pub level: Option<u32>,
+    pub testseed: [u32; 4],
     /// Logical inbound tag that authenticated this session.
     pub inbound_tag: String,
 }
@@ -28,10 +31,12 @@ fn is_supported_vless_flow(flow: Option<&str>) -> bool {
 /// Managed VLESS user (static config + dynamic HandlerService).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedUser {
+    /// Lookup UUID (`ProcessUUID` normalized key).
     pub id: Uuid,
     pub email: String,
     pub flow: Option<String>,
     pub level: Option<u32>,
+    pub testseed: [u32; 4],
     /// Optional account validity in seconds (from VLESS `Account.seconds` when set).
     pub expiry_secs: Option<u32>,
 }
@@ -83,23 +88,26 @@ impl VlessUserManager {
             email_to_id: RwLock::new(HashMap::new()),
         };
         for client in static_clients {
+            let lookup_id = vless_lookup_uuid(&client.id);
             if let Some(email) = client.email.as_deref().filter(|value| !value.is_empty()) {
                 let _ = manager.insert_user(ManagedUser {
-                    id: client.id,
+                    id: lookup_id,
                     email: email.to_string(),
                     flow: normalize_vless_flow(client.flow.as_deref()),
                     level: client.level,
+                    testseed: client.testseed,
                     expiry_secs: None,
                 });
             } else {
                 let mut users = manager.users_by_id.write().expect("users lock");
                 users.insert(
-                    client.id,
+                    lookup_id,
                     ManagedUser {
-                        id: client.id,
+                        id: lookup_id,
                         email: String::new(),
                         flow: normalize_vless_flow(client.flow.as_deref()),
                         level: client.level,
+                        testseed: client.testseed,
                         expiry_secs: None,
                     },
                 );
@@ -139,7 +147,7 @@ impl VlessUserManager {
         self.users_by_id
             .read()
             .expect("users lock")
-            .contains_key(&id)
+            .contains_key(&vless_lookup_uuid(&id))
     }
 
     pub fn contains_email(&self, email: &str) -> bool {
@@ -171,6 +179,7 @@ impl VlessUserManager {
                 ManagedUser {
                     flow: user.flow,
                     level: user.level,
+                    testseed: user.testseed,
                     expiry_secs: user.expiry_secs,
                     ..existing
                 },
@@ -210,8 +219,10 @@ impl VlessUserManager {
         &self,
         request: &VlessRequest,
     ) -> Result<VlessAuthenticatedClient, std::io::Error> {
+        let wire_id = request.user_id;
+        let lookup_id = vless_lookup_uuid(&wire_id);
         let users = self.users_by_id.read().expect("users lock");
-        let client = users.get(&request.user_id).ok_or_else(|| {
+        let client = users.get(&lookup_id).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "unknown vless client id",
@@ -229,7 +240,7 @@ impl VlessUserManager {
         }
 
         Ok(VlessAuthenticatedClient {
-            id: client.id,
+            id: wire_id,
             email: if client.email.is_empty() {
                 None
             } else {
@@ -237,6 +248,7 @@ impl VlessUserManager {
             },
             flow: client.flow.clone(),
             level: client.level,
+            testseed: client.testseed,
             inbound_tag: self.inbound_tag.clone(),
         })
     }
@@ -295,6 +307,7 @@ impl VlessUserManager {
                 },
                 flow: user.flow.clone(),
                 level: user.level,
+                testseed: user.testseed,
             })
             .collect()
     }
@@ -343,6 +356,8 @@ pub fn managed_user_from_vless_account(
     account_id: &str,
     account_flow: &str,
     account_seconds: u32,
+    account_testseed: Option<&[u32]>,
+    inbound_default_testseed: Option<&[u32]>,
 ) -> Result<ManagedUser, UserManagerError> {
     if email.trim().is_empty() {
         return Err(UserManagerError::InvalidUser(
@@ -350,16 +365,19 @@ pub fn managed_user_from_vless_account(
         ));
     }
 
-    let id = parse_vless_user_id(account_id)
+    let wire_id = parse_vless_user_id(account_id)
         .map_err(|err| UserManagerError::InvalidUser(format!("invalid vless account id: {err}")))?;
+    let lookup_id = vless_lookup_uuid(&wire_id);
 
     let flow = normalize_vless_flow(Some(account_flow));
+    let testseed = resolve_vless_testseed(account_testseed, inbound_default_testseed);
 
     Ok(ManagedUser {
-        id,
+        id: lookup_id,
         email,
         flow,
         level,
+        testseed,
         expiry_secs: if account_seconds == 0 {
             None
         } else {
@@ -367,3 +385,7 @@ pub fn managed_user_from_vless_account(
         },
     })
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/vless/user_manager_lookup.rs"]
+mod lookup_tests;

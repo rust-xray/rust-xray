@@ -41,6 +41,7 @@ fn test_auth() -> VlessAuthenticatedClient {
         email: Some("xudp@example.test".to_string()),
         flow: None,
         level: None,
+        testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         inbound_tag: "vless-in".to_string(),
     }
 }
@@ -483,11 +484,12 @@ fn normal_mux_tcp_allowed_without_vision_restriction() {
             &raw[2 + metadata_len..],
         )
         .expect("parse tcp frame");
-        let mut active = None;
+        let (downlink_tx, _downlink_rx) = tcp::MuxTcpSubstreams::downlink_channel();
+        let mut active = tcp::MuxTcpSubstreams::new(downlink_tx);
         let route_env = test_route_env(freedom_router(), short_expiry_manager(), false);
         match tcp::handle_mux_tcp_command(&mut active, frame, Some(&route_env)).await {
             Err(err) => panic!("normal mux tcp rejected unexpectedly: {err}"),
-            Ok(_) => assert!(active.is_some()),
+            Ok(_) => assert!(active.contains(2)),
         }
     });
 }
@@ -884,7 +886,8 @@ async fn xudp_initializing_collision_does_not_duplicate_association() {
 #[test]
 fn vision_mux_tcp_rejection_via_handle_mux_tcp_command() {
     block_on(async {
-        let mut active = None;
+        let (downlink_tx, _downlink_rx) = tcp::MuxTcpSubstreams::downlink_channel();
+        let mut active = tcp::MuxTcpSubstreams::new(downlink_tx);
         let frame = parse_test_tcp_frame();
         let route_env = test_route_env(freedom_router(), short_expiry_manager(), true);
         match tcp::handle_mux_tcp_command(&mut active, frame, Some(&route_env)).await {

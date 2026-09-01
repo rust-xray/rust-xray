@@ -3,6 +3,9 @@ use std::collections::{BTreeMap, HashMap};
 use crate::config::VlessClientObject;
 use crate::vless::vision::vision_relay_supported;
 
+/// Upstream default Vision `testseed` when fewer than four values are configured.
+pub const UPSTREAM_DEFAULT_TESTSEED: [u32; 4] = [900, 500, 900, 256];
+
 const VLESS_CUSTOM_ID_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([0; 16]);
 
 /// Normalize config/account flow: missing and `""` both mean empty/default flow.
@@ -45,6 +48,43 @@ pub struct VlessClient {
     pub email: Option<String>,
     pub flow: Option<String>,
     pub level: Option<u32>,
+    pub testseed: [u32; 4],
+}
+
+impl Default for VlessClient {
+    fn default() -> Self {
+        Self {
+            id: uuid::Uuid::nil(),
+            email: None,
+            flow: None,
+            level: None,
+            testseed: UPSTREAM_DEFAULT_TESTSEED,
+        }
+    }
+}
+
+/// Resolve effective per-user Vision test seed (upstream `proxy/proxy.go` default).
+pub fn resolve_vless_testseed(
+    client_seed: Option<&[u32]>,
+    inbound_default: Option<&[u32]>,
+) -> [u32; 4] {
+    let source = client_seed.or(inbound_default);
+    match source {
+        Some(values) if values.len() >= 4 => [values[0], values[1], values[2], values[3]],
+        _ => UPSTREAM_DEFAULT_TESTSEED,
+    }
+}
+
+pub fn validate_vless_testseed(seed: Option<&[u32]>) -> std::io::Result<()> {
+    if let Some(values) = seed {
+        if values.len() > 4 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "vless testseed supports at most four values",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Parse a VLESS user id the same way as Xray-core `common/uuid.ParseString`.
@@ -189,9 +229,17 @@ fn user_id_hint_from_config_id(id: &str) -> String {
 }
 
 pub fn build_vless_clients(clients: &[VlessClientObject]) -> std::io::Result<Vec<VlessClient>> {
+    build_vless_clients_with_default(clients, None)
+}
+
+pub fn build_vless_clients_with_default(
+    clients: &[VlessClientObject],
+    inbound_default_testseed: Option<&[u32]>,
+) -> std::io::Result<Vec<VlessClient>> {
     clients
         .iter()
         .map(|client| {
+            validate_vless_testseed(client.testseed.as_deref())?;
             let id = parse_vless_user_id(&client.id)?;
 
             Ok(VlessClient {
@@ -199,6 +247,10 @@ pub fn build_vless_clients(clients: &[VlessClientObject]) -> std::io::Result<Vec
                 email: client.email.clone(),
                 flow: normalize_vless_flow(client.flow.as_deref()),
                 level: client.level,
+                testseed: resolve_vless_testseed(
+                    client.testseed.as_deref(),
+                    inbound_default_testseed,
+                ),
             })
         })
         .collect()

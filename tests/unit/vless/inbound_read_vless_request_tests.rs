@@ -1,10 +1,12 @@
 use super::*;
+use crate::vless::policy::VlessInboundPolicy;
 use crate::vless::protocol::{VlessCommand, VlessDestination};
 use std::future::Future;
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 const USER_ID: [u8; 16] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -122,4 +124,41 @@ fn read_vless_request_over_limit_header_is_invalid_data() {
 
     assert_eq!(err.kind(), ErrorKind::InvalidData);
     assert!(err.to_string().contains("20"));
+}
+
+struct StalledReader;
+
+impl AsyncRead for StalledReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+#[tokio::test]
+async fn read_vless_request_handshake_timeout_on_stalled_header() {
+    let policy = VlessInboundPolicy {
+        handshake_timeout: Duration::from_millis(50),
+    };
+    let mut reader = StalledReader;
+    let err = read_vless_request_with_policy(&mut reader, policy)
+        .await
+        .expect_err("stalled header should time out");
+    assert_eq!(err.kind(), ErrorKind::TimedOut);
+}
+
+#[tokio::test]
+async fn read_vless_request_completes_before_handshake_deadline() {
+    let data = build_vless_request_bytes(&[], 0x01, 443, &[0x01, 127, 0, 0, 1]);
+    let mut cursor = std::io::Cursor::new(data);
+    let policy = VlessInboundPolicy {
+        handshake_timeout: Duration::from_secs(2),
+    };
+    read_vless_request_with_policy(&mut cursor, policy)
+        .await
+        .expect("accepted before deadline");
 }

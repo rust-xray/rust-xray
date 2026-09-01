@@ -53,6 +53,7 @@ fn test_clients() -> Vec<VlessClient> {
         email: Some("user@example.com".to_string()),
         flow: None,
         level: None,
+        testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
     }]
 }
 
@@ -381,6 +382,7 @@ fn handle_vless_tcp_inbound_unpads_vision_initial_payload() {
                 email: Some("user@example.com".to_string()),
                 flow: Some("xtls-rprx-vision".to_string()),
                 level: None,
+                testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
             }],
         );
 

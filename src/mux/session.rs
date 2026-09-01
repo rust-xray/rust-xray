@@ -2,8 +2,7 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info};
 
 use crate::dns::DnsEngine;
@@ -15,7 +14,7 @@ use crate::mux::route_env::MuxRouteEnv;
 use crate::mux::state::{
     mux_actions, mux_response_channel, write_mux_out_frames, MuxFrameActions, MuxOutTx,
 };
-use crate::mux::tcp;
+use crate::mux::tcp::{handle_mux_tcp_command, MuxTcpSubstreams, TcpDownlinkEvent};
 use crate::mux::udp_dns;
 use crate::mux::xudp::XudpMuxSessions;
 
@@ -73,97 +72,62 @@ where
         elapsed_ms_since_conn_start = trace.map(|trace| trace.conn_started.elapsed().as_millis()),
         "mux session started"
     );
-    let mut active: Option<(u16, TcpStream)> = None;
-    let mut buf = [0u8; 8192];
+    let (tcp_downlink_tx, mut tcp_downlink_rx) = MuxTcpSubstreams::downlink_channel();
+    let mut active_tcp = MuxTcpSubstreams::new(tcp_downlink_tx);
     let (udp_tx, mut udp_rx) = mux_response_channel();
     let xudp_sessions = Arc::new(XudpMuxSessions::new());
     let packet_sessions = Arc::new(MuxUdpSessionManager::new());
 
     let relay_result = async {
         loop {
-            if let Some((id, outbound)) = active.as_mut() {
-                tokio::select! {
-                    frame = read_mux_frame(&mut stream) => {
-                        let frame = frame?;
-                        debug!(
-                            conn_id = trace.map(|trace| trace.conn_id),
-                            mux_id = frame.id(),
-                            elapsed_ms_since_conn_start = trace.map(|trace| trace.conn_started.elapsed().as_millis()),
-                            "first/next mux frame received"
-                        );
-                        let actions = handle_client_frame(
-                            &mut active,
-                            frame,
-                            MuxFrameContext {
-                                dns: &dns,
-                                trace,
-                                udp_tx: &udp_tx,
-                                route_env: route_env.as_ref(),
-                                xudp_sessions: &xudp_sessions,
-                                packet_sessions: &packet_sessions,
-                            },
-                        )
-                        .await?;
-                        write_mux_out_frames(&mut stream, &actions).await?;
-                    }
-                    Some(actions) = udp_rx.recv() => {
-                        write_mux_out_frames(&mut stream, &actions).await?;
-                    }
-                    read = outbound.read(&mut buf) => {
-                        let read = read?;
-                        if read == 0 {
-                            write_mux_out_frames(
-                                &mut stream,
-                                &mux_actions(vec![encode_mux_end(*id)]),
+            tokio::select! {
+                frame = read_mux_frame(&mut stream) => {
+                    match frame {
+                        Ok(frame) => {
+                            debug!(
+                                conn_id = trace.map(|trace| trace.conn_id),
+                                mux_id = frame.id(),
+                                elapsed_ms_since_conn_start =
+                                    trace.map(|trace| trace.conn_started.elapsed().as_millis()),
+                                "first/next mux frame received"
+                            );
+                            let actions = handle_client_frame(
+                                &mut active_tcp,
+                                frame,
+                                MuxFrameContext {
+                                    dns: &dns,
+                                    trace,
+                                    udp_tx: &udp_tx,
+                                    route_env: route_env.as_ref(),
+                                    xudp_sessions: &xudp_sessions,
+                                    packet_sessions: &packet_sessions,
+                                },
                             )
                             .await?;
-                            debug!(mux_id = *id, "mux substream relay completed");
-                            active = None;
-                        } else {
-                            let frame = crate::mux::encoder::encode_mux_keep_data(*id, &buf[..read])?;
-                            write_mux_out_frames(&mut stream, &mux_actions(vec![frame])).await?;
+                            write_mux_out_frames(&mut stream, &actions).await?;
                         }
+                        Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
+                        Err(err) => return Err(err),
                     }
                 }
-            } else {
-                debug!(
-                    conn_id = trace.map(|trace| trace.conn_id),
-                    elapsed_ms_since_conn_start =
-                        trace.map(|trace| trace.conn_started.elapsed().as_millis()),
-                    "waiting next mux frame"
-                );
-                tokio::select! {
-                    frame = read_mux_frame(&mut stream) => {
-                        match frame {
-                            Ok(frame) => {
-                                debug!(
-                                    conn_id = trace.map(|trace| trace.conn_id),
-                                    mux_id = frame.id(),
-                                    elapsed_ms_since_conn_start =
-                                        trace.map(|trace| trace.conn_started.elapsed().as_millis()),
-                                    "first/next mux frame received"
-                                );
-                                let actions = handle_client_frame(
-                                    &mut active,
-                                    frame,
-                                    MuxFrameContext {
-                                        dns: &dns,
-                                        trace,
-                                        udp_tx: &udp_tx,
-                                        route_env: route_env.as_ref(),
-                                        xudp_sessions: &xudp_sessions,
-                                        packet_sessions: &packet_sessions,
-                                    },
-                                )
-                                .await?;
-                                write_mux_out_frames(&mut stream, &actions).await?;
-                            }
-                            Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
-                            Err(err) => return Err(err),
+                Some(actions) = udp_rx.recv() => {
+                    write_mux_out_frames(&mut stream, &actions).await?;
+                }
+                Some((mux_id, event)) = tcp_downlink_rx.recv() => {
+                    match event {
+                        TcpDownlinkEvent::Data(data) => {
+                            let frame = crate::mux::encoder::encode_mux_keep_data(mux_id, &data)?;
+                            write_mux_out_frames(&mut stream, &mux_actions(vec![frame])).await?;
                         }
-                    }
-                    Some(actions) = udp_rx.recv() => {
-                        write_mux_out_frames(&mut stream, &actions).await?;
+                        TcpDownlinkEvent::Eof => {
+                            active_tcp.remove(mux_id);
+                            write_mux_out_frames(
+                                &mut stream,
+                                &mux_actions(vec![encode_mux_end(mux_id)]),
+                            )
+                            .await?;
+                            debug!(mux_id, "mux substream relay completed");
+                        }
                     }
                 }
             }
@@ -200,7 +164,7 @@ struct MuxFrameContext<'a> {
 }
 
 async fn handle_client_frame(
-    active: &mut Option<(u16, TcpStream)>,
+    active: &mut MuxTcpSubstreams,
     mut frame: MuxFrame,
     context: MuxFrameContext<'_>,
 ) -> std::io::Result<MuxFrameActions> {
@@ -214,10 +178,6 @@ async fn handle_client_frame(
     } = context;
     let id = frame.mux_id;
 
-    // Keep metadata does not identify the session type. Xray's XUDP writer
-    // deliberately omits the UDP destination after New, leaving only
-    // SessionID, Keep, and Data. Resolve ownership before falling back to the
-    // TCP command handler.
     if frame.status == MuxStatus::Keep {
         if let MuxCommand::Data { payload } = frame.command {
             if let Some(global_id) = xudp_sessions.global_id(id).await {
@@ -342,8 +302,8 @@ async fn handle_client_frame(
             if packet_sessions.handle_end(id).await {
                 return Ok(mux_actions(Vec::new()));
             }
-            tcp::handle_mux_tcp_command(active, frame, route_env).await
+            handle_mux_tcp_command(active, frame, route_env).await
         }
-        _ => tcp::handle_mux_tcp_command(active, frame, route_env).await,
+        _ => handle_mux_tcp_command(active, frame, route_env).await,
     }
 }

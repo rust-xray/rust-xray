@@ -74,6 +74,7 @@ fn sample_auth() -> VlessAuthenticatedClient {
         email: Some("fixture@example.test".to_string()),
         flow: None,
         level: None,
+        testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         inbound_tag: "vless-reality-in".to_string(),
     }
 }

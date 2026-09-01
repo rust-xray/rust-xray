@@ -16,6 +16,7 @@ fn static_manager() -> VlessUserManager {
             email: Some("static@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     )
 }

@@ -14,6 +14,7 @@ use crate::config::xray::{
 };
 use crate::dns::{DnsConfig, DnsServerConfig, QueryStrategy};
 use crate::reality::MLDSA65_SEED_LEN;
+use crate::vless::encryption::VlessDecryption;
 use crate::vless::{
     apply_inbound_vless_client_flows, build_vless_clients, validate_vless_client_flows,
     FallbackConfig, VlessClient,
@@ -96,7 +97,7 @@ pub struct RealityServerConfig {
     pub max_client_ver: Option<String>,
     pub show: bool,
     pub mldsa65_seed: Option<[u8; MLDSA65_SEED_LEN]>,
-    pub decryption: String,
+    pub decryption: VlessDecryption,
     pub dest_xver: u8,
     pub dest_transport: crate::reality::RealityDestTransport,
     pub limit_fallback_upload: LimitFallback,
@@ -315,19 +316,17 @@ pub fn normalize_vless_reality_inbound(
                     "flow=xtls-rprx-vision over XHTTP is not supported in the stream-one MVP",
                 ));
             }
-            let users = build_vless_clients(&clients)?;
-            (
-                users,
-                settings
-                    .decryption
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "none".to_string()),
-                settings.fallbacks,
-            )
+            let users = crate::vless::build_vless_clients_with_default(
+                &clients,
+                settings.testseed.as_deref(),
+            )?;
+            let decryption = crate::config::xray::validate::validate_vless_decryption(
+                settings.decryption.as_deref(),
+                &settings.fallbacks,
+            )?;
+            (users, decryption, settings.fallbacks)
         }
-        None => (Vec::new(), "none".to_string(), Vec::new()),
+        None => (Vec::new(), VlessDecryption::None, Vec::new()),
     };
 
     Ok(VlessRealityInbound {
@@ -401,19 +400,17 @@ pub fn normalize_vless_plain_tcp_inbound(
                 stream.network.as_deref(),
             )?;
             validate_vless_client_flows(&clients)?;
-            let users = build_vless_clients(&clients)?;
-            (
-                users,
-                settings
-                    .decryption
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "none".to_string()),
-                settings.fallbacks,
-            )
+            let users = crate::vless::build_vless_clients_with_default(
+                &clients,
+                settings.testseed.as_deref(),
+            )?;
+            let decryption = crate::config::xray::validate::validate_vless_decryption(
+                settings.decryption.as_deref(),
+                &settings.fallbacks,
+            )?;
+            (users, decryption, settings.fallbacks)
         }
-        None => (Vec::new(), "none".to_string(), Vec::new()),
+        None => (Vec::new(), VlessDecryption::None, Vec::new()),
     };
 
     Ok(VlessRealityInbound {

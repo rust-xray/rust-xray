@@ -99,6 +99,7 @@ fn test_auth() -> VlessAuthenticatedClient {
         email: Some("xudp@example.test".to_string()),
         flow: None,
         level: None,
+        testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         inbound_tag: "vless-in".to_string(),
     }
 }

@@ -12,6 +12,7 @@ fn policy_flags_disable_user_counters() {
             stats_user_uplink: false,
             stats_user_downlink: true,
             stats_user_online: false,
+            handshake: None,
             extra: Default::default(),
         },
     );
@@ -84,6 +85,7 @@ fn online_tracking_respects_policy_and_source_ip() {
             stats_user_uplink: false,
             stats_user_downlink: false,
             stats_user_online: true,
+            handshake: None,
             extra: Default::default(),
         },
     );
@@ -142,6 +144,7 @@ fn online_tracking_disabled_without_policy_opt_in() {
             stats_user_uplink: false,
             stats_user_downlink: false,
             stats_user_online: false,
+            handshake: None,
             extra: Default::default(),
         },
     );

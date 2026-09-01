@@ -1,20 +1,29 @@
 pub mod config;
+pub mod encryption;
 pub mod fallback;
 pub mod inbound;
 pub mod mux;
+pub mod policy;
 pub mod protocol;
 pub(crate) mod relay_debug;
 pub mod udp_framing;
 pub mod udp_relay;
 pub mod udp_session;
 pub mod user_manager;
+pub mod uuid_lookup;
 pub(crate) mod vision;
 
 pub use config::{
-    apply_inbound_vless_client_flows, build_vless_clients, format_vless_flow_distribution,
-    merge_vless_client_objects, normalize_vless_flow, parse_vless_user_id,
-    resolve_inbound_default_vless_flow, validate_vless_client_flow, validate_vless_client_flows,
-    vless_flow_distribution, VlessClient,
+    apply_inbound_vless_client_flows, build_vless_clients, build_vless_clients_with_default,
+    format_vless_flow_distribution, merge_vless_client_objects, normalize_vless_flow,
+    parse_vless_user_id, resolve_inbound_default_vless_flow, resolve_vless_testseed,
+    validate_vless_client_flow, validate_vless_client_flows, validate_vless_testseed,
+    vless_flow_distribution, VlessClient, UPSTREAM_DEFAULT_TESTSEED,
+};
+pub use encryption::{
+    parse_inbound_decryption, parse_outbound_encryption,
+    validate_inbound_decryption_with_fallbacks, ClientHandshakeMode, Mlkem768X25519PlusConfig,
+    TicketLifetimeRange, VlessDecryption, VlessEncryption, XorMode,
 };
 pub use fallback::{
     build_fallback_context, build_proxy_protocol_v1, build_proxy_protocol_v2, extract_client_alpn,
@@ -31,8 +40,10 @@ pub use inbound::{
     prepare_vless_tcp_response, read_vless_request, write_vless_response_header,
     VlessInboundRequest,
 };
+pub use policy::VlessInboundPolicy;
 pub use protocol::encode_vless_response_header;
 pub use user_manager::{
     managed_user_from_vless_account, user_id_hint, ManagedUser, UserManagerError,
     VlessAuthenticatedClient, VlessUserManager,
 };
+pub use uuid_lookup::{vless_lookup_uuid, LookupUuid, WireUuid};

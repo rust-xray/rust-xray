@@ -5,6 +5,7 @@ use crate::reality::{
     post_handshake_probe_cache, PostHandshakeProbeCache, PostHandshakeProbeKey,
     PostHandshakeProbeState, RealityAlpnProfile, RealityDestTransport,
 };
+use crate::vless::encryption::VlessDecryption;
 
 fn probe_inbound(dest: &str, server_names: &[&str]) -> VlessRealityInbound {
     VlessRealityInbound {
@@ -27,7 +28,7 @@ fn probe_inbound(dest: &str, server_names: &[&str]) -> VlessRealityInbound {
             max_client_ver: None,
             show: false,
             mldsa65_seed: None,
-            decryption: "none".to_string(),
+            decryption: VlessDecryption::None,
             dest_xver: 0,
             dest_transport: RealityDestTransport::Tcp,
             limit_fallback_upload: LimitFallback::default(),

@@ -34,9 +34,12 @@ use crate::runtime::{
 use crate::stats::{StatsRegistry, StatsState};
 use crate::tls::{read_client_hello_record, PrefixedStream, TlsClientHelloRecord};
 use crate::tunnel::start_tunnel_inbound;
+use crate::vless::encryption::{
+    build_encryption_server_from_decryption, SharedVlessEncryptionServer,
+};
 use crate::vless::{
     build_fallback_context, fallback_match_kind_label, looks_like_http_request,
-    resolve_fallback_selection, VlessClient, VlessUserManager,
+    resolve_fallback_selection, VlessClient, VlessDecryption, VlessUserManager,
 };
 
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
@@ -49,6 +52,7 @@ pub struct InboundListenerConfig {
     pub auth: VlessInboundAuthContext,
     pub plain_vless: bool,
     pub router: Option<Arc<RuntimeRouter>>,
+    pub encryption_server: Option<SharedVlessEncryptionServer>,
 }
 
 impl std::fmt::Debug for InboundListenerConfig {
@@ -62,6 +66,10 @@ impl std::fmt::Debug for InboundListenerConfig {
             )
             .field("plain_vless", &self.plain_vless)
             .field("router", &self.router.is_some())
+            .field(
+                "encryption_server",
+                &self.encryption_server.as_ref().map(|s| s.nfs_key_count()),
+            )
             .finish()
     }
 }
@@ -124,6 +132,7 @@ pub(crate) fn build_inbound_auth_context(
     Ok(VlessInboundAuthContext::new(
         auth_set,
         Arc::new(RwLock::new(stats_by_tag)),
+        crate::vless::VlessInboundPolicy::from_xray_config(xray),
     ))
 }
 
@@ -537,6 +546,7 @@ async fn handle_tls_client(
                 }),
                 socket_meta,
                 config.router.clone(),
+                config.encryption_server.clone(),
             )
             .await
             {
@@ -586,6 +596,18 @@ async fn handle_plain_vless_client(
     _conn_started: Instant,
 ) -> std::io::Result<()> {
     let socket_meta = crate::routing::RouteSocketMeta::from_tcp_stream(&stream);
+    if let Some(server) = config.encryption_server.as_ref() {
+        let encrypted = crate::vless::encryption::handshake_and_wrap(server.as_ref(), stream)
+            .await
+            .map_err(crate::vless::encryption::map_handshake_error)?;
+        return crate::vless::handle_vless_tcp_inbound_with_auth_context(
+            encrypted,
+            &config.auth,
+            &socket_meta,
+            config.router.as_ref(),
+        )
+        .await;
+    }
     crate::vless::handle_vless_tcp_inbound_with_auth_context(
         stream,
         &config.auth,
@@ -600,6 +622,13 @@ pub fn validate_reality_runtime_feature_gates(
 ) -> std::io::Result<()> {
     let _mldsa65_enabled = config.inbound.reality.mldsa65_seed.is_some();
     Ok(())
+}
+
+fn build_inbound_encryption_server(
+    decryption: &VlessDecryption,
+) -> std::io::Result<Option<SharedVlessEncryptionServer>> {
+    build_encryption_server_from_decryption(decryption)
+        .map_err(|err| std::io::Error::new(err.kind(), err.to_string()))
 }
 
 #[cfg(test)]
@@ -640,7 +669,7 @@ pub fn normalized_reality_merge_key(inbound: &VlessRealityInbound) -> String {
         inbound.listen_addr,
         inbound.reality.private_key,
         inbound.reality.dest_addr,
-        inbound.reality.decryption,
+        inbound.reality.decryption.label(),
         inbound.reality.max_time_diff,
         inbound.reality.min_client_ver.as_deref().unwrap_or(""),
         inbound.reality.max_client_ver.as_deref().unwrap_or(""),
@@ -832,12 +861,14 @@ fn runtime_config_from_normalized(
             stats_enabled,
         )
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
+        let encryption_server = build_inbound_encryption_server(&inbound.reality.decryption)?;
         let listener_config = InboundListenerConfig {
             inbound,
             merged_inbound_tags,
             auth,
             plain_vless: false,
             router: None,
+            encryption_server,
         };
         validate_reality_runtime_feature_gates(&listener_config)?;
 
@@ -1222,6 +1253,7 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
                     auth: inbound.auth.clone(),
                     plain_vless: inbound.plain_vless,
                     router: inbound.router.clone(),
+                    encryption_server: inbound.encryption_server.clone(),
                 }),
                 handler_config,
             )

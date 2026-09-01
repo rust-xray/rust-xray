@@ -205,6 +205,12 @@ fn parse_vless_user_from_proto(
         &vless_account.id,
         &vless_account.flow,
         vless_account.seconds,
+        if vless_account.testseed.is_empty() {
+            None
+        } else {
+            Some(vless_account.testseed.as_slice())
+        },
+        None,
     )
     .map_err(map_user_manager_error)
 }

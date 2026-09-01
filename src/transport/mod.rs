@@ -30,6 +30,7 @@ use crate::reality::tls13::RealityTls13ApplicationStream;
 use crate::routing::{RouteSocketMeta, RuntimeRouter};
 use crate::runtime::VlessInboundAuthContext;
 use crate::stats::StatsState;
+use crate::vless::encryption::SharedVlessEncryptionServer;
 use crate::vless::VlessUserManager;
 
 pub use raw::run_raw_transport;
@@ -82,6 +83,7 @@ pub struct VlessHandler {
     mux_trace: Option<MuxSessionTrace>,
     socket_meta: RouteSocketMeta,
     router: Option<Arc<RuntimeRouter>>,
+    encryption_server: Option<SharedVlessEncryptionServer>,
 }
 
 impl VlessHandler {
@@ -90,12 +92,14 @@ impl VlessHandler {
         mux_trace: Option<MuxSessionTrace>,
         socket_meta: RouteSocketMeta,
         router: Option<Arc<RuntimeRouter>>,
+        encryption_server: Option<SharedVlessEncryptionServer>,
     ) -> Self {
         Self {
             auth,
             mux_trace,
             socket_meta,
             router,
+            encryption_server,
         }
     }
 
@@ -130,6 +134,7 @@ impl VlessHandler {
             mux_trace,
             socket_meta,
             router,
+            None,
         )
     }
 
@@ -180,6 +185,10 @@ impl VlessHandler {
             .into_iter()
             .next()
             .unwrap_or_else(|| "reality-in".to_string())
+    }
+
+    pub fn encryption_server(&self) -> Option<&SharedVlessEncryptionServer> {
+        self.encryption_server.as_ref()
     }
 
     pub fn user_count(&self) -> usize {

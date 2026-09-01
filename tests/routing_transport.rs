@@ -204,6 +204,7 @@ async fn reality_accepted_raw_transport_routes_via_tonic_add_and_remove() {
             email: Some(EMAIL.to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let router = Arc::clone(&runtime.router);
@@ -335,6 +336,7 @@ async fn xhttp_stream_one_routes_via_tonic_domain_rule() {
             email: Some(EMAIL.to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let router = Arc::clone(&runtime.router);
@@ -436,6 +438,7 @@ async fn vision_flow_routes_before_relay_via_tonic_user_rule() {
             email: Some(EMAIL.to_string()),
             flow: Some("xtls-rprx-vision".to_string()),
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let router = Arc::clone(&runtime.router);
@@ -519,6 +522,7 @@ async fn mux_two_domains_route_independently_within_one_session() {
             email: Some(EMAIL.to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let router = Arc::clone(&runtime.router);
@@ -675,6 +679,7 @@ async fn dynamic_outbound_is_routable_from_xhttp_and_test_route() {
             email: Some(EMAIL.to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let router = Arc::clone(&runtime.router);
@@ -747,6 +752,7 @@ async fn blackhole_route_terminates_vless_connection_without_panic() {
             email: Some("blackhole@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     runtime
@@ -778,6 +784,7 @@ async fn raw_vless_test_route_parity_matrix_covers_required_fields() {
             email: Some(EMAIL.to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
         true,
     ));
@@ -872,6 +879,7 @@ async fn xhttp_reality_transport_entry_uses_same_router_as_run_inbound_transport
             email: Some("xhttp-reality@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let router = Arc::clone(&runtime.router);
@@ -941,6 +949,7 @@ async fn remove_dynamic_outbound_referenced_by_rule_fails_connection_safely() {
             email: Some(EMAIL.to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let router = Arc::clone(&runtime.router);

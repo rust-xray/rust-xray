@@ -54,6 +54,7 @@ fn vless_route_dynamic_user_same_as_static() {
             email: Some("static@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     );
     let dynamic_id = Uuid::parse_str(DYNAMIC_ID).expect("dynamic uuid");
@@ -63,6 +64,7 @@ fn vless_route_dynamic_user_same_as_static() {
             email: "dynamic@example.test".to_string(),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
             expiry_secs: None,
         })
         .expect("add dynamic user");
@@ -72,6 +74,7 @@ fn vless_route_dynamic_user_same_as_static() {
         email: Some("static@example.test".to_string()),
         flow: None,
         level: None,
+        testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         inbound_tag: "vless-in".to_string(),
     };
     let dynamic_auth = VlessAuthenticatedClient {
@@ -79,6 +82,7 @@ fn vless_route_dynamic_user_same_as_static() {
         email: Some("dynamic@example.test".to_string()),
         flow: None,
         level: None,
+        testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         inbound_tag: "vless-in".to_string(),
     };
     let static_ctx = route_context_from_vless(
@@ -111,13 +115,15 @@ fn vless_route_dynamic_user_same_as_static() {
 fn vless_route_custom_id_uses_effective_uuid() {
     const CUSTOM_ID: &str = "route-custom-id";
     let effective = parse_vless_user_id(CUSTOM_ID).expect("custom id maps to uuid");
+    let lookup = crate::vless::vless_lookup_uuid(&effective);
     let manager = VlessUserManager::new("vless-in", vec![]);
     manager
         .add_user(ManagedUser {
-            id: effective,
+            id: lookup,
             email: "custom@example.test".to_string(),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
             expiry_secs: None,
         })
         .expect("add custom user");

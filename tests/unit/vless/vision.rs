@@ -21,8 +21,15 @@ fn vision_padding_roundtrip_multiple_blocks() {
         COMMAND_PADDING_CONTINUE,
         &mut write_once,
         false,
+        UPSTREAM_DEFAULT_TESTSEED,
     );
-    let second = xtls_padding(b"part-two", COMMAND_PADDING_END, &mut None, false);
+    let second = xtls_padding(
+        b"part-two",
+        COMMAND_PADDING_END,
+        &mut None,
+        false,
+        UPSTREAM_DEFAULT_TESTSEED,
+    );
 
     let out1 = state.unpad_uplink_chunk(&first).unwrap();
     assert_eq!(out1, b"part-one");
@@ -47,7 +54,13 @@ fn unpad_inbound_test_shape_roundtrip() {
 #[test]
 fn vision_unpadding_fragmented_frame() {
     let mut write_once = Some(USER_UUID);
-    let framed = xtls_padding(b"fragment-me", COMMAND_PADDING_END, &mut write_once, false);
+    let framed = xtls_padding(
+        b"fragment-me",
+        COMMAND_PADDING_END,
+        &mut write_once,
+        false,
+        UPSTREAM_DEFAULT_TESTSEED,
+    );
     let mut state = TrafficState::new(USER_UUID);
     let split = 10;
     let part1 = state.unpad_uplink_chunk(&framed[..split]).unwrap();
@@ -119,6 +132,7 @@ fn vision_reject_udp_is_inbound_validation() {
         Some(FLOW_XTLS_RPRX_VISION),
         Some(FLOW_XTLS_RPRX_VISION),
         VlessCommand::Udp,
+        &[],
     )
     .unwrap_err();
     assert!(err.to_string().contains("UDP"));
@@ -132,6 +146,7 @@ fn account_requires_vision_rejects_empty_flow() {
         None,
         Some(FLOW_XTLS_RPRX_VISION),
         VlessCommand::Tcp,
+        &[],
     )
     .unwrap_err();
     assert!(err.to_string().contains("empty"));

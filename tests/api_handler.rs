@@ -135,6 +135,7 @@ async fn alter_inbound_add_user_enables_vless_authentication() {
             email: Some("static@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let registry = Arc::new(StatsRegistry::new());
@@ -202,6 +203,7 @@ async fn alter_inbound_duplicate_user_is_rejected() {
             email: Some("static@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let registry = Arc::new(StatsRegistry::new());
@@ -281,6 +283,7 @@ async fn list_inbounds_returns_registered_vless_inbound_tag() {
             email: Some("static@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let registry = Arc::new(StatsRegistry::new());
@@ -315,6 +318,7 @@ async fn get_inbound_users_returns_static_and_dynamic_users() {
             email: Some("static@example.test".to_string()),
             flow: Some("xtls-rprx-vision".to_string()),
             level: Some(0),
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     manager
@@ -367,6 +371,7 @@ async fn get_inbound_users_count_tracks_add_and_remove() {
             email: Some("static@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let registry = Arc::new(StatsRegistry::new());
@@ -609,6 +614,7 @@ async fn alter_inbound_duplicate_uuid_is_rejected() {
             email: Some("static@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let registry = Arc::new(StatsRegistry::new());
@@ -702,6 +708,7 @@ async fn remove_static_user_via_api() {
             email: Some("static@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let registry = Arc::new(StatsRegistry::new());
@@ -745,6 +752,7 @@ async fn tag_isolation_remove_does_not_affect_other_inbound() {
             email: Some("shared@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let manager_b = Arc::new(VlessUserManager::new(
@@ -754,6 +762,7 @@ async fn tag_isolation_remove_does_not_affect_other_inbound() {
             email: Some("shared@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let registry = Arc::new(StatsRegistry::new());

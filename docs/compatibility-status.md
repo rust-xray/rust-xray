@@ -33,7 +33,7 @@ checklist and does not claim production-ready or full Xray-core drop-in parity.
 | REALITY useless-record overflow TLS alert (Stage 7) | Working | On accepted TLS 1.3 path, consecutive useless-record overflow emits one encrypted fatal `unexpected_message` alert (best-effort) then returns `too many ignored records`. Covers `readClientFinished`, pre-VLESS parse, standard TCP relay, Vision TCP relay, and REALITY Mux (including Vision+Mux). **Partial:** general TLS alert parity outside this overflow case remains incomplete. |
 | REALITY fallback rate limits (Stage 6) | Working | `limitFallbackUpload` / `limitFallbackDownload` on pre-auth fallback relay only; juju/ratelimit v1.0.2-compatible token bucket. **Partial parity:** no upstream `MirrorConn` ClientHello mirroring timing; no upstream `s2cSaved` download prebuffer — limiter starts at post-initial relay boundary. Accepted REALITY/VLESS traffic is never rate-limited. |
 | TLS 1.3 accepted path | Working | AES128-GCM, AES256-GCM, CHACHA20-Poly1305 (CCM suites rejected) |
-| VLESS TCP inbound | Working | UUID auth, `decryption: "none"` |
+| VLESS TCP inbound | Working | UUID auth, explicit `decryption: "none"` required (empty/missing rejected at startup) |
 | Custom string VLESS ID | Working | UUIDv5 mapping (Xray-compatible) |
 | VLESS flow `""` | Working | Plain TCP relay via freedom outbound |
 | VLESS flow `xtls-rprx-vision` | Working | Vision DIRECT MVP (padding + `COMMAND_DIRECT`) |
@@ -94,9 +94,50 @@ Remaining API work: Remna unix-abstract E2E (Stage 8D where applicable).
 | XHTTP `packet-down` / XMUX | **Unsupported / gated** | Config may parse; runtime gated (`501` / fail-fast) |
 | Vision over XHTTP | **Unsupported** | Explicitly rejected at startup (`flow="xtls-rprx-vision"` over XHTTP) |
 
-**VLESS Mux wording (accurate):** not full Xray-core Mux.Cool parity. The Happ
-baseline path (Vision + Mux + numeric UDP DNS on port 53) is smoke-validated.
-Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomplete.
+**VLESS Mux wording (accurate):** Happ baseline path (Vision + Mux + numeric UDP DNS on
+port 53) is smoke-validated. **Stage 4F:** parallel TCP mux substreams, generic Mux UDP,
+native UDP, and XUDP are implemented on the forward inbound path. Domain `:53` mux DNS
+fast-path (bypasses router) remains an intentional divergence — see forward matrix below.
+
+---
+
+## Forward VLESS Inbound Feature Matrix (Stage 4F)
+
+Upstream baseline: `cd4ce973e9f6ef3a7acf9a7030927b4143f9ea47` (`XTLS/Xray-core` main).
+
+| Feature | Upstream | rust-xray | Coverage | Status | Notes |
+|---------|----------|-----------|----------|--------|-------|
+| UUID auth | Wire UUID in request | Wire UUID for routing/logs | unit + live | PARITY | |
+| ProcessUUID | Zeros bytes 6–7 for lookup | `vless_lookup_uuid()` | unit | PARITY | Wire UUID preserved for routing |
+| TCP | Supported | Supported | unit + live | PARITY | |
+| UDP (native) | Supported | Supported | unit + live | PARITY | |
+| Mux TCP | Supported | Supported | unit + live | PARITY | |
+| Parallel Mux | Supported | HashMap + split readers | unit | PARITY | Bounded downlink queue (32) |
+| Generic Mux UDP | Supported | Persistent associations | unit + live | PARITY | |
+| XUDP | Supported | Supported | unit + live | PARITY | |
+| Vision TCP | Supported | Supported | unit + live | PARITY | |
+| Vision native UDP | Rejected | Rejected | unit | PARITY | |
+| Vision Mux/XUDP | Mux non-XUDP rejected early | `is_mux_and_not_xudp()` at VLESS layer | unit | PARITY | |
+| testseed | Per-account, default `[900,500,900,256]` | Config + HandlerService proto field | unit | PARITY | |
+| Addons Flow | Parsed | Parsed | unit | PARITY | |
+| Addons Seed | Unused at runtime | Not consumed | audit | NOT APPLICABLE | Upstream inbound does not use |
+| response header | `[version, 0]` | `[version, 0]` | unit | PARITY | |
+| handshake timeout | Policy level 0 (default 4s) | `VlessInboundPolicy` on header read | unit | PARITY | Encryption uses separate 60s window |
+| user level | Stored; policy hooks | Stored; level not wired to traffic policy yet | audit | SUPPORTED | Handshake uses level `"0"` pre-auth |
+| dynamic AddUser | HandlerService | HandlerService | unit + API | PARITY | Includes testseed when set in proto |
+| dynamic RemoveUser | HandlerService | HandlerService | unit + API | PARITY | Normalized lookup key |
+| decryption none | Required explicit | Required explicit | unit | PARITY | |
+| Encryption 1RTT | Supported | Supported | unit + live | PARITY | Stage 4C–4D |
+| Encryption 0RTT | Supported | Supported | unit + live | PARITY | Stage 4E.1 |
+| native/xorpub/random | Supported | Supported | unit + live | PARITY | |
+| REALITY transport | Supported | Supported | live | PARITY | VLESS semantics shared post-TLS |
+| raw TCP transport | Supported | Supported | live | PARITY | |
+| XHTTP transport | Full upstream | MVP stream-one/up/packet-up | live | TRANSPORT GAP | VLESS parser shared once stream arrives |
+| xtls-rprx-vision-udp443 | Outbound-oriented | N/A | audit | NOT APPLICABLE | Forward inbound |
+| DNS fast path (Mux :53) | Router-integrated | Direct `DnsEngine` | unit | INTENTIONAL DIVERGENCE | Observable routing skip for numeric :53 |
+
+**Forward inbound verdict (Stage 4F):** core matrix green; XHTTP transport remains MVP;
+user `level` traffic policy not fully wired.
 
 ---
 
@@ -105,14 +146,17 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | Area | Status | Notes |
 |------|--------|-------|
 | RemnaNode 3.3.2 E2E (Stage 8D) | Partial | StatsService parity implemented; unix-abstract API tunnel integration pending Stage 8D |
-| Mux.Cool frame parser | Partial | `New` / `Keep` / `End` / `KeepAlive`; TCP and UDP frame metadata parsed |
-| Mux TCP substream | Partial | Single active TCP substream to freedom outbound (no parallel substreams) |
-| Mux UDP DNS (domain `:53`) | Partial | Domain `:53` mux targets still closed (numeric IP DNS works) |
+| Mux.Cool frame parser | Working | `New` / `Keep` / `End` / `KeepAlive`; TCP and UDP frame metadata parsed |
+| Mux TCP substreams | Working | Parallel TCP children via split readers + bounded downlink channel (Stage 4F) |
+| Mux UDP DNS (domain `:53`) | Partial | Domain `:53` mux targets still closed (numeric IP DNS works); numeric :53 uses DNS fast-path |
 | Remnawave / panel configs | Partial | Config load + API + REALITY inbound + routing execution for supported conditions. GeoSite/GeoIP routing supported. `attributes` production extraction remains unavailable. Remote process metadata is generally unavailable for VLESS clients. Remna unix-abstract E2E remains pending |
 | Routing rule metadata gaps | Partial | `attributes`: compiler/`TestRoute` supported; production extraction missing. `process`: compiler/`TestRoute` supported; remote VLESS has no process identity. `local_os`: canonical field 23 supported |
 | DNS engine — DoH / hostname servers | Partial | `https://` parsed; queries return explicit unsupported |
 | DNS engine — `protocol: "dns"` outbound | Partial | Config tolerated; placeholder only (see [dns-future.md](./dns-future.md)) |
 | General logging config | Partial | `LoggerService.RestartLogger` works for supported sinks; `dnsLog` behavior, `maskAddress`, and JSON `loglevel` → filter mapping incomplete |
+| VLESS Encryption foundation (Stage 4B) | Working | `mlkem768x25519plus` config grammar, validation, NFS key parsing, X25519/ML-KEM-768/Blake3/AEAD/nonce/xor/random/padding primitives implemented and unit-tested |
+| VLESS Encryption 1-RTT handshake (Stage 4C) | Working | Inbound `VlessEncryptionServer` 1-RTT `mlkem768x25519plus` server handshake (NFS chain, PFS, UnitedKey, ticket issuance, prefix preservation) |
+| VLESS Encryption traffic + inbound runtime (Stage 4D–4F) | Working | 1-RTT + 0-RTT forward inbound matrix green (TCP/Vision/Mux/XUDP/UDP/xorpub/random). **Not yet:** outbound encryption, reverse/Rvs |
 
 ---
 
@@ -120,11 +164,11 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 
 | Area | Status |
 |------|--------|
-| Full Mux.Cool runtime | Not implemented |
-| Generic UDP over VLESS Mux (non-DNS / non-`:53`) | Not implemented |
-| UDP over VLESS (non-Mux `command=Udp`) | Not implemented |
-| XUDP | Not implemented |
-| Full UDP mux relay (all destinations / parallel substreams) | Not implemented |
+| Full Mux.Cool runtime | Partial | Parallel TCP substreams (4F); session ID duplicate-New replaces prior child (documented) |
+| Generic UDP over VLESS Mux (non-DNS / non-`:53`) | Working | Stage 4F — persistent generic Mux UDP associations |
+| UDP over VLESS (non-Mux `command=Udp`) | Working | Stage 4F — native UDP framing + relay |
+| XUDP | Working | Stage 4F — GlobalID, reattach, expiry |
+| Full UDP mux relay (all destinations / parallel substreams) | Partial | Parallel TCP done; domain `:53` DNS fast-path divergence |
 | DNS UDP relay inside Mux (domain names without resolver) | Not implemented |
 | Live observatory-backed balancer health | Working (Stage 8E4-C) — `RuntimeRouter` receives active Observatory `OutboundHealthProvider`; `leastPing`/`leastLoad` and random/roundRobin fallback health filtering use live snapshots |
 | BurstObservatory / HealthPing | Working (Stage 8E4-B) — tagged probes, ring buffer, All/Fail/Average/Deviation/Min/Max, connectivity check semantics, canonical `GetOutboundStatus` with `health_ping` |
@@ -142,6 +186,7 @@ Domain `:53` targets, generic UDP, parallel substreams, and XUDP remain incomple
 | REALITY post-handshake `GlobalMaxCSSMsgCount` / alert-driven CCS probe paths (Stage 5C extras) | Not implemented |
 | REALITY session resumption on accepted path | Not implemented |
 | ML-KEM / hybrid KEM on REALITY **accepted TLS handshake** | Not implemented | Stage 2 adds **pre-auth only**: parse `X25519MLKEM768` ClientHello `key_share` (1216 B) and extract trailing X25519 for REALITY auth. **Not yet:** ML-KEM-768 encaps/decaps, hybrid ServerHello, 64-byte TLS shared secret, dest `key_share` mirroring. See [design doc](./reality-mlkem-design.md). |
+| VLESS Encryption runtime inbound (4C–4F) | Working | Forward inbound 1-RTT + 0-RTT. **Not yet:** outbound client encryption |
 | Full Xray-core drop-in compatibility | Not implemented |
 | Final API config compatibility closure | Working (Stage 8E5) | Commander semantics, legacy aliases, reflection parity, grpcurl + Xray CLI interoperability validated against upstream Xray 26.7.28 (`c1958db`). Safe divergences: duplicate recognized `api.services` entries fail startup; `GetSysStats` Go-runtime memory/goroutine fields zero/N/A; optional direct-listen TLS/mTLS is rust-xray extension; legacy reflection `describe`/grpcurl invoke limitation matches upstream |
 
@@ -174,12 +219,11 @@ REALITY TCP accept
 DNS on port 53** is **experimental working** (live smoke: `PASS happ reality vision
 mux udp dns`, `PASS vless mux udp dns 1.1.1.1:53`).
 
-**Remaining gaps (not baseline blockers):**
+**Remaining gaps (not forward-inbound blockers):**
 
-- Domain `:53` mux destinations (resolver hook)
-- Generic UDP over Mux (non-DNS ports)
-- Full Mux.Cool runtime (parallel substreams, full frame lifecycle)
-- XUDP
+- Domain `:53` mux destinations (resolver hook; numeric :53 DNS fast-path divergence)
+- XHTTP transport MVP (gRPC/ws not supported at startup)
+- User `level` traffic policy wiring beyond handshake timeout baseline
 
 ---
 

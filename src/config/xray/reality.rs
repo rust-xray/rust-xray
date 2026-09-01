@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use tracing::info;
 
 use crate::config::LimitFallback;
+use crate::vless::encryption::VlessDecryption;
 use crate::vless::{validate_fallback_configs, validate_fallback_xver, FallbackConfig};
 use serde_json::Value;
 
@@ -55,7 +56,7 @@ pub struct RealityInboundRuntime {
     pub show: bool,
     pub mldsa65_seed: Option<crate::reality::Mldsa65Seed>,
     pub vless_clients: Vec<VlessClientObject>,
-    pub vless_decryption: String,
+    pub vless_decryption: VlessDecryption,
     pub vless_fallbacks: Vec<FallbackConfig>,
     pub transport: TransportNetwork,
     pub xhttp_settings: Option<XHttpSettings>,
@@ -105,7 +106,7 @@ impl std::fmt::Debug for RealityInboundRuntime {
                 &self.mldsa65_seed.as_ref().map(|_| "<redacted>"),
             )
             .field("vless_clients", &self.vless_clients)
-            .field("vless_decryption", &self.vless_decryption)
+            .field("vless_decryption", &self.vless_decryption.label())
             .field("vless_fallbacks", &self.vless_fallbacks)
             .field("transport", &self.transport)
             .field("xhttp_settings", &self.xhttp_settings)
@@ -164,7 +165,8 @@ pub fn inbound_vless_settings(
         )
     })?;
 
-    validate_vless_decryption(settings.decryption.as_deref())?;
+    let _parsed_decryption =
+        validate_vless_decryption(settings.decryption.as_deref(), &settings.fallbacks)?;
     validate_fallback_configs(&settings.fallbacks)?;
 
     Ok(Some(settings))
@@ -314,7 +316,7 @@ struct RealityMergeKey {
     listen_addr: String,
     private_key: String,
     dest_addr: String,
-    vless_decryption: String,
+    vless_decryption: VlessDecryption,
     max_time_diff: u64,
     min_client_ver: Option<String>,
     max_client_ver: Option<String>,
@@ -386,18 +388,11 @@ fn parse_reality_inbound_for_merge(
                 stream.security.as_deref(),
                 stream.network.as_deref(),
             )?;
-            (
-                clients,
-                settings
-                    .decryption
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "none".to_string()),
-                settings.fallbacks,
-            )
+            let vless_decryption =
+                validate_vless_decryption(settings.decryption.as_deref(), &settings.fallbacks)?;
+            (clients, vless_decryption, settings.fallbacks)
         }
-        None => (Vec::new(), "none".to_string(), Vec::new()),
+        None => (Vec::new(), VlessDecryption::None, Vec::new()),
     };
 
     Ok(ParsedRealityInbound {

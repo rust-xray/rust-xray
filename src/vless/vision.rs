@@ -19,7 +19,7 @@ const TLS13_SUPPORTED_VERSIONS: [u8; 6] = [0x00, 0x2b, 0x00, 0x02, 0x03, 0x04];
 const TLS_HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 0x01;
 const TLS_HANDSHAKE_TYPE_SERVER_HELLO: u8 = 0x02;
 const MAX_VISION_FRAME: usize = 8192;
-const DEFAULT_TESTSEED: [u32; 4] = [900, 500, 6, 900];
+use crate::vless::config::UPSTREAM_DEFAULT_TESTSEED;
 
 /// Per-direction Vision padding / unpadding state.
 #[derive(Debug, Clone)]
@@ -57,6 +57,7 @@ impl Default for DirectionState {
 #[derive(Debug, Clone)]
 pub struct TrafficState {
     pub user_uuid: [u8; 16],
+    pub testseed: [u32; 4],
     pub number_of_packet_to_filter: i32,
     pub enable_xtls: bool,
     pub is_tls12_or_above: bool,
@@ -69,8 +70,13 @@ pub struct TrafficState {
 
 impl TrafficState {
     pub fn new(user_uuid: [u8; 16]) -> Self {
+        Self::with_testseed(user_uuid, UPSTREAM_DEFAULT_TESTSEED)
+    }
+
+    pub fn with_testseed(user_uuid: [u8; 16], testseed: [u32; 4]) -> Self {
         Self {
             user_uuid,
+            testseed,
             number_of_packet_to_filter: 8,
             enable_xtls: false,
             is_tls12_or_above: false,
@@ -135,7 +141,13 @@ impl TrafficState {
             COMMAND_PADDING_CONTINUE
         };
 
-        xtls_padding(content, command, write_once_uuid, long_padding)
+        xtls_padding(
+            content,
+            command,
+            write_once_uuid,
+            long_padding,
+            self.testseed,
+        )
     }
 
     pub fn take_downlink_writer_direct_pending(&mut self) -> bool {
@@ -151,7 +163,18 @@ impl TrafficState {
 pub type SharedTrafficState = Arc<Mutex<TrafficState>>;
 
 pub fn new_shared_traffic_state(user_uuid: [u8; 16]) -> SharedTrafficState {
-    Arc::new(Mutex::new(TrafficState::new(user_uuid)))
+    new_shared_traffic_state_with_testseed(user_uuid, UPSTREAM_DEFAULT_TESTSEED)
+}
+
+pub fn new_shared_traffic_state_with_testseed(
+    user_uuid: [u8; 16],
+    testseed: [u32; 4],
+) -> SharedTrafficState {
+    Arc::new(Mutex::new(TrafficState::with_testseed(user_uuid, testseed)))
+}
+
+pub fn new_shared_traffic_state_default(user_uuid: [u8; 16]) -> SharedTrafficState {
+    new_shared_traffic_state(user_uuid)
 }
 
 pub fn is_vision_flow(flow: Option<&str>) -> bool {
@@ -210,9 +233,10 @@ pub fn xtls_padding(
     command: u8,
     write_once_uuid: &mut Option<[u8; 16]>,
     long_padding: bool,
+    testseed: [u32; 4],
 ) -> Vec<u8> {
     let content_len = content.len();
-    let mut padding_len = random_padding_len(content_len, long_padding);
+    let mut padding_len = random_padding_len(content_len, long_padding, testseed);
     let max_padding = MAX_VISION_FRAME.saturating_sub(21 + content_len);
     padding_len = padding_len.min(max_padding);
 
@@ -466,16 +490,49 @@ fn is_complete_tls_application_records(data: &[u8]) -> bool {
     true
 }
 
-fn random_padding_len(content_len: usize, long_padding: bool) -> usize {
+fn random_padding_len(content_len: usize, long_padding: bool, testseed: [u32; 4]) -> usize {
     let mut bytes = [0u8; 2];
     let _ = getrandom::getrandom(&mut bytes);
     let random = u16::from_be_bytes(bytes) as usize;
-    if content_len < DEFAULT_TESTSEED[0] as usize && long_padding {
+    if content_len < testseed[0] as usize && long_padding {
         random
-            .saturating_add(DEFAULT_TESTSEED[2] as usize)
+            .saturating_add(testseed[2] as usize)
             .saturating_sub(content_len)
     } else {
-        random % (DEFAULT_TESTSEED[3] as usize + 1)
+        random % (testseed[3] as usize + 1)
+    }
+}
+
+/// Whether Vision may enable REALITY TLS 1.3 direct relay on `COMMAND_DIRECT`.
+///
+/// Unencrypted REALITY Vision keeps upstream DIRECT splice behavior. Encrypted VLESS
+/// must never bypass the CommonConn layer even after padding ends.
+#[derive(Debug, Clone)]
+pub(crate) enum VisionDirectCapability {
+    Allowed(crate::reality::tls13::ApplicationStreamDirectRelay),
+    BlockedByVlessEncryption,
+}
+
+impl VisionDirectCapability {
+    pub fn from_reality_tls_split(
+        direct_relay: crate::reality::tls13::ApplicationStreamDirectRelay,
+    ) -> Self {
+        Self::Allowed(direct_relay)
+    }
+
+    pub fn blocked_by_vless_encryption() -> Self {
+        Self::BlockedByVlessEncryption
+    }
+
+    pub fn direct_relay(&self) -> Option<crate::reality::tls13::ApplicationStreamDirectRelay> {
+        match self {
+            Self::Allowed(relay) => Some(relay.clone()),
+            Self::BlockedByVlessEncryption => None,
+        }
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, Self::BlockedByVlessEncryption)
     }
 }
 
@@ -941,7 +998,13 @@ pub fn encode_vision_flow_addons_protobuf() -> Vec<u8> {
 #[cfg(test)]
 pub fn wrap_vision_uplink_block(user_uuid: &[u8; 16], content: &[u8]) -> Vec<u8> {
     let mut write_once = Some(*user_uuid);
-    xtls_padding(content, COMMAND_PADDING_END, &mut write_once, false)
+    xtls_padding(
+        content,
+        COMMAND_PADDING_END,
+        &mut write_once,
+        false,
+        UPSTREAM_DEFAULT_TESTSEED,
+    )
 }
 
 #[cfg(test)]

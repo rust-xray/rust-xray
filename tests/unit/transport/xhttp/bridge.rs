@@ -13,6 +13,7 @@ fn test_clients() -> Vec<VlessClient> {
         email: Some("user@example.com".to_string()),
         flow: None,
         level: None,
+        testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
     }]
 }
 

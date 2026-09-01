@@ -7,6 +7,7 @@ fn client_object(id: &str, email: Option<&str>, flow: Option<&str>) -> VlessClie
         email: email.map(str::to_string),
         flow: flow.map(str::to_string),
         level: None,
+        testseed: None,
         extra: BTreeMap::new(),
     }
 }

@@ -732,6 +732,7 @@ async fn api_internal_mode_routed_vless_dataplane_tonic_rpc() {
             email: Some("route-api@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     runtime.inbound.user_managers().register(Arc::clone(&users));

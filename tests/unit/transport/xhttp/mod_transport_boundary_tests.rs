@@ -12,6 +12,7 @@ fn rejects_vision_flow_before_serving_xhttp() {
             email: None,
             flow: Some("xtls-rprx-vision".to_string()),
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     );
     let err = ensure_xhttp_users_supported(&users).unwrap_err();

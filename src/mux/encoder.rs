@@ -139,8 +139,7 @@ pub fn encode_mux_new_tcp(id: u16, destination: &VlessDestination, data: &[u8]) 
     encode_mux_new(MuxNetwork::Tcp, id, destination, data)
 }
 
-#[cfg(test)]
-pub(crate) fn encode_mux_new_udp_xudp(
+pub fn encode_mux_new_udp_xudp(
     id: u16,
     destination: &VlessDestination,
     global_id: &[u8; 8],
@@ -199,13 +198,11 @@ pub(crate) fn encode_mux_new_udp_xudp_with_trailing(
     frame
 }
 
-#[cfg(test)]
-pub(crate) fn encode_mux_new_udp(id: u16, destination: &VlessDestination, data: &[u8]) -> Vec<u8> {
+pub fn encode_mux_new_udp(id: u16, destination: &VlessDestination, data: &[u8]) -> Vec<u8> {
     encode_mux_new(MuxNetwork::Udp, id, destination, data)
 }
 
-#[cfg(test)]
-pub(crate) fn encode_mux_keep_udp(id: u16, destination: &VlessDestination, data: &[u8]) -> Vec<u8> {
+pub fn encode_mux_keep_udp(id: u16, destination: &VlessDestination, data: &[u8]) -> Vec<u8> {
     encode_mux_udp_packet(id, destination, data).unwrap()
 }
 

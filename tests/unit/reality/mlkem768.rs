@@ -93,5 +93,13 @@ fn mlkem768_encapsulation_debug_redacts_shared_secret() {
     assert!(debug.contains("ciphertext"));
     assert!(debug.contains("shared_secret"));
     assert!(debug.contains("<redacted>"));
-    assert!(!debug.contains(&format!("{:?}", result.shared_secret()[0])));
+    let secret_hex: String = result
+        .shared_secret()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert!(
+        !debug.contains(&secret_hex),
+        "Debug must not leak shared secret bytes"
+    );
 }

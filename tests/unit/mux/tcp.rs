@@ -229,6 +229,7 @@ fn freedom_route_env() -> MuxRouteEnv {
             email: Some("mux-tcp@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
             inbound_tag: "vless-in".to_string(),
         },
         socket_meta: RouteSocketMeta::default(),
@@ -355,6 +356,56 @@ fn mux_tcp_fragmented_writes_still_relay_exact_bytes() {
             .write_all(&encode_mux_end(4))
             .await
             .expect("write end");
+        drop(client_io);
+        handle.await.expect("join").unwrap();
+    });
+}
+
+#[test]
+fn mux_tcp_parallel_substreams_relay_independently() {
+    block_on(async {
+        let echo_a = bind_tcp_echo().await;
+        let echo_b = bind_tcp_echo().await;
+        let destination_a = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), echo_a.port);
+        let destination_b = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), echo_b.port);
+        let (mut client_io, mut server_io) = tokio::io::duplex(16384);
+        let handle = tokio::spawn(async move { handle_mux_cool_inbound(&mut server_io).await });
+        client_io
+            .write_all(&encode_mux_new_tcp(10, &destination_a, b"A1"))
+            .await
+            .expect("open a");
+        client_io
+            .write_all(&encode_mux_new_tcp(11, &destination_b, b"B1"))
+            .await
+            .expect("open b");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(echo_a.captured.lock().expect("lock").as_slice(), b"A1");
+        assert_eq!(echo_b.captured.lock().expect("lock").as_slice(), b"B1");
+        client_io
+            .write_all(&encode_mux_keep_data(10, b"A2").expect("keep a"))
+            .await
+            .expect("keep a write");
+        client_io
+            .write_all(&encode_mux_keep_data(11, b"B2").expect("keep b"))
+            .await
+            .expect("keep b write");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(echo_a.captured.lock().expect("lock").as_slice(), b"A1A2");
+        assert_eq!(echo_b.captured.lock().expect("lock").as_slice(), b"B1B2");
+        client_io
+            .write_all(&encode_mux_end(10))
+            .await
+            .expect("end a");
+        client_io
+            .write_all(&encode_mux_keep_data(11, b"B3").expect("keep b2"))
+            .await
+            .expect("keep b2 write");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(echo_b.captured.lock().expect("lock").as_slice(), b"B1B2B3");
+        client_io
+            .write_all(&encode_mux_end(11))
+            .await
+            .expect("end b");
         drop(client_io);
         handle.await.expect("join").unwrap();
     });

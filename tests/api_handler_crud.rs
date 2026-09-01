@@ -12,6 +12,7 @@ use rust_xray::config::XrayConfig;
 use rust_xray::runtime::{encode_freedom_outbound, encode_inbound_handler_config, HandlerRuntime};
 use rust_xray::stats::StatsRegistry;
 use rust_xray::vless::config::VlessClient;
+use rust_xray::vless::encryption::VlessDecryption;
 use tokio::net::TcpListener;
 use tonic::transport::Endpoint;
 use tonic::Code;
@@ -25,6 +26,7 @@ fn reality_inbound_config(tag: &str, port: u16) -> rust_xray::config::VlessReali
             email: Some("dynamic-inbound@example.test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
         transport: rust_xray::config::InboundTransportConfig::RawTcp,
         reality: rust_xray::config::RealityServerConfig {
@@ -37,7 +39,7 @@ fn reality_inbound_config(tag: &str, port: u16) -> rust_xray::config::VlessReali
             max_client_ver: None,
             show: false,
             mldsa65_seed: None,
-            decryption: "none".to_string(),
+            decryption: VlessDecryption::None,
             dest_xver: 0,
             dest_transport: rust_xray::reality::RealityDestTransport::Tcp,
             limit_fallback_upload: Default::default(),

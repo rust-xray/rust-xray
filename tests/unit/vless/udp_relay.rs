@@ -205,6 +205,7 @@ fn vision_udp_flow_rejected() {
         Some("xtls-rprx-vision"),
         Some("xtls-rprx-vision"),
         VlessCommand::Udp,
+        &[],
     )
     .expect_err("vision udp");
     assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
@@ -212,7 +213,7 @@ fn vision_udp_flow_rejected() {
 
 #[test]
 fn empty_flow_udp_accepted() {
-    validate_vless_flow_for_command(None, None, VlessCommand::Udp).expect("empty flow udp");
+    validate_vless_flow_for_command(None, None, VlessCommand::Udp, &[]).expect("empty flow udp");
 }
 
 #[test]

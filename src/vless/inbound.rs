@@ -20,6 +20,7 @@ use crate::routing::{connect_routed_outbound, NetworkKind, RouteSocketMeta, Runt
 use crate::runtime::VlessInboundAuthContext;
 use crate::stats::{StatsConnection, StatsState};
 use crate::tls::PrefixedStream;
+use crate::vless::policy::VlessInboundPolicy;
 use crate::vless::protocol::{
     encode_vless_response_header, parse_vless_request, VlessCommand, VlessRequest,
 };
@@ -33,8 +34,9 @@ use crate::vless::udp_relay::{
 use crate::vless::udp_session::VlessUdpRelayOptions;
 use crate::vless::user_manager::{user_id_hint, VlessAuthenticatedClient, VlessUserManager};
 use crate::vless::vision::{
-    is_vision_flow, new_shared_traffic_state, parse_vless_request_flow, SharedTrafficState,
-    VisionRelayReader, VisionRelayStream, VisionRelayWriter, FLOW_XTLS_RPRX_VISION,
+    is_vision_flow, new_shared_traffic_state, new_shared_traffic_state_with_testseed,
+    parse_vless_request_flow, SharedTrafficState, VisionDirectCapability, VisionRelayReader,
+    VisionRelayStream, VisionRelayWriter, FLOW_XTLS_RPRX_VISION,
 };
 use std::net::IpAddr;
 use std::time::Instant;
@@ -54,7 +56,28 @@ pub async fn read_vless_request<S>(stream: &mut S) -> std::io::Result<VlessInbou
 where
     S: AsyncRead + Unpin,
 {
-    read_vless_request_with_limit(stream, MAX_VLESS_HEADER_SIZE).await
+    read_vless_request_with_policy(stream, VlessInboundPolicy::default()).await
+}
+
+pub async fn read_vless_request_with_policy<S>(
+    stream: &mut S,
+    policy: VlessInboundPolicy,
+) -> std::io::Result<VlessInboundRequest>
+where
+    S: AsyncRead + Unpin,
+{
+    match tokio::time::timeout(
+        policy.handshake_timeout,
+        read_vless_request_with_limit(stream, MAX_VLESS_HEADER_SIZE),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            ErrorKind::TimedOut,
+            "vless handshake timeout",
+        )),
+    }
 }
 
 pub(crate) async fn read_vless_request_with_limit<S>(
@@ -119,10 +142,24 @@ pub fn authenticate_vless_client(
     users.authenticate(request)
 }
 
+pub fn is_mux_and_not_xudp(command: VlessCommand, initial_payload: &[u8]) -> bool {
+    if command != VlessCommand::Mux {
+        return false;
+    }
+    if initial_payload.is_empty() {
+        return true;
+    }
+    if initial_payload.len() < 7 {
+        return true;
+    }
+    !(initial_payload[2] == 0 && initial_payload[3] == 0 && initial_payload[6] == 2)
+}
+
 pub fn validate_vless_flow_for_command(
     request_flow: Option<&str>,
     account_flow: Option<&str>,
     command: VlessCommand,
+    initial_payload: &[u8],
 ) -> std::io::Result<()> {
     let request_flow = request_flow
         .map(str::trim)
@@ -146,6 +183,12 @@ pub fn validate_vless_flow_for_command(
             format!("account flow does not match request flow {FLOW_XTLS_RPRX_VISION}"),
         )),
         (None, Some(FLOW_XTLS_RPRX_VISION)) if command == VlessCommand::Tcp => {
+            Err(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "account requires xtls-rprx-vision but client request flow is empty",
+            ))
+        }
+        (None, Some(FLOW_XTLS_RPRX_VISION)) if is_mux_and_not_xudp(command, initial_payload) => {
             Err(std::io::Error::new(
                 ErrorKind::PermissionDenied,
                 "account requires xtls-rprx-vision but client request flow is empty",
@@ -259,12 +302,13 @@ async fn relay_vless_tcp_bidirectional<S>(
     client_stream: S,
     outbound: &mut tokio::net::TcpStream,
     vision: Option<(SharedTrafficState, [u8; 16])>,
-    direct_relay: Option<ApplicationStreamDirectRelay>,
+    vision_direct: VisionDirectCapability,
     _stats: Option<&StatsConnection>,
 ) -> std::io::Result<(u64, u64)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let direct_relay = vision_direct.direct_relay();
     let probed_client = RelayClientWriteProbe::new(client_stream);
     let relay_result = if let Some((traffic, user_uuid)) = vision {
         let vision_client =
@@ -361,7 +405,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<()>>,
 {
-    let inbound = match read_vless_request(&mut stream).await {
+    let inbound = match read_vless_request_with_policy(&mut stream, auth_ctx.vless_policy()).await {
         Err(err) if useless_record_overflow_limit(&err).is_some() => {
             let _ = stream.send_useless_overflow_fatal_alert().await;
             return Err(stage_error(RealityAcceptedStage::Vless, err));
@@ -444,7 +488,8 @@ where
     Fut: Future<Output = std::io::Result<()>>,
 {
     let mut stream = stream;
-    let inbound = read_vless_request(&mut stream)
+    let policy = auth_ctx.map(|ctx| ctx.vless_policy()).unwrap_or_default();
+    let inbound = read_vless_request_with_policy(&mut stream, policy)
         .await
         .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
 
@@ -532,6 +577,7 @@ where
         request_flow.as_deref(),
         auth.flow.as_deref(),
         inbound.request.command,
+        &inbound.initial_payload,
     ) {
         warn!(
             request_flow = request_flow.as_deref().unwrap_or(""),
@@ -552,7 +598,7 @@ where
     let raw_initial_payload = inbound.initial_payload;
     let mut vision = None;
     let initial_payload = if vision_enabled {
-        let traffic = new_shared_traffic_state(user_uuid);
+        let traffic = new_shared_traffic_state_with_testseed(user_uuid, auth.testseed);
         let unpadded = {
             let mut state = traffic.lock().expect("vision traffic lock");
             state.unpad_uplink_chunk(&raw_initial_payload)?
@@ -1123,7 +1169,14 @@ where
                 socket_meta,
                 sniffing,
             );
-            return run_prepared_mux_relay(prepared, None, stats.as_ref(), None, route_env).await;
+            return run_prepared_mux_relay(
+                prepared,
+                VisionDirectCapability::blocked_by_vless_encryption(),
+                stats.as_ref(),
+                None,
+                route_env,
+            )
+            .await;
         }
         VlessRelayPrepared::Udp(prepared) => {
             return run_prepared_udp_relay(prepared, stats.as_ref()).await;
@@ -1146,8 +1199,14 @@ where
     } = prepared;
 
     let relay_started = Instant::now();
-    let relay_result =
-        relay_vless_tcp_bidirectional(stream, &mut outbound, vision, None, stats.as_ref()).await;
+    let relay_result = relay_vless_tcp_bidirectional(
+        stream,
+        &mut outbound,
+        vision,
+        VisionDirectCapability::blocked_by_vless_encryption(),
+        stats.as_ref(),
+    )
+    .await;
 
     finish_vless_tcp_relay(
         VlessTcpRelayFinished {
@@ -1186,7 +1245,14 @@ where
                 socket_meta,
                 users.sniffing_enabled(),
             );
-            return run_prepared_mux_relay(prepared, None, stats.as_ref(), None, route_env).await;
+            return run_prepared_mux_relay(
+                prepared,
+                VisionDirectCapability::blocked_by_vless_encryption(),
+                stats.as_ref(),
+                None,
+                route_env,
+            )
+            .await;
         }
         VlessRelayPrepared::Udp(prepared) => {
             return run_prepared_udp_relay(prepared, stats.as_ref()).await;
@@ -1209,8 +1275,14 @@ where
     } = prepared;
 
     let relay_started = Instant::now();
-    let relay_result =
-        relay_vless_tcp_bidirectional(stream, &mut outbound, vision, None, stats.as_ref()).await;
+    let relay_result = relay_vless_tcp_bidirectional(
+        stream,
+        &mut outbound,
+        vision,
+        VisionDirectCapability::blocked_by_vless_encryption(),
+        stats.as_ref(),
+    )
+    .await;
 
     finish_vless_tcp_relay(
         VlessTcpRelayFinished {
@@ -1288,7 +1360,14 @@ where
                 socket_meta,
                 users.sniffing_enabled(),
             );
-            return run_prepared_mux_relay(prepared, None, stats.as_ref(), None, route_env).await;
+            return run_prepared_mux_relay(
+                prepared,
+                VisionDirectCapability::blocked_by_vless_encryption(),
+                stats.as_ref(),
+                None,
+                route_env,
+            )
+            .await;
         }
         VlessRelayPrepared::Udp(prepared) => {
             return run_prepared_udp_relay(prepared, stats.as_ref()).await;
@@ -1310,8 +1389,14 @@ where
     } = prepared;
 
     let relay_started = Instant::now();
-    let relay_result =
-        relay_vless_tcp_bidirectional(stream, &mut outbound, vision, None, stats.as_ref()).await;
+    let relay_result = relay_vless_tcp_bidirectional(
+        stream,
+        &mut outbound,
+        vision,
+        VisionDirectCapability::blocked_by_vless_encryption(),
+        stats.as_ref(),
+    )
+    .await;
 
     finish_vless_tcp_relay(
         VlessTcpRelayFinished {
@@ -1339,13 +1424,14 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut stream = stream;
-    let inbound = match read_vless_request(&mut stream).await {
-        Err(err) if useless_record_overflow_limit(&err).is_some() => {
-            let _ = stream.send_useless_overflow_fatal_alert().await;
-            return Err(stage_error(RealityAcceptedStage::Vless, err));
-        }
-        other => other.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?,
-    };
+    let inbound =
+        match read_vless_request_with_policy(&mut stream, VlessInboundPolicy::default()).await {
+            Err(err) if useless_record_overflow_limit(&err).is_some() => {
+                let _ = stream.send_useless_overflow_fatal_alert().await;
+                return Err(stage_error(RealityAcceptedStage::Vless, err));
+            }
+            other => other.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?,
+        };
     prepare_vless_relay_from_inbound(
         stream,
         None,
@@ -1461,11 +1547,12 @@ where
         direct_relay,
     } = stream.split_for_relay()?;
     let relay_started = Instant::now();
+    let vision_direct = VisionDirectCapability::from_reality_tls_split(direct_relay);
     let relay_result = if let Some((traffic, user_uuid)) = vision {
         let vision_reader =
-            VisionRelayReader::new(reader, Arc::clone(&traffic), Some(direct_relay.clone()));
+            VisionRelayReader::new(reader, Arc::clone(&traffic), vision_direct.direct_relay());
         let vision_writer =
-            VisionRelayWriter::new(writer, traffic, user_uuid, Some(direct_relay.clone()));
+            VisionRelayWriter::new(writer, traffic, user_uuid, vision_direct.direct_relay());
         relay_split_bidirectional_with_overflow_alert(vision_reader, vision_writer, outbound).await
     } else {
         relay_tls13_split_bidirectional(reader, writer, outbound).await
@@ -1532,11 +1619,12 @@ where
         writer,
         direct_relay,
     } = prepared.stream.split_for_relay()?;
+    let vision_direct = VisionDirectCapability::from_reality_tls_split(direct_relay);
 
     let mux_result = if let Some((traffic, user_uuid)) = prepared.vision {
         let mut mux_stream = SplitMuxInbound::new(
-            VisionRelayReader::new(reader, Arc::clone(&traffic), Some(direct_relay.clone())),
-            VisionRelayWriter::new(writer, traffic, user_uuid, Some(direct_relay)),
+            VisionRelayReader::new(reader, Arc::clone(&traffic), vision_direct.direct_relay()),
+            VisionRelayWriter::new(writer, traffic, user_uuid, vision_direct.direct_relay()),
             prepared.initial_payload,
         );
         run_reality_split_mux_inbound(&mut mux_stream, mux_trace, route_env.clone()).await
@@ -1568,7 +1656,7 @@ where
 
 async fn run_prepared_mux_relay<S>(
     prepared: VlessMuxRelayPrepared<S>,
-    direct_relay: Option<ApplicationStreamDirectRelay>,
+    vision_direct: VisionDirectCapability,
     _stats: Option<&StatsConnection>,
     mux_trace: Option<MuxSessionTrace>,
     route_env: Option<MuxRouteEnv>,
@@ -1587,8 +1675,12 @@ where
 
     let mux_started = Instant::now();
     let result = if let Some((traffic, user_uuid)) = prepared.vision {
-        let vision_stream =
-            VisionRelayStream::new(prepared.stream, traffic, user_uuid, direct_relay);
+        let vision_stream = VisionRelayStream::new(
+            prepared.stream,
+            traffic,
+            user_uuid,
+            vision_direct.direct_relay(),
+        );
         let mut prefixed = PrefixedStream::new(vision_stream, prepared.initial_payload);
         handle_mux_cool_inbound_with_env(
             &mut prefixed,

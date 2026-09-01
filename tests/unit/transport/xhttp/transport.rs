@@ -111,6 +111,7 @@ async fn run_post_with_outbound_probe(
             email: None,
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let (mut client, server) = tokio::io::duplex(64 * 1024);
@@ -551,6 +552,7 @@ async fn run_accepted_post(settings: XHttpSettings, request_target: &str, host: 
             email: None,
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     let (mut client, server) = tokio::io::duplex(64 * 1024);

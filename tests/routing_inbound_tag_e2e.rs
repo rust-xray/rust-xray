@@ -19,6 +19,7 @@ use rust_xray::routing::RouteSocketMeta;
 use rust_xray::runtime::{encode_plain_vless_inbound_handler_config, VlessInboundAuthContext};
 use rust_xray::transport::{run_inbound_transport, AcceptedTransport, VlessHandler};
 use rust_xray::vless::config::VlessClient;
+use rust_xray::vless::encryption::VlessDecryption;
 use rust_xray::vless::user_manager::ManagedUser;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -45,6 +46,7 @@ fn plain_vless_inbound(
             email: Some(user.email.clone()),
             flow: user.flow.clone(),
             level: user.level,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
         transport: rust_xray::config::InboundTransportConfig::RawTcp,
         reality: rust_xray::config::RealityServerConfig {
@@ -57,7 +59,7 @@ fn plain_vless_inbound(
             max_client_ver: None,
             show: false,
             mldsa65_seed: None,
-            decryption: "none".to_string(),
+            decryption: VlessDecryption::None,
             dest_xver: 0,
             dest_transport: rust_xray::reality::RealityDestTransport::Tcp,
             limit_fallback_upload: Default::default(),
@@ -83,6 +85,7 @@ fn reality_inbound_config(
             email: Some(user.email.clone()),
             flow: user.flow.clone(),
             level: user.level,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
         transport: rust_xray::config::InboundTransportConfig::RawTcp,
         reality: rust_xray::config::RealityServerConfig {
@@ -95,7 +98,7 @@ fn reality_inbound_config(
             max_client_ver: None,
             show: false,
             mldsa65_seed: None,
-            decryption: "none".to_string(),
+            decryption: VlessDecryption::None,
             dest_xver: 0,
             dest_transport: rust_xray::reality::RealityDestTransport::Tcp,
             limit_fallback_upload: Default::default(),
@@ -164,8 +167,13 @@ async fn run_merged_reality_session(
     router: Arc<rust_xray::routing::RuntimeRouter>,
     vless_request: Vec<u8>,
 ) -> std::io::Result<()> {
-    let handler =
-        VlessHandler::new_with_auth_context(auth, None, RouteSocketMeta::default(), Some(router));
+    let handler = VlessHandler::new_with_auth_context(
+        auth,
+        None,
+        RouteSocketMeta::default(),
+        Some(router),
+        None,
+    );
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (mut client_encryptor, _) = tls_keys(0x10);
     let encrypted = client_encryptor

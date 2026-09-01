@@ -273,6 +273,7 @@ async fn spawn_vless_stack(runtime: Arc<HandlerRuntime>) -> std::net::SocketAddr
             email: Some("health-route@test".to_string()),
             flow: None,
             level: None,
+            testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         }],
     ));
     spawn_vless_listener("vless-in", users, Arc::clone(&runtime.router)).await

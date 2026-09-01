@@ -4,6 +4,7 @@ use crate::runtime::{
     encode_inbound_handler_config, encode_outbound_handler_config, OutboundProtocol,
     VLESS_INBOUND_CONFIG_TYPE,
 };
+use crate::vless::encryption::VlessDecryption;
 use crate::vless::user_manager::ManagedUser;
 
 #[test]
@@ -23,7 +24,7 @@ fn encode_vless_inbound_uses_canonical_typed_message_types() {
             max_client_ver: None,
             show: false,
             mldsa65_seed: None,
-            decryption: "none".to_string(),
+            decryption: VlessDecryption::None,
             dest_xver: 0,
             dest_transport: crate::reality::RealityDestTransport::Tcp,
             limit_fallback_upload: Default::default(),
@@ -57,6 +58,7 @@ fn managed_user_proto_preserves_email_and_flow() {
         email: "user@example.test".to_string(),
         flow: Some("xtls-rprx-vision".to_string()),
         level: Some(1),
+        testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
         expiry_secs: None,
     };
     let inbound = crate::config::VlessRealityInbound {
@@ -74,7 +76,7 @@ fn managed_user_proto_preserves_email_and_flow() {
             max_client_ver: None,
             show: false,
             mldsa65_seed: None,
-            decryption: "none".to_string(),
+            decryption: VlessDecryption::None,
             dest_xver: 0,
             dest_transport: crate::reality::RealityDestTransport::Tcp,
             limit_fallback_upload: Default::default(),

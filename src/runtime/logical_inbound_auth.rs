@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
 use crate::stats::StatsState;
+use crate::vless::policy::VlessInboundPolicy;
 use crate::vless::protocol::VlessRequest;
 use crate::vless::user_manager::{VlessAuthenticatedClient, VlessUserManager};
 
@@ -184,16 +185,19 @@ impl LogicalInboundAuthSet {
 pub struct VlessInboundAuthContext {
     auth_set: Arc<LogicalInboundAuthSet>,
     stats_by_tag: Arc<RwLock<HashMap<String, Arc<StatsState>>>>,
+    vless_policy: VlessInboundPolicy,
 }
 
 impl VlessInboundAuthContext {
     pub fn new(
         auth_set: Arc<LogicalInboundAuthSet>,
         stats_by_tag: Arc<RwLock<HashMap<String, Arc<StatsState>>>>,
+        vless_policy: VlessInboundPolicy,
     ) -> Self {
         Self {
             auth_set,
             stats_by_tag,
+            vless_policy,
         }
     }
 
@@ -201,12 +205,24 @@ impl VlessInboundAuthContext {
         manager: Arc<VlessUserManager>,
         stats: Option<Arc<StatsState>>,
     ) -> Self {
+        Self::from_single_manager_with_policy(manager, stats, VlessInboundPolicy::default())
+    }
+
+    pub fn from_single_manager_with_policy(
+        manager: Arc<VlessUserManager>,
+        stats: Option<Arc<StatsState>>,
+        vless_policy: VlessInboundPolicy,
+    ) -> Self {
         let auth_set = Arc::new(LogicalInboundAuthSet::from_single(Arc::clone(&manager)));
         let mut stats_by_tag = HashMap::new();
         if let Some(stats) = stats {
             stats_by_tag.insert(manager.inbound_tag().to_string(), stats);
         }
-        Self::new(auth_set, Arc::new(RwLock::new(stats_by_tag)))
+        Self::new(auth_set, Arc::new(RwLock::new(stats_by_tag)), vless_policy)
+    }
+
+    pub fn vless_policy(&self) -> VlessInboundPolicy {
+        self.vless_policy
     }
 
     pub fn auth_set(&self) -> &Arc<LogicalInboundAuthSet> {
@@ -248,6 +264,7 @@ mod tests {
                 email: Some(email.to_string()),
                 flow: None,
                 level: None,
+                testseed: crate::vless::UPSTREAM_DEFAULT_TESTSEED,
             }],
         ))
     }
