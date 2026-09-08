@@ -1,5 +1,6 @@
 //! Stage 8E5-B legacy v2ray.core gRPC service alias and reflection parity tests.
 
+#[allow(dead_code)]
 #[path = "routing_e2e_harness.rs"]
 mod harness;
 

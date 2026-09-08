@@ -1,5 +1,6 @@
 //! Stage 8E5-A Commander/API config and transport semantics tests.
 
+#[allow(dead_code)]
 #[path = "routing_e2e_harness.rs"]
 mod harness;
 

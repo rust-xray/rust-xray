@@ -94,7 +94,7 @@ async fn coalesced_handshake_preserves_future_traffic_prefix() {
 #[test]
 fn encrypted_inbound_with_fallbacks_rejected_at_config() {
     use crate::vless::{fallback::FallbackDest, FallbackConfig};
-    let fallbacks = vec![FallbackConfig {
+    let fallbacks = [FallbackConfig {
         name: Some("fb".to_string()),
         alpn: None,
         path: None,

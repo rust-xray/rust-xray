@@ -21,6 +21,8 @@ pub fn route_context_from_proto(message: &RoutingContext) -> RouteContext {
         vless_route: u16::try_from(message.vless_route).unwrap_or(0),
         skip_dns_resolve: false,
         process_name: String::new(),
+        match_domain_lower: None,
+        match_attributes_lower: None,
     }
 }
 

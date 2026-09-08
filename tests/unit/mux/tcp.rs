@@ -1,6 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use crate::env_lock::EnvVarGuard;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
@@ -20,12 +22,12 @@ use crate::mux::parser::read_mux_frame;
 use crate::mux::route_env::MuxRouteEnv;
 use crate::mux::session::handle_mux_cool_inbound;
 use crate::mux::session::handle_mux_cool_inbound_with_env;
+use crate::mux::tcp_substreams::{handle_mux_tcp_command, MuxTcpSubstreams};
 use crate::mux::xudp::{XudpManager, XudpManagerConfig};
 use crate::routing::{RouteSocketMeta, RuntimeRouter};
 use crate::runtime::RuntimeOutboundManager;
 use crate::vless::protocol::VlessDestination;
 use crate::vless::user_manager::VlessAuthenticatedClient;
-use std::sync::Arc;
 use uuid::Uuid;
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -35,26 +37,6 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .build()
         .expect("tokio runtime")
         .block_on(future)
-}
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env test lock")
-}
-
-fn set_mux_udp_close_after_response_for_test(value: &str) -> Option<String> {
-    let previous = std::env::var(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE).ok();
-    std::env::set_var(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE, value);
-    previous
-}
-
-fn restore_mux_udp_close_after_response_for_test(previous: Option<String>) {
-    match previous {
-        Some(value) => std::env::set_var(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE, value),
-        None => std::env::remove_var(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE),
-    }
 }
 
 async fn assert_no_mux_frame_within<R>(reader: &mut R, duration: Duration)
@@ -109,8 +91,7 @@ fn generic_udp_domain_opens_persistent_session() {
 #[test]
 fn generic_udp_relay_returns_mux_response_for_arbitrary_destination() {
     block_on(async {
-        let _guard = env_lock();
-        let previous_close = set_mux_udp_close_after_response_for_test("0");
+        let _close_guard = EnvVarGuard::set(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE, "0").await;
         let udp = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("bind generic udp");
@@ -154,7 +135,6 @@ fn generic_udp_relay_returns_mux_response_for_arbitrary_destination() {
 
         drop(client_io);
         handle.await.expect("join mux handler").unwrap();
-        restore_mux_udp_close_after_response_for_test(previous_close);
     });
 }
 
@@ -408,6 +388,62 @@ fn mux_tcp_parallel_substreams_relay_independently() {
             .expect("end b");
         drop(client_io);
         handle.await.expect("join").unwrap();
+    });
+}
+
+#[test]
+fn mux_tcp_replacement_rejects_stale_downlink_generation() {
+    block_on(async {
+        let first = bind_tcp_echo().await;
+        let second = bind_tcp_echo().await;
+        let first_destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), first.port);
+        let second_destination = VlessDestination::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST), second.port);
+        let (downlink_tx, _downlink_rx) = MuxTcpSubstreams::downlink_channel();
+        let mut active = MuxTcpSubstreams::new(downlink_tx);
+
+        handle_mux_tcp_command(
+            &mut active,
+            MuxFrame {
+                mux_id: 77,
+                status: MuxStatus::New,
+                option: MuxOption { has_data: false },
+                command: MuxCommand::Tcp {
+                    destination: MuxDestination {
+                        network: MuxNetwork::Tcp,
+                        destination: first_destination,
+                    },
+                    initial_payload: Bytes::new(),
+                },
+            },
+            None,
+        )
+        .await
+        .expect("open first child");
+        assert!(active.is_current(77, 1));
+
+        handle_mux_tcp_command(
+            &mut active,
+            MuxFrame {
+                mux_id: 77,
+                status: MuxStatus::New,
+                option: MuxOption { has_data: false },
+                command: MuxCommand::Tcp {
+                    destination: MuxDestination {
+                        network: MuxNetwork::Tcp,
+                        destination: second_destination,
+                    },
+                    initial_payload: Bytes::new(),
+                },
+            },
+            None,
+        )
+        .await
+        .expect("replace child");
+
+        assert!(!active.is_current(77, 1));
+        assert!(!active.remove_if_current(77, 1));
+        assert!(active.is_current(77, 2));
+        active.remove(77);
     });
 }
 

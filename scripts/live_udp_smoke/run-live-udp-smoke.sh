@@ -8,8 +8,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${REPO_ROOT}/scripts/live_reality_smoke/smoke-lib.sh"
 
 TEST_PUBLIC_KEY="${TEST_PUBLIC_KEY:-oU1MbEgszawWQJa0S_DxLsNt9G2zyE4rF-CrqvJjTmg}"
-SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT:-24443}"
-SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT:-10808}"
+SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT:-}"
+SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT:-}"
 SMOKE_RUST_LOG="${SMOKE_RUST_LOG:-rust_xray=debug,tower=warn,hyper=warn,h2=warn,rustls=warn}"
 SMOKE_WORK_DIR="${SMOKE_WORK_DIR:-/tmp/rust-xray-live-udp-smoke-$$}"
 SMOKE_REPORT_PATH="${SMOKE_REPORT_PATH:-${SMOKE_WORK_DIR}/udp-report.txt}"
@@ -80,6 +80,8 @@ write_client_config() {
     SMOKE_MLDSA65_VERIFY="" \
     SMOKE_MUX_ENABLED="${mux_enabled}" \
     SMOKE_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
+    SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT}" \
+    SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT}" \
     python3 - <<'PY'
 import json, os
 from pathlib import Path
@@ -97,6 +99,8 @@ if os.environ.get("SMOKE_MUX_ENABLED") == "1":
 elif "mux" in cfg["outbounds"][0]:
     del cfg["outbounds"][0]["mux"]
 cfg["outbounds"][0]["streamSettings"]["realitySettings"]["publicKey"] = os.environ["SMOKE_PUBLIC_KEY"]
+cfg["inbounds"][0]["port"] = int(os.environ["SMOKE_SOCKS_PORT"])
+cfg["outbounds"][0]["settings"]["vnext"][0]["port"] = int(os.environ["SMOKE_SERVER_PORT"])
 Path(os.environ["SMOKE_OUTPUT"]).write_text(json.dumps(cfg, indent=2) + "\n")
 PY
 }
@@ -164,6 +168,7 @@ prepare_workspace() {
   mkdir -p "${SMOKE_WORK_DIR}"
   : >"${SMOKE_SERVER_LOG}"
   : >"${SMOKE_CLIENT_LOG}"
+  smoke_init_standard_ports "live-udp-smoke"
 }
 
 build_rust_xray() {

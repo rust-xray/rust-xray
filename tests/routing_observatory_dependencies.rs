@@ -1,5 +1,6 @@
 //! Stage 8E4-C1: Observatory feature dependency parity for health-aware balancers.
 
+#[allow(dead_code)]
 #[path = "routing_e2e_harness.rs"]
 mod harness;
 
@@ -69,7 +70,7 @@ fn base_xray(balancers: Vec<serde_json::Value>) -> XrayConfig {
     }
 }
 
-fn try_handler_runtime(mut xray: XrayConfig) -> Result<HandlerRuntime, RouteError> {
+fn try_handler_runtime(xray: XrayConfig) -> Result<HandlerRuntime, RouteError> {
     OutboundConnectRuntime::init_shared(&xray);
     let registry = Arc::new(StatsRegistry::new());
     let outbound = rust_xray::runtime::RuntimeOutboundManager::new();

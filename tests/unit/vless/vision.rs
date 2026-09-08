@@ -1,6 +1,9 @@
 use super::*;
 
-const USER_UUID: [u8; 16] = [0x11; 16];
+#[path = "vision_forced_partial.rs"]
+mod forced_partial;
+
+pub(crate) const USER_UUID: [u8; 16] = [0x11; 16];
 
 #[test]
 fn vision_padding_roundtrip_single_block() {
@@ -255,7 +258,7 @@ impl AsyncWrite for PartialWriteMock {
     }
 }
 
-fn noop_waker() -> std::task::Waker {
+pub(crate) fn noop_waker() -> std::task::Waker {
     use std::task::{RawWaker, RawWakerVTable, Waker};
     static VTABLE: RawWakerVTable = RawWakerVTable::new(
         |_| RawWaker::new(std::ptr::null(), &VTABLE),
@@ -311,6 +314,57 @@ fn vision_relay_write_survives_partial_write_backpressure() {
         relay.inner.data, expected_frame,
         "partial writes must deliver the full padded Vision frame"
     );
+}
+
+#[test]
+fn vision_relay_flush_and_shutdown_drain_pending_frame() {
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let payload = b"pending-frame-must-precede-flush-and-shutdown";
+
+    for shutdown in [false, true] {
+        let traffic = new_shared_traffic_state(USER_UUID);
+        let mut stream = VisionRelayStream::new(
+            PartialWriteMock::new(1),
+            Arc::clone(&traffic),
+            USER_UUID,
+            None,
+        );
+        assert!(matches!(
+            Pin::new(&mut stream).poll_write(&mut cx, payload),
+            Poll::Pending
+        ));
+        for _ in 0..payload.len() + 32 {
+            let result = if shutdown {
+                Pin::new(&mut stream).poll_shutdown(&mut cx)
+            } else {
+                Pin::new(&mut stream).poll_flush(&mut cx)
+            };
+            if matches!(result, Poll::Ready(Ok(()))) {
+                break;
+            }
+        }
+        assert!(stream.pending_write.is_empty());
+        assert!(!stream.inner.data.is_empty());
+
+        let mut writer = VisionRelayWriter::new(PartialWriteMock::new(1), traffic, USER_UUID, None);
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, payload),
+            Poll::Pending
+        ));
+        for _ in 0..payload.len() + 32 {
+            let result = if shutdown {
+                Pin::new(&mut writer).poll_shutdown(&mut cx)
+            } else {
+                Pin::new(&mut writer).poll_flush(&mut cx)
+            };
+            if matches!(result, Poll::Ready(Ok(()))) {
+                break;
+            }
+        }
+        assert!(writer.pending_write.is_empty());
+        assert!(!writer.inner.data.is_empty());
+    }
 }
 
 #[tokio::test]

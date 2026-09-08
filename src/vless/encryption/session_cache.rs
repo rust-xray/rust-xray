@@ -146,7 +146,8 @@ impl SessionCache {
         let now_unix = self.time.unix_secs();
         Self::prune_expired_locked(&mut guard, now_instant);
         Self::maybe_prune_minute_buckets_locked(&mut guard, now_unix);
-        if guard.sessions.len() >= MAX_STORED_SESSIONS {
+        if guard.sessions.len() >= MAX_STORED_SESSIONS || guard.tickets.len() >= MAX_STORED_SESSIONS
+        {
             Self::clear_locked(&mut guard);
         }
         let max_lifetime = self
@@ -202,6 +203,14 @@ impl SessionCache {
         self.inner
             .lock()
             .map(|guard| guard.sessions.len())
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ticket_index_len(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|guard| guard.tickets.len())
             .unwrap_or(0)
     }
 

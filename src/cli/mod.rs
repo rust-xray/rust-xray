@@ -236,8 +236,8 @@ fn parse_stats_api_options(args: &[String]) -> Result<StatsApiOptions, CliError>
 }
 
 fn matches_flag(arg: &str, long: &str) -> bool {
-    arg == &format!("-{long}")
-        || arg == &format!("--{long}")
+    arg == format!("-{long}")
+        || arg == format!("--{long}")
         || arg.starts_with(&format!("-{long}="))
         || arg.starts_with(&format!("--{long}="))
 }

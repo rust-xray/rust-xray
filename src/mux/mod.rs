@@ -29,3 +29,7 @@ pub use xudp::{XudpManager, XudpManagerConfig, XudpMuxSessions};
 
 /// Primary VLESS entry point for Mux.Cool sessions.
 pub use session::handle_mux_cool_inbound as handle_vless_mux;
+
+#[cfg(test)]
+#[path = "../../tests/unit/mux/perf_audit.rs"]
+mod perf_audit;

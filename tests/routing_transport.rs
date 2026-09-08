@@ -1,5 +1,6 @@
 //! Transport routing E2E + TestRoute parity across REALITY/XHTTP/Vision/Mux.
 
+#[allow(dead_code)]
 #[path = "routing_e2e_harness.rs"]
 mod harness;
 

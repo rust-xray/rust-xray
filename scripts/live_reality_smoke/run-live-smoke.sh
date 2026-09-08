@@ -9,8 +9,8 @@ source "${SCRIPT_DIR}/smoke-lib.sh"
 
 TEST_PUBLIC_KEY="${TEST_PUBLIC_KEY:-oU1MbEgszawWQJa0S_DxLsNt9G2zyE4rF-CrqvJjTmg}"
 TEST_MLDSA65_VERIFY="${TEST_MLDSA65_VERIFY:-$(tr -d '\n' <"${SCRIPT_DIR}/mldsa65-verify.fixture.txt")}"
-SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT:-24443}"
-SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT:-10808}"
+SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT:-}"
+SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT:-}"
 SMOKE_RUST_LOG="${SMOKE_RUST_LOG:-info}"
 SMOKE_WORK_DIR="${SMOKE_WORK_DIR:-/tmp/rust-xray-live-smoke-$$}"
 SMOKE_REPORT_PATH="${SMOKE_REPORT_PATH:-${SMOKE_WORK_DIR}/report.txt}"
@@ -27,6 +27,7 @@ SMOKE_RUST_XRAY_BIN="${SMOKE_RUST_XRAY_BIN:-${RUST_XRAY_BIN:-${REPO_ROOT}/target
 SMOKE_XRAY_BIN="${SMOKE_XRAY_BIN:-${XRAY_BIN:-xray}}"
 SMOKE_LOCAL_DNS_PORT="${SMOKE_LOCAL_DNS_PORT:-37053}"
 SMOKE_LOCAL_DNS_PID=""
+SMOKE_REALITY_TARGET_PID=""
 
 SMOKE_SERVER_PID=""
 SMOKE_CLIENT_PID=""
@@ -126,6 +127,7 @@ run_phase() {
 
 cleanup() {
   smoke_stop_stack
+  smoke_stop_process "${SMOKE_REALITY_TARGET_PID:-}"
   smoke_stop_process "${SMOKE_FALLBACK_TCP_PID:-}"
   smoke_stop_process "${SMOKE_CIPHER_TLS_PID:-}"
   smoke_stop_process "${SMOKE_LOCAL_DNS_PID:-}"
@@ -139,6 +141,8 @@ prepare_workspace() {
   mkdir -p "${SMOKE_WORK_DIR}"
   : >"${SMOKE_SERVER_LOG}"
   : >"${SMOKE_CLIENT_LOG}"
+  smoke_init_standard_ports "live-reality-smoke"
+  smoke_start_reality_target
 }
 
 build_rust_xray() {
@@ -439,6 +443,7 @@ phase_regression_bad_sni_fallback() {
 phase_regression_openssl_fallback() {
   local client openssl_args=()
   client="$(client_config openssl "" )"
+  smoke_start_reality_target full
   smoke_start_stack "${SERVER_EMPTY}" "${client}"
   openssl_args=(-connect "127.0.0.1:${SMOKE_SERVER_PORT}" -servername www.microsoft.com)
   if openssl s_client -help 2>&1 | grep -q -- '-brief'; then
@@ -448,6 +453,7 @@ phase_regression_openssl_fallback() {
   echo | smoke_portable_timeout 20 openssl s_client "${openssl_args[@]}" >/dev/null 2>&1
   local openssl_exit=$?
   set -e
+  smoke_start_reality_target
   SMOKE_CURL_NAMES+=("regression-openssl-fallback")
   SMOKE_CURL_EXIT_CODES+=("${openssl_exit}")
   SMOKE_CURL_HTTP_CODES+=("n/a")
@@ -886,6 +892,7 @@ phase_cipher_suite() {
   local dest_port="$5"
   local client
   local tls_log_before server_cipher dest_cipher expected_cipher curl_ok=false
+  local canonical_reality_dest="${SMOKE_REALITY_DEST}"
   local http_code="000"
   local validation_reason="unknown"
 
@@ -897,6 +904,8 @@ phase_cipher_suite() {
 
   client="$(client_config "cipher-${name}" "")"
   tls_log_before="$(smoke_log_line_count "${SMOKE_CIPHER_TLS_LOG}")"
+  SMOKE_REALITY_DEST="127.0.0.1:${dest_port}"
+  export SMOKE_REALITY_DEST
   cipher_prepare_phase "${server_config}" "${client}"
 
   expected_cipher="${suite_name} (${suite_id})"
@@ -916,6 +925,8 @@ phase_cipher_suite() {
 
   server_cipher="$(smoke_extract_server_negotiated_cipher "${SMOKE_SERVER_LOG}")"
   dest_cipher="$(smoke_extract_dest_negotiated_cipher "${SMOKE_CIPHER_TLS_LOG}" "${tls_log_before}" "${dest_port}")"
+  SMOKE_REALITY_DEST="${canonical_reality_dest}"
+  export SMOKE_REALITY_DEST
 
   if [[ "${curl_ok}" != true ]]; then
     validation_reason="curl_not_http_2xx"
@@ -1033,6 +1044,27 @@ smoke_validate_final_report() {
     smoke_assert_report_contains "forbidden_udp_mux_packet_not_implemented: 0"
 }
 
+run_smoke_case() {
+  case "${SMOKE_CASE}" in
+    flow-empty)
+      run_phase "regression flow=\"\" (default minClientVer)" phase_regression_empty_flow
+      ;;
+    openssl-fallback)
+      run_phase "regression openssl fallback" phase_regression_openssl_fallback
+      ;;
+    vision-sequential-100)
+      run_phase "vision 100 sequential requests" phase_vision_sequential_100
+      ;;
+    vision-parallel-50)
+      run_phase "vision 50 parallel requests" phase_vision_parallel_50
+      ;;
+    *)
+      echo "error: unknown SMOKE_CASE=${SMOKE_CASE}" >&2
+      return 2
+      ;;
+  esac
+}
+
 main() {
   if [[ "${SMOKE_SKIP_LIVE}" == "1" ]]; then
     echo "Skipping live smoke (SMOKE_SKIP_LIVE=1)"
@@ -1049,6 +1081,18 @@ main() {
   smoke_print_binary_identity
 
   echo "Live smoke workspace: ${SMOKE_WORK_DIR}"
+
+  if [[ -n "${SMOKE_CASE:-}" ]]; then
+    run_smoke_case
+    echo
+    smoke_write_report "${SMOKE_WORK_DIR}/report-${SMOKE_CASE}.txt"
+    if [[ "${SMOKE_PHASE_FAIL}" -ne 0 || "${SMOKE_CURL_FAILED}" -ne 0 ]]; then
+      echo "live smoke case ${SMOKE_CASE} failed; workspace=${SMOKE_WORK_DIR}" >&2
+      exit 1
+    fi
+    echo "live smoke case ${SMOKE_CASE} passed"
+    return 0
+  fi
 
   run_phase "regression flow=\"\" (default minClientVer)" phase_regression_empty_flow
   run_phase "regression custom string VLESS id" phase_regression_custom_string_id

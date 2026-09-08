@@ -186,7 +186,7 @@ pub fn validate_fallback_configs(fallbacks: &[FallbackConfig]) -> std::io::Resul
 
 pub fn validate_fallback_xver(xver: u8) -> std::io::Result<()> {
     match xver {
-        0 | 1 | 2 => Ok(()),
+        0..=2 => Ok(()),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unsupported fallback xver: {other}"),

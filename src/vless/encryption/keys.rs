@@ -115,6 +115,7 @@ pub(crate) fn nfs_outbound_key_from_bytes(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum OutboundNfsKey {
     X25519Public([u8; 32]),
     MlKem768Encapsulation([u8; 1184]),

@@ -16,10 +16,11 @@ const DEFAULT_MUX_DNS_TOTAL_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_DNS_MAX_RETRIES: usize = 1;
 const DEFAULT_MUX_DNS_MAX_RETRIES: usize = 0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MuxDnsUpstreamMode {
     DestinationOnly,
     DestinationThenConfigFallback,
+    #[default]
     RaceDestinationAndConfig,
 }
 
@@ -30,12 +31,6 @@ impl MuxDnsUpstreamMode {
             Self::DestinationThenConfigFallback => "fallback",
             Self::RaceDestinationAndConfig => "race",
         }
-    }
-}
-
-impl Default for MuxDnsUpstreamMode {
-    fn default() -> Self {
-        Self::RaceDestinationAndConfig
     }
 }
 

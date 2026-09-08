@@ -124,7 +124,9 @@ async fn domain_rule_pick_route_matches_test_route_semantics() {
 }
 
 mod e2e {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    #![allow(dead_code)]
+
+    use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use std::time::Duration;
 

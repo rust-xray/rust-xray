@@ -1,7 +1,9 @@
 use super::*;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
+
+use crate::env_lock::EnvVarGuard;
 
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWriteExt};
@@ -22,26 +24,6 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .build()
         .expect("tokio runtime")
         .block_on(future)
-}
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env test lock")
-}
-
-fn set_mux_udp_close_after_response_for_test(value: &str) -> Option<String> {
-    let previous = std::env::var(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE).ok();
-    std::env::set_var(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE, value);
-    previous
-}
-
-fn restore_mux_udp_close_after_response_for_test(previous: Option<String>) {
-    match previous {
-        Some(value) => std::env::set_var(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE, value),
-        None => std::env::remove_var(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE),
-    }
 }
 
 async fn assert_no_mux_frame_within<R>(reader: &mut R, duration: Duration)
@@ -80,8 +62,7 @@ fn mux_dns_legacy_direct_disabled_by_default() {
 #[test]
 fn udp_dns_relay_with_fake_udp_server_returns_mux_response() {
     block_on(async {
-        let _guard = env_lock();
-        let previous_close = set_mux_udp_close_after_response_for_test("0");
+        let _close_guard = EnvVarGuard::set(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE, "0").await;
         let udp = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("bind fake udp dns");
@@ -138,15 +119,13 @@ fn udp_dns_relay_with_fake_udp_server_returns_mux_response() {
 
         drop(client_io);
         handle.await.expect("join mux handler").unwrap();
-        restore_mux_udp_close_after_response_for_test(previous_close);
     });
 }
 
 #[test]
 fn udp_dns_success_close_frame_enabled_by_env() {
     block_on(async {
-        let _guard = env_lock();
-        let previous_close = set_mux_udp_close_after_response_for_test("1");
+        let _close_guard = EnvVarGuard::set(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE, "1").await;
         let udp = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("bind fake udp dns");
@@ -197,7 +176,6 @@ fn udp_dns_success_close_frame_enabled_by_env() {
 
         drop(client_io);
         handle.await.expect("join mux handler").unwrap();
-        restore_mux_udp_close_after_response_for_test(previous_close);
     });
 }
 
@@ -207,8 +185,7 @@ fn udp_dns_multiple_packets_same_mux_id_zero_without_close() {
         use crate::dns::config::{DnsConfig, QueryStrategy};
         use crate::dns::MuxDnsUpstreamMode;
 
-        let _guard = env_lock();
-        let previous_close = set_mux_udp_close_after_response_for_test("0");
+        let _close_guard = EnvVarGuard::set(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE, "0").await;
         let udp = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("bind fake udp dns");
@@ -302,7 +279,6 @@ fn udp_dns_multiple_packets_same_mux_id_zero_without_close() {
 
         drop(client_io);
         handle.await.expect("join mux handler").unwrap();
-        restore_mux_udp_close_after_response_for_test(previous_close);
     });
 }
 
@@ -383,8 +359,7 @@ fn mux_udp_dns_repeat_query_hits_engine_cache() {
         use crate::dns::config::{DnsConfig, QueryStrategy};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let _guard = env_lock();
-        let previous_close = set_mux_udp_close_after_response_for_test("0");
+        let _close_guard = EnvVarGuard::set(ENV_MUX_UDP_SEND_CLOSE_AFTER_RESPONSE, "0").await;
         let upstream_count = Arc::new(AtomicUsize::new(0));
         let upstream_task = Arc::clone(&upstream_count);
         let udp = UdpSocket::bind("127.0.0.1:0")
@@ -463,6 +438,5 @@ fn mux_udp_dns_repeat_query_hits_engine_cache() {
         }
 
         assert_eq!(upstream_count.load(Ordering::SeqCst), 1);
-        restore_mux_udp_close_after_response_for_test(previous_close);
     });
 }

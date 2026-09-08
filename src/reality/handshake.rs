@@ -84,7 +84,7 @@ pub fn extract_observed_server_hello(
         .find(|record| record.content_type == TlsRecordContentType::Handshake)
         .ok_or_else(|| invalid_data("destination handshake has no TLS Handshake record"))?;
 
-    let raw_handshake_message = handshake_record.payload.clone();
+    let raw_handshake_message = handshake_record.payload().to_vec();
     let server_hello = parse_tls_server_hello_handshake(&raw_handshake_message)?;
     let selected_key_share_group = validate_observed_server_hello(&server_hello)?;
 
@@ -174,7 +174,7 @@ fn validate_observed_key_share_group(
 pub(crate) fn contains_tls13_server_hello(records: &[TlsRecord]) -> bool {
     records.iter().any(|record| {
         record.content_type == TlsRecordContentType::Handshake
-            && record.payload.first() == Some(&0x02)
+            && record.payload().first() == Some(&0x02)
     })
 }
 

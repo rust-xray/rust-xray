@@ -40,7 +40,7 @@ impl XorMode {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "native" => Some(Self::Native),
             "xorpub" => Some(Self::XorPub),
@@ -205,7 +205,7 @@ fn parse_mlkem_inbound(raw: &str) -> Result<Mlkem768X25519PlusConfig, Decryption
         return Err(DecryptionParseError::MalformedScheme);
     }
 
-    let xor_mode = XorMode::from_str(parts[1]).ok_or(DecryptionParseError::InvalidMode)?;
+    let xor_mode = XorMode::parse(parts[1]).ok_or(DecryptionParseError::InvalidMode)?;
     let ticket_lifetime = parse_ticket_lifetime(parts[2])?;
     let (padding, key_tokens) = split_padding_and_keys(raw, parts[2], InboundKeyPolicy)?;
     let nfs_keys = parse_inbound_keys(key_tokens)?;
@@ -226,7 +226,7 @@ fn parse_mlkem_outbound(
         return Err(DecryptionParseError::MalformedScheme);
     }
 
-    let xor_mode = XorMode::from_str(parts[1]).ok_or(DecryptionParseError::InvalidMode)?;
+    let xor_mode = XorMode::parse(parts[1]).ok_or(DecryptionParseError::InvalidMode)?;
     let handshake_mode = match parts[2] {
         "0rtt" => ClientHandshakeMode::ZeroRtt,
         "1rtt" => ClientHandshakeMode::OneRtt,

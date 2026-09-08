@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::{Error, ErrorKind};
 
 use aes_gcm::{
@@ -19,6 +20,161 @@ pub(crate) const TLS_ALERT_LEVEL_FATAL: u8 = 2;
 pub(crate) const TLS_ALERT_UNEXPECTED_MESSAGE: u8 = 10;
 
 const TLS13_IV_LEN: usize = 12;
+
+// AEAD cipher state stays inline so record encrypt/decrypt avoids a heap
+// indirection on every operation; boxing would add allocation per traffic key.
+#[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
+enum Tls13AeadCipher {
+    Aes128Gcm(Aes128Gcm),
+    Aes256Gcm(Aes256Gcm),
+    ChaCha20Poly1305(ChaCha20Poly1305),
+}
+
+impl fmt::Debug for Tls13AeadCipher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Aes128Gcm(_) => f.write_str("Aes128Gcm"),
+            Self::Aes256Gcm(_) => f.write_str("Aes256Gcm"),
+            Self::ChaCha20Poly1305(_) => f.write_str("ChaCha20Poly1305"),
+        }
+    }
+}
+
+impl Tls13AeadCipher {
+    fn from_suite_and_key(suite: Tls13CipherSuite, key: &[u8]) -> std::io::Result<Self> {
+        match suite.aead {
+            Tls13AeadAlgorithm::Aes128Gcm => Aes128Gcm::new_from_slice(key)
+                .map(Self::Aes128Gcm)
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        format!("TLS 1.3 AES-128-GCM key invalid: {e}"),
+                    )
+                }),
+            Tls13AeadAlgorithm::Aes256Gcm => Aes256Gcm::new_from_slice(key)
+                .map(Self::Aes256Gcm)
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        format!("TLS 1.3 AES-256-GCM key invalid: {e}"),
+                    )
+                }),
+            Tls13AeadAlgorithm::ChaCha20Poly1305 => ChaCha20Poly1305::new_from_slice(key)
+                .map(Self::ChaCha20Poly1305)
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        format!("TLS 1.3 ChaCha20-Poly1305 key invalid: {e}"),
+                    )
+                }),
+        }
+    }
+
+    fn encrypt(
+        &self,
+        nonce: &[u8; TLS13_IV_LEN],
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::Aes128Gcm(cipher) => cipher
+                .encrypt(
+                    AesNonce::from_slice(nonce),
+                    Payload {
+                        msg: plaintext,
+                        aad,
+                    },
+                )
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidData,
+                        format!("TLS 1.3 AES-128-GCM encrypt failed: {e}"),
+                    )
+                }),
+            Self::Aes256Gcm(cipher) => cipher
+                .encrypt(
+                    AesNonce::from_slice(nonce),
+                    Payload {
+                        msg: plaintext,
+                        aad,
+                    },
+                )
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidData,
+                        format!("TLS 1.3 AES-256-GCM encrypt failed: {e}"),
+                    )
+                }),
+            Self::ChaCha20Poly1305(cipher) => cipher
+                .encrypt(
+                    ChaChaNonce::from_slice(nonce),
+                    Payload {
+                        msg: plaintext,
+                        aad,
+                    },
+                )
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidData,
+                        format!("TLS 1.3 ChaCha20-Poly1305 encrypt failed: {e}"),
+                    )
+                }),
+        }
+    }
+
+    fn decrypt(
+        &self,
+        nonce: &[u8; TLS13_IV_LEN],
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::Aes128Gcm(cipher) => cipher
+                .decrypt(
+                    AesNonce::from_slice(nonce),
+                    Payload {
+                        msg: ciphertext,
+                        aad,
+                    },
+                )
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidData,
+                        format!("TLS 1.3 AES-128-GCM decrypt failed: {e}"),
+                    )
+                }),
+            Self::Aes256Gcm(cipher) => cipher
+                .decrypt(
+                    AesNonce::from_slice(nonce),
+                    Payload {
+                        msg: ciphertext,
+                        aad,
+                    },
+                )
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidData,
+                        format!("TLS 1.3 AES-256-GCM decrypt failed: {e}"),
+                    )
+                }),
+            Self::ChaCha20Poly1305(cipher) => cipher
+                .decrypt(
+                    ChaChaNonce::from_slice(nonce),
+                    Payload {
+                        msg: ciphertext,
+                        aad,
+                    },
+                )
+                .map_err(|e| {
+                    Error::new(
+                        ErrorKind::InvalidData,
+                        format!("TLS 1.3 ChaCha20-Poly1305 decrypt failed: {e}"),
+                    )
+                }),
+        }
+    }
+}
 
 /// Minimum on-wire TLS ApplicationData record length for an encrypted handshake message.
 pub fn minimum_tls13_encrypted_handshake_record_wire_len(
@@ -181,12 +337,12 @@ fn padding_zeros_for_desired_application_record_wire_len(
 }
 
 /// TLS 1.3 AEAD record encryptor for post-ServerHello handshake messages.
-#[derive(Debug)]
 pub struct Tls13RecordEncryptor {
     pub suite: Tls13CipherSuite,
     pub keys: Tls13TrafficKeys,
     pub sequence: u64,
     traffic_secret: Option<Vec<u8>>,
+    aead: Tls13AeadCipher,
 }
 
 /// TLS 1.3 AEAD record decryptor for application data records.
@@ -196,6 +352,7 @@ pub struct Tls13RecordDecryptor {
     pub keys: Tls13TrafficKeys,
     pub sequence: u64,
     traffic_secret: Option<Vec<u8>>,
+    aead: Tls13AeadCipher,
 }
 
 /// TLS 1.3 per-record nonce: `static_iv XOR padded_sequence_number`.
@@ -364,6 +521,7 @@ pub(crate) fn parse_tls13_application_inner_plaintext(inner: &[u8]) -> std::io::
     )
 }
 
+#[cfg(test)]
 fn encrypt_aes128_gcm(
     key: &[u8],
     nonce: &[u8; TLS13_IV_LEN],
@@ -392,90 +550,7 @@ fn encrypt_aes128_gcm(
         })
 }
 
-fn encrypt_aes256_gcm(
-    key: &[u8],
-    nonce: &[u8; TLS13_IV_LEN],
-    plaintext: &[u8],
-    aad: &[u8],
-) -> std::io::Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| {
-        Error::new(
-            ErrorKind::InvalidInput,
-            format!("TLS 1.3 AES-256-GCM key invalid: {e}"),
-        )
-    })?;
-    cipher
-        .encrypt(
-            AesNonce::from_slice(nonce),
-            Payload {
-                msg: plaintext,
-                aad,
-            },
-        )
-        .map_err(|e| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("TLS 1.3 AES-256-GCM encrypt failed: {e}"),
-            )
-        })
-}
-
-fn decrypt_aes128_gcm(
-    key: &[u8],
-    nonce: &[u8; TLS13_IV_LEN],
-    ciphertext: &[u8],
-    aad: &[u8],
-) -> std::io::Result<Vec<u8>> {
-    let cipher = Aes128Gcm::new_from_slice(key).map_err(|e| {
-        Error::new(
-            ErrorKind::InvalidInput,
-            format!("TLS 1.3 AES-128-GCM key invalid: {e}"),
-        )
-    })?;
-    cipher
-        .decrypt(
-            AesNonce::from_slice(nonce),
-            Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
-        .map_err(|e| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("TLS 1.3 AES-128-GCM decrypt failed: {e}"),
-            )
-        })
-}
-
-fn decrypt_aes256_gcm(
-    key: &[u8],
-    nonce: &[u8; TLS13_IV_LEN],
-    ciphertext: &[u8],
-    aad: &[u8],
-) -> std::io::Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| {
-        Error::new(
-            ErrorKind::InvalidInput,
-            format!("TLS 1.3 AES-256-GCM key invalid: {e}"),
-        )
-    })?;
-    cipher
-        .decrypt(
-            AesNonce::from_slice(nonce),
-            Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
-        .map_err(|e| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("TLS 1.3 AES-256-GCM decrypt failed: {e}"),
-            )
-        })
-}
-
+#[cfg(test)]
 fn encrypt_chacha20_poly1305(
     key: &[u8],
     nonce: &[u8; TLS13_IV_LEN],
@@ -504,6 +579,7 @@ fn encrypt_chacha20_poly1305(
         })
 }
 
+#[cfg(test)]
 fn decrypt_chacha20_poly1305(
     key: &[u8],
     nonce: &[u8; TLS13_IV_LEN],
@@ -532,15 +608,32 @@ fn decrypt_chacha20_poly1305(
         })
 }
 
+impl fmt::Debug for Tls13RecordEncryptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tls13RecordEncryptor")
+            .field("suite", &self.suite)
+            .field("keys", &self.keys)
+            .field("sequence", &self.sequence)
+            .field(
+                "traffic_secret",
+                &self.traffic_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("aead", &self.aead)
+            .finish()
+    }
+}
+
 impl Tls13RecordEncryptor {
     pub fn new(suite: Tls13CipherSuite, keys: Tls13TrafficKeys) -> std::io::Result<Self> {
         validate_traffic_keys(suite, &keys)?;
+        let aead = Tls13AeadCipher::from_suite_and_key(suite, &keys.key)?;
 
         Ok(Self {
             suite,
             keys,
             sequence: 0,
             traffic_secret: None,
+            aead,
         })
     }
 
@@ -550,12 +643,14 @@ impl Tls13RecordEncryptor {
         traffic_secret: Vec<u8>,
     ) -> std::io::Result<Self> {
         validate_traffic_keys(suite, &keys)?;
+        let aead = Tls13AeadCipher::from_suite_and_key(suite, &keys.key)?;
 
         Ok(Self {
             suite,
             keys,
             sequence: 0,
             traffic_secret: Some(traffic_secret),
+            aead,
         })
     }
 
@@ -579,6 +674,7 @@ impl Tls13RecordEncryptor {
                 format!("TLS 1.3 sending traffic key derivation failed: {err}"),
             )
         })?;
+        self.aead = Tls13AeadCipher::from_suite_and_key(self.suite, &self.keys.key)?;
         self.sequence = 0;
         Ok(())
     }
@@ -665,17 +761,7 @@ impl Tls13RecordEncryptor {
         })?;
         let aad = build_record_aad(TLS_LEGACY_VERSION_1_2, ciphertext_len);
 
-        let ciphertext = match self.suite.aead {
-            Tls13AeadAlgorithm::Aes128Gcm => {
-                encrypt_aes128_gcm(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
-            }
-            Tls13AeadAlgorithm::Aes256Gcm => {
-                encrypt_aes256_gcm(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
-            }
-            Tls13AeadAlgorithm::ChaCha20Poly1305 => {
-                encrypt_chacha20_poly1305(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
-            }
-        };
+        let ciphertext = self.aead.encrypt(&nonce_bytes, &inner_plaintext, &aad)?;
 
         if ciphertext.len() != ciphertext_len as usize {
             return Err(Error::new(
@@ -771,17 +857,7 @@ impl Tls13RecordEncryptor {
         })?;
         let aad = build_record_aad(TLS_LEGACY_VERSION_1_2, ciphertext_len);
 
-        let ciphertext = match self.suite.aead {
-            Tls13AeadAlgorithm::Aes128Gcm => {
-                encrypt_aes128_gcm(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
-            }
-            Tls13AeadAlgorithm::Aes256Gcm => {
-                encrypt_aes256_gcm(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
-            }
-            Tls13AeadAlgorithm::ChaCha20Poly1305 => {
-                encrypt_chacha20_poly1305(&self.keys.key, &nonce_bytes, &inner_plaintext, &aad)?
-            }
-        };
+        let ciphertext = self.aead.encrypt(&nonce_bytes, &inner_plaintext, &aad)?;
 
         if ciphertext.len() != ciphertext_len as usize {
             return Err(Error::new(
@@ -826,12 +902,14 @@ impl Tls13RecordEncryptor {
 impl Tls13RecordDecryptor {
     pub fn new(suite: Tls13CipherSuite, keys: Tls13TrafficKeys) -> std::io::Result<Self> {
         validate_traffic_keys(suite, &keys)?;
+        let aead = Tls13AeadCipher::from_suite_and_key(suite, &keys.key)?;
 
         Ok(Self {
             suite,
             keys,
             sequence: 0,
             traffic_secret: None,
+            aead,
         })
     }
 
@@ -841,12 +919,14 @@ impl Tls13RecordDecryptor {
         traffic_secret: Vec<u8>,
     ) -> std::io::Result<Self> {
         validate_traffic_keys(suite, &keys)?;
+        let aead = Tls13AeadCipher::from_suite_and_key(suite, &keys.key)?;
 
         Ok(Self {
             suite,
             keys,
             sequence: 0,
             traffic_secret: Some(traffic_secret),
+            aead,
         })
     }
 
@@ -870,6 +950,7 @@ impl Tls13RecordDecryptor {
                 format!("TLS 1.3 receiving traffic key derivation failed: {err}"),
             )
         })?;
+        self.aead = Tls13AeadCipher::from_suite_and_key(self.suite, &self.keys.key)?;
         self.sequence = 0;
         Ok(())
     }
@@ -901,7 +982,7 @@ impl Tls13RecordDecryptor {
             ));
         }
 
-        let payload_len = u16::try_from(record.payload.len()).map_err(|_| {
+        let payload_len = u16::try_from(record.payload().len()).map_err(|_| {
             Error::new(
                 ErrorKind::InvalidInput,
                 "TLS 1.3 encrypted record exceeds u16 payload limit",
@@ -913,42 +994,17 @@ impl Tls13RecordDecryptor {
         let cipher_suite = self.suite.name;
         let nonce_bytes = tls13_record_nonce(&self.keys.iv, self.sequence)?;
 
-        let inner_plaintext =
-            match self.suite.aead {
-                Tls13AeadAlgorithm::Aes128Gcm => {
-                    decrypt_aes128_gcm(&self.keys.key, &nonce_bytes, &record.payload, &aad)
-                        .map_err(|err| {
-                            application_record_decrypt_error(
-                                err,
-                                cipher_suite,
-                                decrypt_sequence,
-                                encrypted_record_len,
-                            )
-                        })?
-                }
-                Tls13AeadAlgorithm::Aes256Gcm => {
-                    decrypt_aes256_gcm(&self.keys.key, &nonce_bytes, &record.payload, &aad)
-                        .map_err(|err| {
-                            application_record_decrypt_error(
-                                err,
-                                cipher_suite,
-                                decrypt_sequence,
-                                encrypted_record_len,
-                            )
-                        })?
-                }
-                Tls13AeadAlgorithm::ChaCha20Poly1305 => {
-                    decrypt_chacha20_poly1305(&self.keys.key, &nonce_bytes, &record.payload, &aad)
-                        .map_err(|err| {
-                        application_record_decrypt_error(
-                            err,
-                            cipher_suite,
-                            decrypt_sequence,
-                            encrypted_record_len,
-                        )
-                    })?
-                }
-            };
+        let inner_plaintext = self
+            .aead
+            .decrypt(&nonce_bytes, record.payload(), &aad)
+            .map_err(|err| {
+                application_record_decrypt_error(
+                    err,
+                    cipher_suite,
+                    decrypt_sequence,
+                    encrypted_record_len,
+                )
+            })?;
 
         self.sequence = increment_sequence(self.sequence)?;
 

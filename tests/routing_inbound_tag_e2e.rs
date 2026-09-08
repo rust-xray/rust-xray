@@ -1,5 +1,6 @@
 //! Stage 8E2-F4A inbound-tag routing E2E: dynamic AddInbound + merged REALITY auth.
 
+#[allow(dead_code)]
 #[path = "routing_e2e_harness.rs"]
 mod harness;
 

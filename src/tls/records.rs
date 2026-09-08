@@ -25,8 +25,14 @@ pub enum TlsRecordContentType {
 pub struct TlsRecord {
     pub content_type: TlsRecordContentType,
     pub legacy_version: [u8; 2],
-    pub payload: Vec<u8>,
+    /// Full on-wire TLS record bytes (5-byte header + payload).
     pub raw: Vec<u8>,
+}
+
+impl TlsRecord {
+    pub fn payload(&self) -> &[u8] {
+        &self.raw[RECORD_HEADER_LEN..]
+    }
 }
 
 fn parse_content_type(byte: u8) -> TlsRecordContentType {
@@ -63,7 +69,6 @@ fn parse_tls_record_at(input: &[u8], offset: usize) -> std::io::Result<(TlsRecor
         TlsRecord {
             content_type: parse_content_type(header[0]),
             legacy_version: [header[1], header[2]],
-            payload: raw[RECORD_HEADER_LEN..].to_vec(),
             raw,
         },
         record_end - offset,

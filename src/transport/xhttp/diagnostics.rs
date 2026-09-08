@@ -98,10 +98,8 @@ pub fn classify_request_leg(
                 return XHttpRequestLeg::Upload;
             }
         }
-        EffectiveXHttpMode::PacketUp => {
-            if method_matches_packet_up_download(method) {
-                return XHttpRequestLeg::Download;
-            }
+        EffectiveXHttpMode::PacketUp if method_matches_packet_up_download(method) => {
+            return XHttpRequestLeg::Download;
         }
         _ => {}
     }

@@ -116,12 +116,12 @@ fn invalid_key_length_rejected() {
 #[test]
 fn invalid_base64_rejected() {
     let raw = "mlkem768x25519plus.native.600s.not!!!base64";
-    assert!(parse_inbound_decryption(&raw).is_err());
+    assert!(parse_inbound_decryption(raw).is_err());
 }
 
 #[test]
 fn none_with_fallbacks_is_valid() {
-    let fallbacks = vec![FallbackConfig {
+    let fallbacks = [FallbackConfig {
         name: None,
         alpn: None,
         path: None,

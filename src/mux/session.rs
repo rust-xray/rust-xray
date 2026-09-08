@@ -113,14 +113,18 @@ where
                 Some(actions) = udp_rx.recv() => {
                     write_mux_out_frames(&mut stream, &actions).await?;
                 }
-                Some((mux_id, event)) = tcp_downlink_rx.recv() => {
+                Some((mux_id, generation, event)) = tcp_downlink_rx.recv() => {
+                    if !active_tcp.is_current(mux_id, generation) {
+                        debug!(mux_id, generation, "discarded stale mux substream downlink event");
+                        continue;
+                    }
                     match event {
                         TcpDownlinkEvent::Data(data) => {
                             let frame = crate::mux::encoder::encode_mux_keep_data(mux_id, &data)?;
                             write_mux_out_frames(&mut stream, &mux_actions(vec![frame])).await?;
                         }
                         TcpDownlinkEvent::Eof => {
-                            active_tcp.remove(mux_id);
+                            active_tcp.remove_if_current(mux_id, generation);
                             write_mux_out_frames(
                                 &mut stream,
                                 &mux_actions(vec![encode_mux_end(mux_id)]),

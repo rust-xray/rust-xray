@@ -51,6 +51,18 @@ impl AsyncRead for ChunkedReader {
     }
 }
 
+struct EofReader;
+
+impl AsyncRead for EofReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 fn block_on<F: Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -59,12 +71,21 @@ fn block_on<F: Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
+fn expect_request(read: VlessRequestRead) -> VlessInboundRequest {
+    match read {
+        VlessRequestRead::Request(inbound) => inbound,
+        VlessRequestRead::ClosedBeforeRequest => {
+            panic!("expected VLESS request, got clean close before request")
+        }
+    }
+}
+
 #[test]
 fn read_vless_request_header_only_has_empty_initial_payload() {
     let data = build_vless_request_bytes(&[], 0x01, 443, &[0x01, 127, 0, 0, 1]);
     let mut cursor = std::io::Cursor::new(data);
 
-    let inbound = block_on(read_vless_request(&mut cursor)).unwrap();
+    let inbound = expect_request(block_on(read_vless_request(&mut cursor)).unwrap());
 
     assert!(inbound.initial_payload.is_empty());
     assert_eq!(inbound.request.command, VlessCommand::Tcp);
@@ -80,7 +101,7 @@ fn read_vless_request_preserves_initial_payload() {
     data.extend_from_slice(b"POST / HTTP/1.1\r\n");
     let mut cursor = std::io::Cursor::new(data);
 
-    let inbound = block_on(read_vless_request(&mut cursor)).unwrap();
+    let inbound = expect_request(block_on(read_vless_request(&mut cursor)).unwrap());
 
     assert_eq!(inbound.initial_payload, b"POST / HTTP/1.1\r\n");
 }
@@ -98,9 +119,37 @@ fn read_vless_request_reads_incrementally() {
         index: 0,
     };
 
-    let inbound = block_on(read_vless_request(&mut reader)).unwrap();
+    let inbound = expect_request(block_on(read_vless_request(&mut reader)).unwrap());
 
     assert_eq!(inbound.initial_payload, payload);
+}
+
+#[test]
+fn read_vless_request_clean_eof_before_any_bytes_is_closed_before_request() {
+    let mut reader = EofReader;
+    let read = block_on(read_vless_request(&mut reader)).unwrap();
+    assert_eq!(read, VlessRequestRead::ClosedBeforeRequest);
+}
+
+#[test]
+fn read_vless_request_one_byte_then_eof_is_truncated_header() {
+    let mut cursor = std::io::Cursor::new([0u8]);
+    let err = block_on(read_vless_request(&mut cursor)).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+    assert!(is_vless_truncated_request_header(&err));
+    assert!(!is_vless_closed_before_request(&err));
+}
+
+#[test]
+fn read_vless_request_partial_uuid_then_eof_is_truncated_header() {
+    let mut data = build_vless_request_bytes(&[], 0x01, 443, &[0x01, 127, 0, 0, 1]);
+    data.truncate(10);
+    let mut cursor = std::io::Cursor::new(data);
+
+    let err = block_on(read_vless_request(&mut cursor)).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+    assert!(is_vless_truncated_request_header(&err));
+    assert!(!is_vless_closed_before_request(&err));
 }
 
 #[test]
@@ -111,6 +160,36 @@ fn read_vless_request_truncated_header_is_unexpected_eof() {
 
     let err = block_on(read_vless_request(&mut cursor)).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+    assert!(is_vless_truncated_request_header(&err));
+}
+
+#[test]
+fn read_vless_request_full_header_then_eof_is_success() {
+    let data = build_vless_request_bytes(&[], 0x01, 443, &[0x01, 127, 0, 0, 1]);
+    let mut cursor = std::io::Cursor::new(data);
+
+    let inbound = expect_request(block_on(read_vless_request(&mut cursor)).unwrap());
+    assert_eq!(inbound.request.command, VlessCommand::Tcp);
+}
+
+#[test]
+fn read_vless_request_malformed_version_remains_error() {
+    let mut data = build_vless_request_bytes(&[], 0x01, 443, &[0x01, 127, 0, 0, 1]);
+    data[0] = 1;
+    let mut cursor = std::io::Cursor::new(data);
+
+    let err = block_on(read_vless_request(&mut cursor)).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+    assert!(err
+        .to_string()
+        .contains("unsupported vless request version"));
+}
+
+#[test]
+fn vless_closed_before_request_error_is_detectable() {
+    let err = vless_closed_before_request_error();
+    assert!(is_vless_closed_before_request(&err));
+    assert!(!is_vless_truncated_request_header(&err));
 }
 
 #[test]
@@ -158,7 +237,8 @@ async fn read_vless_request_completes_before_handshake_deadline() {
     let policy = VlessInboundPolicy {
         handshake_timeout: Duration::from_secs(2),
     };
-    read_vless_request_with_policy(&mut cursor, policy)
+    let read = read_vless_request_with_policy(&mut cursor, policy)
         .await
         .expect("accepted before deadline");
+    assert!(matches!(read, VlessRequestRead::Request(_)));
 }

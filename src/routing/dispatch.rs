@@ -141,6 +141,8 @@ pub fn route_context_from_vless(
         vless_route: vless_route_from_uuid(&auth.id),
         skip_dns_resolve: false,
         process_name: String::new(),
+        match_domain_lower: None,
+        match_attributes_lower: None,
     }
 }
 

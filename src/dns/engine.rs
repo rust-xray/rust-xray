@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use std::time::{Duration, Instant};
@@ -92,6 +93,18 @@ struct DnsMetrics {
 struct InflightQuery {
     notify: Arc<Notify>,
     result: Mutex<Option<Result<CachedDnsResponse, DnsError>>>,
+    leader_active: AtomicBool,
+}
+
+struct InflightLeaderGuard {
+    entry: Arc<InflightQuery>,
+}
+
+impl Drop for InflightLeaderGuard {
+    fn drop(&mut self) {
+        self.entry.leader_active.store(false, Ordering::Release);
+        self.entry.notify.notify_waiters();
+    }
 }
 
 pub struct DnsEngine {
@@ -251,7 +264,7 @@ impl DnsEngine {
             );
         }
 
-        let leader = {
+        let (leader, _leader_guard) = {
             let mut guard = self.inflight.lock().await;
             if let Some(existing) = guard.get(&inflight_key).cloned() {
                 self.record_inflight_dedup_hit();
@@ -270,6 +283,7 @@ impl DnsEngine {
                 return self
                     .wait_inflight(
                         existing,
+                        &inflight_key,
                         &request.raw_query,
                         response_server,
                         inflight_wait_started,
@@ -283,9 +297,10 @@ impl DnsEngine {
             let entry = Arc::new(InflightQuery {
                 notify: Arc::new(Notify::new()),
                 result: Mutex::new(None),
+                leader_active: AtomicBool::new(true),
             });
             guard.insert(inflight_key.clone(), entry.clone());
-            entry
+            (entry.clone(), InflightLeaderGuard { entry })
         };
 
         let upstream = self
@@ -426,6 +441,7 @@ impl DnsEngine {
     async fn wait_inflight(
         &self,
         entry: Arc<InflightQuery>,
+        inflight_key: &DnsInflightKey,
         current_query: &[u8],
         _server: SocketAddr,
         wait_started: Instant,
@@ -443,6 +459,16 @@ impl DnsEngine {
                 );
                 return outcome;
             }
+            if !entry.leader_active.load(Ordering::Acquire) {
+                let mut inflight = self.inflight.lock().await;
+                if inflight
+                    .get(inflight_key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                {
+                    inflight.remove(inflight_key);
+                }
+                return Err(DnsError::Upstream);
+            }
             entry.notify.notified().await;
             if let Some(result) = entry.result.lock().await.clone() {
                 let outcome =
@@ -454,6 +480,16 @@ impl DnsEngine {
                     "dns inflight dedup wait done"
                 );
                 return outcome;
+            }
+            if !entry.leader_active.load(Ordering::Acquire) {
+                let mut inflight = self.inflight.lock().await;
+                if inflight
+                    .get(inflight_key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                {
+                    inflight.remove(inflight_key);
+                }
+                return Err(DnsError::Upstream);
             }
         }
     }

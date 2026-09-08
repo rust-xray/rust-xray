@@ -18,7 +18,7 @@ use super::*;
 
 use crate::reality::tls13::stream::ClientFinishedReadError;
 
-use crate::vless::inbound::read_vless_request;
+use crate::vless::inbound::{read_vless_request, VlessRequestRead};
 use crate::vless::protocol::{build_vless_domain_address, build_vless_request_wire};
 
 fn aes128_keys(seed: u8) -> Tls13TrafficKeys {
@@ -183,9 +183,15 @@ fn application_stream_vless_request_parse_then_second_record_decrypt() {
         let mut stream =
             RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
 
-        let inbound = read_vless_request(&mut stream)
+        let read = read_vless_request(&mut stream)
             .await
             .expect("vless request parsed from application stream");
+        let inbound = match read {
+            VlessRequestRead::Request(inbound) => inbound,
+            VlessRequestRead::ClosedBeforeRequest => {
+                panic!("expected vless request, got clean close before request")
+            }
+        };
         assert_eq!(inbound.request.version, 0);
         assert_eq!(inbound.initial_payload, b"TLS-INITIAL");
         assert_eq!(stream.client_decrypt_sequence(), 1);
@@ -602,7 +608,7 @@ fn read_tls_record_from_stream_reads_one_record() {
             .expect("valid TLS record");
 
         assert_eq!(record.raw, record_bytes);
-        assert_eq!(record.payload, b"payload");
+        assert_eq!(record.payload(), b"payload");
         assert_eq!(record.content_type, TlsRecordContentType::ApplicationData);
     });
 }
@@ -622,7 +628,7 @@ fn read_client_finished_tls_record_skips_one_change_cipher_spec() {
             .expect("client Finished record");
 
         assert_eq!(record.content_type, TlsRecordContentType::ApplicationData);
-        assert_eq!(record.payload, b"client-finished");
+        assert_eq!(record.payload(), b"client-finished");
         assert_eq!(cursor.position() as usize, total_len);
     });
 }
@@ -642,7 +648,7 @@ fn read_client_finished_tls_record_skips_two_change_cipher_spec_records() {
             .expect("client Finished record");
 
         assert_eq!(record.content_type, TlsRecordContentType::ApplicationData);
-        assert_eq!(record.payload, b"client-finished");
+        assert_eq!(record.payload(), b"client-finished");
     });
 }
 
@@ -772,7 +778,7 @@ fn try_take_tls_record_requires_complete_record() {
     let record = try_take_tls_record(&mut buf)
         .expect("valid parse")
         .expect("complete record");
-    assert_eq!(record.payload, vec![0x01, 0x02]);
+    assert_eq!(record.payload(), vec![0x01, 0x02]);
     assert!(buf.is_empty());
 }
 
@@ -780,8 +786,12 @@ fn try_take_tls_record_requires_complete_record() {
 fn vless_appdata_decrypt_failure_error_contains_sequence_and_len() {
     block_on(async {
         let (mut client_io, server_io) = duplex(4096);
-        let (mut client_encryptor, mut server_decryptor) = client_to_server_keys();
-        server_decryptor.keys.key[0] ^= 0x01;
+        let (mut client_encryptor, _) = client_to_server_keys();
+        let mut bad_keys = aes128_keys(0x10);
+        bad_keys.key[0] ^= 0x01;
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let server_decryptor =
+            Tls13RecordDecryptor::new(suite, bad_keys).expect("corrupted decryptor");
         let (server_encryptor, _client_decryptor) = server_to_client_keys();
 
         let mut stream =
@@ -791,7 +801,7 @@ fn vless_appdata_decrypt_failure_error_contains_sequence_and_len() {
             .encrypt_application_data(b"secret-vless-payload")
             .expect("encrypted record");
         let records = parse_tls_records(&encrypted).expect("parsable record");
-        let record_payload_len = records[0].payload.len();
+        let record_payload_len = records[0].payload().len();
         client_io.write_all(&encrypted).await.expect("write");
 
         let err = stream.read_plaintext_chunk().await.unwrap_err();
@@ -888,8 +898,12 @@ fn vless_appdata_decrypt_failure_does_not_contain_plaintext() {
     block_on(async {
         let payload = b"secret-vless-payload";
         let (mut client_io, server_io) = duplex(4096);
-        let (mut client_encryptor, mut server_decryptor) = client_to_server_keys();
-        server_decryptor.keys.key[0] ^= 0x01;
+        let (mut client_encryptor, _) = client_to_server_keys();
+        let mut bad_keys = aes128_keys(0x10);
+        bad_keys.key[0] ^= 0x01;
+        let suite = tls13_cipher_suite(TLS_AES_128_GCM_SHA256).expect("known suite");
+        let server_decryptor =
+            Tls13RecordDecryptor::new(suite, bad_keys).expect("corrupted decryptor");
         let (server_encryptor, _client_decryptor) = server_to_client_keys();
 
         let mut stream =
@@ -918,6 +932,31 @@ fn vless_plaintext_debug_preview_caps_at_64_bytes() {
     assert_eq!(preview_len, 64);
     assert_eq!(preview_hex.len(), 128);
     assert_eq!(preview_hex, "ab".repeat(64));
+}
+
+#[test]
+fn read_vless_request_after_close_notify_is_closed_before_request() {
+    block_on(async {
+        let (mut client_io, server_io) = duplex(4096);
+        let (mut client_encryptor, server_decryptor) = client_to_server_keys();
+        let (server_encryptor, _client_decryptor) = server_to_client_keys();
+
+        let mut stream =
+            RealityTls13ApplicationStream::new(server_io, server_decryptor, server_encryptor);
+
+        let encrypted = client_encryptor
+            .encrypt_application_record_with_inner_content_type(
+                &[TLS_ALERT_LEVEL_WARNING, TLS_ALERT_CLOSE_NOTIFY],
+                TLS_RECORD_ALERT,
+            )
+            .expect("encrypted close_notify alert");
+        client_io.write_all(&encrypted).await.expect("write");
+
+        let read = read_vless_request(&mut stream)
+            .await
+            .expect("close_notify before vless should classify as clean close");
+        assert_eq!(read, VlessRequestRead::ClosedBeforeRequest);
+    });
 }
 
 #[test]
@@ -1186,9 +1225,10 @@ fn noop_waker() -> Waker {
     unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
 }
 
-fn client_writer_for_test(
-    inner: ShutdownTrackingWriter,
-) -> RealityTls13ClientWriter<ShutdownTrackingWriter> {
+fn client_writer_for_test<S>(inner: S) -> RealityTls13ClientWriter<S>
+where
+    S: AsyncWrite + Unpin,
+{
     let (write_encryptor, _) = server_to_client_keys();
     let (_reader_direct, writer_direct) = ApplicationStreamDirectRelay::new_shared();
     RealityTls13ClientWriter {
@@ -1196,6 +1236,137 @@ fn client_writer_for_test(
         write: Tls13ClientWriteState::new(write_encryptor, Arc::new(AtomicBool::new(false))),
         direct_relay: writer_direct,
     }
+}
+
+#[test]
+fn client_writer_poll_flush_drains_pending_encrypted_bytes() {
+    let inner = ShutdownTrackingWriter::new().block_next_write();
+    let mut writer = client_writer_for_test(inner);
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    match Pin::new(&mut writer).poll_write(&mut cx, b"pending-flush") {
+        Poll::Pending => {}
+        Poll::Ready(result) => panic!("expected pending write, got {result:?}"),
+    }
+    assert!(!writer.write.ciphertext_write_buf.is_empty());
+    assert!(writer.inner.written.is_empty());
+
+    match Pin::new(&mut writer).poll_flush(&mut cx) {
+        Poll::Ready(Ok(())) => {}
+        other => panic!("expected flush ready Ok(()), got {other:?}"),
+    }
+
+    assert!(writer.write.ciphertext_write_buf.is_empty());
+    assert!(!writer.inner.written.is_empty());
+    assert_eq!(writer.inner.written[0], TLS_RECORD_APPLICATION_DATA);
+}
+
+#[test]
+fn client_writer_direct_flush_drains_pre_direct_encrypted_bytes() {
+    let inner = ShutdownTrackingWriter::new().block_next_write();
+    let mut writer = client_writer_for_test(inner);
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    match Pin::new(&mut writer).poll_write(&mut cx, b"pending-before-direct") {
+        Poll::Pending => {}
+        Poll::Ready(result) => panic!("expected pending write, got {result:?}"),
+    }
+    assert!(!writer.write.ciphertext_write_buf.is_empty());
+
+    writer.direct_relay.store(true, Ordering::SeqCst);
+    match Pin::new(&mut writer).poll_flush(&mut cx) {
+        Poll::Ready(Ok(())) => {}
+        other => panic!("expected flush ready Ok(()), got {other:?}"),
+    }
+
+    assert!(writer.write.ciphertext_write_buf.is_empty());
+    assert!(!writer.inner.written.is_empty());
+    assert_eq!(writer.inner.written[0], TLS_RECORD_APPLICATION_DATA);
+}
+
+struct PendingThenOneByteWriter {
+    written: Vec<u8>,
+    block_next_write: bool,
+}
+
+impl PendingThenOneByteWriter {
+    fn new() -> Self {
+        Self {
+            written: Vec::new(),
+            block_next_write: true,
+        }
+    }
+}
+
+impl AsyncWrite for PendingThenOneByteWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        if self.block_next_write {
+            self.block_next_write = false;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        self.written.push(buf[0]);
+        Poll::Ready(Ok(1))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[test]
+fn client_writer_direct_one_byte_flush_completes_tls_before_raw_write() {
+    let inner = PendingThenOneByteWriter::new();
+    let mut writer = client_writer_for_test(inner);
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    match Pin::new(&mut writer).poll_write(&mut cx, b"pending-tls-before-direct") {
+        Poll::Pending => {}
+        Poll::Ready(result) => panic!("expected pending write, got {result:?}"),
+    }
+    assert!(!writer.write.ciphertext_write_buf.is_empty());
+    assert!(writer.inner.written.is_empty());
+
+    writer.direct_relay.store(true, Ordering::SeqCst);
+    loop {
+        match Pin::new(&mut writer).poll_flush(&mut cx) {
+            Poll::Pending => {}
+            Poll::Ready(Ok(())) => break,
+            Poll::Ready(Err(err)) => panic!("flush failed: {err}"),
+        }
+    }
+    assert!(writer.write.ciphertext_write_buf.is_empty());
+    let tls_bytes = writer.inner.written.clone();
+    assert!(!tls_bytes.is_empty());
+    assert_eq!(tls_bytes[0], TLS_RECORD_APPLICATION_DATA);
+
+    let raw_offset = tls_bytes.len();
+    let raw = b"RAW";
+    let mut raw_written = 0;
+    while raw_written < raw.len() {
+        match Pin::new(&mut writer).poll_write(&mut cx, &raw[raw_written..]) {
+            Poll::Pending => {}
+            Poll::Ready(Ok(0)) => panic!("raw write returned zero"),
+            Poll::Ready(Ok(n)) => raw_written += n,
+            Poll::Ready(Err(err)) => panic!("raw write failed: {err}"),
+        }
+    }
+    assert_eq!(&writer.inner.written[raw_offset..], b"RAW");
+    assert_eq!(writer.inner.written.len(), raw_offset + 3);
 }
 
 #[test]
@@ -1352,7 +1523,7 @@ fn direct_relay_clean_eof_after_raw_relay() {
 #[test]
 fn partial_tls_record_before_direct_enable_still_rejected() {
     block_on(async {
-        let (mut client_io, server_io) = duplex(4096);
+        let (client_io, server_io) = duplex(4096);
         let (_client_encryptor, server_decryptor) = client_to_server_keys();
         let (server_encryptor, _client_decryptor) = server_to_client_keys();
 

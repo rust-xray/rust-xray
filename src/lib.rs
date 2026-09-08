@@ -24,6 +24,10 @@ pub mod transport;
 pub mod tunnel;
 pub mod vless;
 
+#[cfg(test)]
+#[path = "../tests/unit/env_lock.rs"]
+pub(crate) mod env_lock;
+
 /// Re-exports the contents of the [rustls-pki-types](https://docs.rs/rustls-pki-types) crate for easy access
 pub mod pki_types {
     pub use rustls_pki_types::*;

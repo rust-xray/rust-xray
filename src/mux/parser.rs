@@ -287,6 +287,9 @@ fn log_mux_frame_parsed(
     payload_len: usize,
     frame: &MuxFrame,
 ) {
+    if !tracing::enabled!(tracing::Level::TRACE) {
+        return;
+    }
     let network = match &frame.command {
         MuxCommand::Tcp { destination, .. } | MuxCommand::Udp { destination, .. } => {
             Some(destination.network.as_str())

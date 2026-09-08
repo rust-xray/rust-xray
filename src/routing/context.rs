@@ -47,6 +47,10 @@ pub struct RouteContext {
     pub skip_dns_resolve: bool,
     /// Optional local process name when available (local/system traffic).
     pub process_name: String,
+    /// Cached lowercase target domain for rule matching within one pick_route call.
+    pub match_domain_lower: Option<String>,
+    /// Cached lowercase attribute keys for rule matching within one pick_route call.
+    pub match_attributes_lower: Option<HashMap<String, String>>,
 }
 
 /// Result of a routing decision (implements routing.Route semantics).

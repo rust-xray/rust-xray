@@ -92,7 +92,6 @@ fn dest_handshake_from_server_hello_message(message: &[u8]) -> RealityDestHandsh
         vec![TlsRecord {
             content_type: TlsRecordContentType::Handshake,
             legacy_version: TLS_RECORD_LEGACY_VERSION,
-            payload: message.to_vec(),
             raw,
         }],
     )

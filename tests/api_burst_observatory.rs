@@ -273,7 +273,7 @@ async fn burst_connectivity_success_records_failure() {
         vec!["blocked"],
         HealthPingRuntimeConfig::for_test(
             probe_url(dest_addr, "/probe"),
-            &probe_url(conn_addr, "/connectivity"),
+            probe_url(conn_addr, "/connectivity"),
             Duration::from_secs(30),
             3,
             Duration::from_secs(5),

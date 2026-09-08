@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::IpAddr;
 
 use crate::routing::context::{NetworkKind, RouteContext};
@@ -6,8 +7,6 @@ use crate::routing::context::{NetworkKind, RouteContext};
 pub struct RouteMatchState<'a> {
     pub ctx: &'a mut RouteContext,
     resolve_on_demand: bool,
-    /// Lowercase target domain computed once per route decision for rule matching.
-    normalized_domain: Option<String>,
 }
 
 impl<'a> RouteMatchState<'a> {
@@ -15,17 +14,32 @@ impl<'a> RouteMatchState<'a> {
         Self {
             ctx,
             resolve_on_demand,
-            normalized_domain: None,
         }
     }
 
     /// Returns the lowercase target domain, computing and caching it on first use.
     /// Original `ctx.target_domain` is preserved for outbound/SNI semantics.
     pub fn normalized_target_domain(&mut self) -> &str {
-        if self.normalized_domain.is_none() && !self.ctx.target_domain.is_empty() {
-            self.normalized_domain = Some(self.ctx.target_domain.to_ascii_lowercase());
+        if self.ctx.match_domain_lower.is_none() && !self.ctx.target_domain.is_empty() {
+            self.ctx.match_domain_lower = Some(self.ctx.target_domain.to_ascii_lowercase());
         }
-        self.normalized_domain.as_deref().unwrap_or("")
+        self.ctx.match_domain_lower.as_deref().unwrap_or("")
+    }
+
+    fn lowered_attributes(&mut self) -> &HashMap<String, String> {
+        if self.ctx.match_attributes_lower.is_none() {
+            self.ctx.match_attributes_lower = Some(
+                self.ctx
+                    .attributes
+                    .iter()
+                    .map(|(key, value)| (key.to_ascii_lowercase(), value.clone()))
+                    .collect(),
+            );
+        }
+        self.ctx
+            .match_attributes_lower
+            .as_ref()
+            .expect("lowered attributes")
     }
 
     pub fn target_ips(&self) -> &[IpAddr] {
@@ -37,6 +51,19 @@ impl<'a> RouteMatchState<'a> {
             && self.ctx.target_ips.is_empty()
             && !self.ctx.target_domain.is_empty()
             && !self.ctx.skip_dns_resolve
+    }
+
+    #[cfg(test)]
+    pub fn normalized_domain_ptr(&self) -> Option<*const u8> {
+        self.ctx
+            .match_domain_lower
+            .as_ref()
+            .map(|value| value.as_ptr())
+    }
+
+    #[cfg(test)]
+    pub fn lowered_attributes_cached(&self) -> bool {
+        self.ctx.match_attributes_lower.is_some()
     }
 }
 
@@ -456,12 +483,7 @@ impl Condition for AttributeMatcher {
         if state.ctx.attributes.is_empty() {
             return false;
         }
-        let lowered: std::collections::HashMap<String, String> = state
-            .ctx
-            .attributes
-            .iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-            .collect();
+        let lowered = state.lowered_attributes();
         self.required.iter().all(|(key, regex)| {
             lowered
                 .get(key)

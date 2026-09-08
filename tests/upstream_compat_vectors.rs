@@ -266,7 +266,6 @@ fn reality_target_server_hello_key_share_observation_vector() {
             vec![TlsRecord {
                 content_type: TlsRecordContentType::Handshake,
                 legacy_version: [0x03, 0x03],
-                payload: message.to_vec(),
                 raw,
             }],
         )

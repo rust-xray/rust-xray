@@ -321,14 +321,14 @@ fn validate_server_hello_position_record(record: &TlsRecord) -> std::io::Result<
 
     validate_legacy_record_version(&record.legacy_version, 0)?;
 
-    if record.payload.first() != Some(&0x02) {
+    if record.payload().first() != Some(&0x02) {
         return Err(flight_error(
             ErrorKind::InvalidData,
             "destination server flight position 0 handshake payload must begin with ServerHello",
         ));
     }
 
-    let server_hello = parse_tls_server_hello_handshake(&record.payload)?;
+    let server_hello = parse_tls_server_hello_handshake(record.payload())?;
     validate_observed_server_hello(&server_hello)?;
 
     Ok(())

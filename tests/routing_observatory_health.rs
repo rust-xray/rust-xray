@@ -1,5 +1,6 @@
 //! Stage 8E4-C: live Observatory health wired into RuntimeRouter balancers.
 
+#[allow(dead_code)]
 #[path = "routing_e2e_harness.rs"]
 mod harness;
 
@@ -52,6 +53,7 @@ async fn test_serial() -> tokio::sync::MutexGuard<'static, ()> {
 #[derive(Clone, Copy)]
 enum ProbeServerMode {
     Ok204,
+    #[allow(dead_code)]
     Stall,
 }
 
@@ -200,7 +202,6 @@ fn least_load_balancer_rule(settings: StrategyLeastLoadConfig, fallback_tag: &st
                     value: settings.encode_to_vec(),
                 }),
                 fallback_tag: fallback_tag.to_string(),
-                ..Default::default()
             }],
             rule: vec![RoutingRule {
                 target_tag: Some(
@@ -1021,7 +1022,7 @@ struct FixedDelaySource {
 
 impl ProbeDelaySource for FixedDelaySource {
     fn delay(&self, _max: Duration, seed: u64) -> Duration {
-        if seed % 2 == 0 {
+        if seed.is_multiple_of(2) {
             self.direct
         } else {
             self.dead

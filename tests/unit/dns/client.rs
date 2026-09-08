@@ -63,7 +63,7 @@ async fn dns_client_uses_selected_proxy_outbound_and_returns_raw_response() {
     let dns = config.dns.clone().unwrap();
     let outbound = RuntimeOutboundManager::new();
     for ob in &config.outbounds {
-        outbound.register_startup_outbound(&ob).unwrap();
+        outbound.register_startup_outbound(ob).unwrap();
     }
     let router = Arc::new(DnsOutboundSelector::new(
         RuntimeRouter::new(

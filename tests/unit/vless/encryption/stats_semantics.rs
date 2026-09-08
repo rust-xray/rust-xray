@@ -35,37 +35,37 @@ fn stats_record_logical_uplink_and_downlink_payload_only() {
 
     assert_eq!(
         registry
-            .get(&format!("inbound>>>enc-in>>>traffic>>>uplink"), false)
+            .get("inbound>>>enc-in>>>traffic>>>uplink", false)
             .expect("uplink"),
         1000
     );
     assert_eq!(
         registry
-            .get(&format!("inbound>>>enc-in>>>traffic>>>downlink"), false)
+            .get("inbound>>>enc-in>>>traffic>>>downlink", false)
             .expect("downlink"),
         2000
     );
     assert_eq!(
         registry
-            .get(&format!("outbound>>>direct>>>traffic>>>uplink"), false)
+            .get("outbound>>>direct>>>traffic>>>uplink", false)
             .expect("out uplink"),
         1000
     );
     assert_eq!(
         registry
-            .get(&format!("outbound>>>direct>>>traffic>>>downlink"), false)
+            .get("outbound>>>direct>>>traffic>>>downlink", false)
             .expect("out downlink"),
         2000
     );
     assert_eq!(
         registry
-            .get(&format!("user>>>stats@test>>>traffic>>>uplink"), false)
+            .get("user>>>stats@test>>>traffic>>>uplink", false)
             .expect("user uplink"),
         1000
     );
     assert_eq!(
         registry
-            .get(&format!("user>>>stats@test>>>traffic>>>downlink"), false)
+            .get("user>>>stats@test>>>traffic>>>downlink", false)
             .expect("user downlink"),
         2000
     );

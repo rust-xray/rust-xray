@@ -48,6 +48,14 @@ impl MuxUdpSessionManager {
         }
     }
 
+    async fn shutdown_session(session: &Arc<MuxUdpSession>) {
+        *session.status.lock().await = MuxUdpSessionStatus::Closing;
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        *session.downlink_tx.lock().await = tx;
+        abort_session_tasks(session).await;
+    }
+
     pub async fn handle_new(
         &self,
         mux_id: u16,
@@ -63,8 +71,9 @@ impl MuxUdpSessionManager {
             ));
         }
 
-        if self.sessions.lock().await.contains_key(&mux_id) {
-            self.close_session(mux_id).await;
+        if let Some(replaced) = self.sessions.lock().await.remove(&mux_id) {
+            Self::shutdown_session(&replaced).await;
+            debug!(mux_id, "replaced existing generic mux udp session");
         }
 
         let (uplink_tx, uplink_rx) = mpsc::channel(MUX_UDP_ASSOCIATION_QUEUE_CAPACITY);
@@ -151,11 +160,7 @@ impl MuxUdpSessionManager {
         let Some(session) = session else {
             return false;
         };
-        *session.status.lock().await = MuxUdpSessionStatus::Closing;
-        let (tx, rx) = mpsc::channel(1);
-        drop(rx);
-        *session.downlink_tx.lock().await = tx;
-        abort_session_tasks(&session).await;
+        Self::shutdown_session(&session).await;
         debug!(mux_id, "generic mux udp session closed");
         true
     }

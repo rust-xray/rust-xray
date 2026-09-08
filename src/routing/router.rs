@@ -268,9 +268,12 @@ impl RuntimeRouter {
         let mut resolution_attempted = false;
         for rule in &table.rules {
             loop {
-                let mut state =
-                    RouteMatchState::new(ctx, resolve_on_demand && !resolution_attempted);
-                match rule.conditions.evaluate(&mut state) {
+                let result = {
+                    let mut state =
+                        RouteMatchState::new(ctx, resolve_on_demand && !resolution_attempted);
+                    rule.conditions.evaluate(&mut state)
+                };
+                match result {
                     ConditionResult::NoMatch => break,
                     ConditionResult::ResolveTargetIps => {
                         resolution_attempted = true;
@@ -280,16 +283,15 @@ impl RuntimeRouter {
                         let mut outbound_group_tags = Vec::new();
                         let outbound_tag =
                             resolve_rule_target(rule, table, &mut outbound_group_tags)?;
-                        let decision = RouteDecision {
+                        if let Some(webhook) = &rule.webhook {
+                            webhook.fire(ctx, &outbound_tag);
+                        }
+                        return Ok(Some(RouteDecision {
                             context: ctx.clone(),
-                            outbound_tag: outbound_tag.clone(),
+                            outbound_tag,
                             outbound_group_tags,
                             rule_tag: rule.rule_tag.clone(),
-                        };
-                        if let Some(webhook) = &rule.webhook {
-                            webhook.fire(&decision.context, &outbound_tag);
-                        }
-                        return Ok(Some(decision));
+                        }));
                     }
                 }
             }
@@ -344,3 +346,7 @@ fn parse_domain_strategy(raw: &str) -> DomainStrategy {
 #[cfg(test)]
 #[path = "../../tests/unit/routing/router.rs"]
 mod router_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/routing/perf_audit.rs"]
+mod perf_audit_tests;

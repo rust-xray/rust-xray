@@ -66,7 +66,7 @@ pub fn dummy_handshake_result(
         pfs_key,
         nfs_key: SecretBytes::new(nfs),
         xor_mode: XorMode::Native,
-        use_aes: use_aes,
+        use_aes,
         client_iv: [0x44u8; 16],
         upload_keys: upload,
         download_keys: download,

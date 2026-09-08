@@ -115,7 +115,6 @@ fn handshake_record(payload: &[u8]) -> TlsRecord {
     TlsRecord {
         content_type: TlsRecordContentType::Handshake,
         legacy_version: [0x03, 0x03],
-        payload: payload.to_vec(),
         raw,
     }
 }
@@ -129,7 +128,6 @@ fn application_data_record(payload: &[u8]) -> TlsRecord {
     TlsRecord {
         content_type: TlsRecordContentType::ApplicationData,
         legacy_version: [0x03, 0x03],
-        payload: payload.to_vec(),
         raw,
     }
 }
@@ -184,7 +182,6 @@ fn reality_dest_handshake_stores_records() {
                 TlsRecord {
                     content_type: TlsRecordContentType::ChangeCipherSpec,
                     legacy_version: TLS_LEGACY_VERSION_1_2,
-                    payload: vec![0x01],
                     raw: ccs,
                 }
             },

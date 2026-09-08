@@ -46,7 +46,7 @@ fn build_tls_record_roundtrips_with_parse_tls_records() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].content_type, TlsRecordContentType::Handshake);
     assert_eq!(records[0].legacy_version, TLS_LEGACY_VERSION_1_2);
-    assert_eq!(records[0].payload, payload);
+    assert_eq!(records[0].payload(), payload);
     assert_eq!(records[0].raw, record);
 }
 
@@ -58,7 +58,7 @@ fn parse_tls_records_one_handshake_record() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].content_type, TlsRecordContentType::Handshake);
     assert_eq!(records[0].legacy_version, [0x03, 0x03]);
-    assert_eq!(records[0].payload, vec![0x02, 0x00, 0x00, 0x01, 0x00]);
+    assert_eq!(records[0].payload(), vec![0x02, 0x00, 0x00, 0x01, 0x00]);
     assert_eq!(records[0].raw, input);
 }
 
@@ -72,7 +72,7 @@ fn parse_tls_records_change_cipher_spec_record() {
         records[0].content_type,
         TlsRecordContentType::ChangeCipherSpec
     );
-    assert_eq!(records[0].payload, vec![0x01]);
+    assert_eq!(records[0].payload(), vec![0x01]);
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn parse_tls_records_application_data_record() {
         records[0].content_type,
         TlsRecordContentType::ApplicationData
     );
-    assert_eq!(records[0].payload, vec![0xde, 0xad, 0xbe, 0xef]);
+    assert_eq!(records[0].payload(), vec![0xde, 0xad, 0xbe, 0xef]);
 }
 
 #[test]

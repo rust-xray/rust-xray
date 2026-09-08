@@ -520,7 +520,7 @@ async fn vless_tcp_auth_result(
     tokio::time::timeout(std::time::Duration::from_secs(3), relay)
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "relay timeout"))?
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "relay join failed"))?
+        .map_err(|_| std::io::Error::other("relay join failed"))?
 }
 
 #[tokio::test]

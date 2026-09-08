@@ -446,7 +446,7 @@ fn preamble_read_stats_records_preview_up_to_32_bytes() {
     assert_eq!(stats.bytes_read, 3);
     assert_eq!(stats.hex_preview(), "160301");
 
-    stats.record(&vec![0xab; 40]);
+    stats.record(&[0xab; 40]);
     assert_eq!(stats.bytes_read, 43);
     assert_eq!(stats.preview.len(), 32);
     assert_eq!(stats.preview[0], 0x16);

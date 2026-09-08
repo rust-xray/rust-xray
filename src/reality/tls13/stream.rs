@@ -109,7 +109,7 @@ fn plaintext_prefix_hex(plaintext: &[u8]) -> String {
 }
 
 fn tls_record_payload_len(record: &[u8]) -> usize {
-    record.len().checked_sub(TLS_RECORD_HEADER_LEN).unwrap_or(0)
+    record.len().saturating_sub(TLS_RECORD_HEADER_LEN)
 }
 
 fn log_application_stream_encrypt_start(
@@ -209,7 +209,7 @@ fn log_application_stream_decrypt_attempt(
     decryptor: &Tls13RecordDecryptor,
     record: &TlsRecord,
 ) {
-    let payload_len = u16::try_from(record.payload.len()).unwrap_or(u16::MAX);
+    let payload_len = u16::try_from(record.payload().len()).unwrap_or(u16::MAX);
 
     if debug_tls_record_prefix_enabled() {
         let aad = tls13_record_aad_bytes(record.legacy_version, payload_len);
@@ -298,7 +298,7 @@ impl ApplicationStreamRecordMeta {
             content_type: record.content_type,
             content_type_name: tls_record_content_type_name(record.content_type),
             legacy_version: record.legacy_version,
-            record_payload_len: record.payload.len(),
+            record_payload_len: record.payload().len(),
             record_total_len: record.raw.len(),
         }
     }
@@ -349,8 +349,8 @@ fn log_application_stream_record_decrypt_failure(
         record_payload_len = meta.record_payload_len,
         record_total_len = meta.record_total_len,
         record_header_hex = tls_record_header_hex(&record.raw),
-        encrypted_payload_prefix_hex = encrypted_payload_prefix_hex(&record.payload),
-        encrypted_payload_suffix_hex = encrypted_payload_suffix_hex(&record.payload),
+        encrypted_payload_prefix_hex = encrypted_payload_prefix_hex(record.payload()),
+        encrypted_payload_suffix_hex = encrypted_payload_suffix_hex(record.payload()),
         debug_tls_record_prefix_enabled = true,
         "TLS application-stream record decrypt failed"
     );
@@ -367,7 +367,7 @@ fn validate_client_application_record(record: &TlsRecord) -> io::Result<()> {
         ));
     }
 
-    if record.payload.len() < TLS13_AEAD_TAG_LEN {
+    if record.payload().len() < TLS13_AEAD_TAG_LEN {
         return Err(Error::new(
             ErrorKind::InvalidData,
             "TLS application record too short for AEAD tag",
@@ -541,7 +541,6 @@ where
     Ok(TlsRecord {
         content_type: parse_tls_record_content_type(header[0]),
         legacy_version: [header[1], header[2]],
-        payload,
         raw,
     })
 }
@@ -712,7 +711,7 @@ where
                         stage = stages::TLS13_CLIENT_FINISHED_READ,
                         ignored_record_count = counter.consecutive(),
                         alert_record_len = record.raw.len(),
-                        alert_bytes_hex = hex_encode(&record.payload),
+                        alert_bytes_hex = hex_encode(record.payload()),
                         "client sent TLS alert before Finished"
                     );
                 }
@@ -738,8 +737,7 @@ impl ApplicationStreamRelaySplitGuard {
                 stage = stages::TLS13_APPLICATION_STREAM_SPLIT,
                 "TLS application stream relay split called more than once"
             );
-            return Err(io::Error::new(
-                ErrorKind::Other,
+            return Err(io::Error::other(
                 "TLS application stream relay split called more than once",
             ));
         }
@@ -1337,7 +1335,15 @@ where
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         log_application_stream_writer_flush();
-        Pin::new(&mut self.as_mut().get_mut().inner).poll_flush(cx)
+        let this = self.as_mut().get_mut();
+        match this
+            .write
+            .poll_flush_pending_ciphertext(Pin::new(&mut this.inner), cx)?
+        {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(()) => {}
+        }
+        Pin::new(&mut this.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -1614,7 +1620,15 @@ where
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.as_mut().get_mut().inner).poll_flush(cx)
+        let this = self.as_mut().get_mut();
+        match this
+            .write
+            .poll_flush_pending_ciphertext(Pin::new(&mut this.inner), cx)?
+        {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(()) => {}
+        }
+        Pin::new(&mut this.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -1784,12 +1798,10 @@ fn try_take_tls_record(buf: &mut BytesMut) -> io::Result<Option<TlsRecord>> {
     let raw = buf.split_to(record_len).to_vec();
     let content_type = parse_tls_record_content_type(raw[0]);
     let legacy_version = [raw[1], raw[2]];
-    let payload = raw[TLS_RECORD_HEADER_LEN..].to_vec();
 
     Ok(Some(TlsRecord {
         content_type,
         legacy_version,
-        payload,
         raw,
     }))
 }
@@ -1904,6 +1916,10 @@ where
 #[cfg(test)]
 #[path = "../../../tests/unit/reality/tls13/stream.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../../tests/unit/reality/tls13/stream_perf_audit.rs"]
+mod stream_perf_audit;
 
 #[cfg(test)]
 #[path = "../../../tests/unit/reality/tls13/useless_overflow_alert.rs"]

@@ -109,7 +109,7 @@ pub fn classify_record_before_client_finished(record: &TlsRecord) -> Result<bool
             Ok(true)
         }
         TlsRecordContentType::Alert => classify_handshake_phase_alert(record),
-        TlsRecordContentType::ApplicationData => Ok(record.payload.is_empty()),
+        TlsRecordContentType::ApplicationData => Ok(record.payload().is_empty()),
         other => Err(Error::new(
             ErrorKind::InvalidData,
             format!(
@@ -161,7 +161,7 @@ fn classify_handshake_phase_alert(record: &TlsRecord) -> Result<bool, Error> {
         ));
     }
 
-    match record.payload.as_slice() {
+    match record.payload() {
         [TLS_ALERT_LEVEL_WARNING, _] => Ok(true),
         [TLS_ALERT_LEVEL_FATAL, TLS_ALERT_USER_CANCELED] => Ok(true),
         [TLS_ALERT_LEVEL_FATAL, description] => Err(Error::new(

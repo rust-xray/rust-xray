@@ -24,11 +24,13 @@ HTTP_LOG="${SMOKE_WORK_DIR}/http.log"
 HTTP_PID=""
 SERVER_PID=""
 CLIENT_PID=""
+SMOKE_REALITY_TARGET_PID=""
 
 cleanup() {
   smoke_stop_process "${CLIENT_PID}"
   smoke_stop_process "${SERVER_PID}"
   smoke_stop_process "${HTTP_PID}"
+  smoke_stop_process "${SMOKE_REALITY_TARGET_PID}"
 }
 trap cleanup EXIT
 
@@ -65,8 +67,12 @@ Path(os.environ["SMOKE_OUTPUT"]).write_text(json.dumps(cfg, indent=2) + "\n")
 PY
 
 echo "--- VLESS encryption live 0-RTT: connection 1 (expect 1-RTT) ---"
+smoke_start_reality_target
+SERVER_CFG="${SMOKE_WORK_DIR}/rust-xray-server-0rtt.json"
+smoke_materialize_server_config \
+  "${SCRIPT_DIR}/rust-xray-server.encryption.fixture.json" "${SERVER_CFG}"
 RUST_LOG="${SMOKE_RUST_LOG:-info}" "${SMOKE_RUST_XRAY_BIN}" \
-  "${SCRIPT_DIR}/rust-xray-server.encryption.fixture.json" >"${SERVER_LOG}" 2>&1 &
+  "${SERVER_CFG}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 smoke_wait_port 127.0.0.1 "${SMOKE_SERVER_PORT}" "encrypted server" 40
 sleep 1

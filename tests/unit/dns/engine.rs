@@ -4,6 +4,7 @@ use crate::dns::packet::dns_query_id;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
@@ -804,6 +805,181 @@ async fn malformed_query_rejected() {
         .await
         .unwrap_err();
     assert_eq!(err, DnsError::MalformedQuery);
+}
+
+fn builtin_dns_request(query: Vec<u8>) -> DnsQueryRequest {
+    DnsQueryRequest {
+        raw_query: query,
+        destination: None,
+        inbound_tag: None,
+        source: DnsQuerySource::BuiltinDns,
+        trace: None,
+    }
+}
+
+fn hanging_dns_engine() -> Arc<DnsEngine> {
+    Arc::new(DnsEngine::new(
+        DnsConfig {
+            servers: vec![config::parse_dns_server("127.0.0.1:9").unwrap()],
+            query_strategy: QueryStrategy::UseIP,
+            disable_cache: true,
+            extra: Default::default(),
+        },
+        DnsEngineOptions {
+            default_timeout: Duration::from_secs(30),
+            mux_udp_dns_timeout: Duration::from_secs(30),
+            max_retries: 0,
+            mux_udp_dns_max_retries: 0,
+            cache_enabled: false,
+            ..DnsEngineOptions::for_test()
+        },
+    ))
+}
+
+#[tokio::test]
+async fn inflight_waiters_wake_when_leader_task_cancelled() {
+    let engine = hanging_dns_engine();
+    let query = example_query();
+    let leader = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let query = query.clone();
+        async move { engine.query_raw(builtin_dns_request(query)).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let waiter = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let query = query.clone();
+        async move { engine.query_raw(builtin_dns_request(query)).await }
+    });
+
+    leader.abort();
+    let err = waiter.await.expect("waiter join").unwrap_err();
+    assert_eq!(err, DnsError::Upstream);
+}
+
+#[tokio::test]
+async fn inflight_multiple_waiters_all_wake_on_leader_cancel() {
+    let engine = hanging_dns_engine();
+    let query = example_query();
+    let leader = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let query = query.clone();
+        async move { engine.query_raw(builtin_dns_request(query)).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut waiters = Vec::new();
+    for _ in 0..3 {
+        let engine = Arc::clone(&engine);
+        let query = query.clone();
+        waiters.push(tokio::spawn(async move {
+            engine.query_raw(builtin_dns_request(query)).await
+        }));
+    }
+
+    leader.abort();
+    for handle in waiters {
+        assert_eq!(
+            handle.await.expect("waiter join").unwrap_err(),
+            DnsError::Upstream
+        );
+    }
+}
+
+#[tokio::test]
+async fn inflight_new_query_after_leader_cancel_becomes_leader() {
+    let engine = hanging_dns_engine();
+    let query = example_query();
+    let leader = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let query = query.clone();
+        async move { engine.query_raw(builtin_dns_request(query)).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    leader.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = udp.local_addr().unwrap().port();
+    let expected_query = query.clone();
+    let expected_response = example_response();
+    let response_for_server = expected_response.clone();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        loop {
+            let (read, peer) = match udp.recv_from(&mut buf).await {
+                Ok(value) => value,
+                Err(_) => break,
+            };
+            assert_eq!(&buf[..read], expected_query.as_slice());
+            udp.send_to(&response_for_server, peer).await.unwrap();
+        }
+    });
+
+    let working = Arc::new(DnsEngine::new(
+        DnsConfig {
+            servers: vec![config::parse_dns_server("127.0.0.1").unwrap()],
+            query_strategy: QueryStrategy::UseIP,
+            disable_cache: true,
+            extra: Default::default(),
+        },
+        DnsEngineOptions {
+            default_timeout: Duration::from_secs(2),
+            mux_udp_dns_timeout: Duration::from_secs(2),
+            max_retries: 0,
+            mux_udp_dns_max_retries: 0,
+            cache_enabled: false,
+            ..DnsEngineOptions::for_test()
+        },
+    ));
+    let response = working
+        .resolve_mux_udp_dns(1, SocketAddr::from((Ipv4Addr::LOCALHOST, port)), &query)
+        .await
+        .unwrap();
+    assert_eq!(response.raw_response, expected_response);
+}
+
+#[tokio::test]
+async fn inflight_waiters_receive_leader_failure() {
+    let engine = Arc::new(DnsEngine::new(
+        DnsConfig {
+            servers: vec![config::parse_dns_server("127.0.0.1:9").unwrap()],
+            query_strategy: QueryStrategy::UseIP,
+            disable_cache: true,
+            extra: Default::default(),
+        },
+        DnsEngineOptions {
+            default_timeout: Duration::from_millis(150),
+            mux_udp_dns_timeout: Duration::from_millis(150),
+            max_retries: 0,
+            mux_udp_dns_max_retries: 0,
+            cache_enabled: false,
+            ..DnsEngineOptions::for_test()
+        },
+    ));
+    let query = example_query();
+    let leader = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let query = query.clone();
+        async move { engine.query_raw(builtin_dns_request(query)).await }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let waiter = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let query = query.clone();
+        async move { engine.query_raw(builtin_dns_request(query)).await }
+    });
+
+    assert_eq!(
+        leader.await.expect("leader join").unwrap_err(),
+        DnsError::Timeout
+    );
+    assert_eq!(
+        waiter.await.expect("waiter join").unwrap_err(),
+        DnsError::Timeout
+    );
 }
 
 fn custom_dns_config() -> DnsConfig {

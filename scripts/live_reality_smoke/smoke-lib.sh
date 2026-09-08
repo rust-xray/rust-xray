@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Shared helpers for live REALITY smoke scripts.
 
+SMOKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 smoke_portable_timeout() {
   local duration="$1"
   shift
@@ -92,6 +94,108 @@ smoke_port_owner_diagnostic() {
   fi
 }
 
+# Bind to 127.0.0.1:0 and return the assigned port. The socket is closed before
+# return; a tiny local race remains before the smoke harness binds the port.
+smoke_pick_ephemeral_port() {
+  python3 - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
+
+smoke_fail_port_in_use() {
+  local host="$1"
+  local port="$2"
+  local suite="$3"
+  local override_var="$4"
+  echo "error: ${suite} requires ${host}:${port}, but it is already in use" >&2
+  echo "requested_port: ${port}" >&2
+  echo "suite: ${suite}" >&2
+  echo "override: set ${override_var}=<free-port>" >&2
+  smoke_port_owner_diagnostic "${port}" >&2
+  return 1
+}
+
+# Resolve a listen port: allocate when unset, otherwise verify availability.
+smoke_resolve_listen_port() {
+  local var_name="$1"
+  local suite="$2"
+  local current
+  eval "current=\${${var_name}:-}"
+  if [[ -z "${current}" ]]; then
+    current="$(smoke_pick_ephemeral_port)"
+    echo "${suite}: allocated ephemeral ${var_name}=${current}"
+  fi
+  if (echo >/dev/tcp/127.0.0.1/"${current}") >/dev/null 2>&1; then
+    smoke_fail_port_in_use "127.0.0.1" "${current}" "${suite}" "${var_name}"
+    return 1
+  fi
+  eval "export ${var_name}=${current}"
+}
+
+smoke_init_standard_ports() {
+  local suite="$1"
+  smoke_resolve_listen_port SMOKE_SERVER_PORT "${suite}" || return 1
+  smoke_resolve_listen_port SMOKE_SOCKS_PORT "${suite}" || return 1
+  echo "${suite}: using SMOKE_SERVER_PORT=${SMOKE_SERVER_PORT} SMOKE_SOCKS_PORT=${SMOKE_SOCKS_PORT}"
+}
+
+smoke_materialize_server_config() {
+  local template="$1"
+  local output="$2"
+  SMOKE_TEMPLATE="${template}" \
+    SMOKE_OUTPUT="${output}" \
+    SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT}" \
+    SMOKE_REALITY_DEST="${SMOKE_REALITY_DEST:-}" \
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+template = Path(os.environ["SMOKE_TEMPLATE"])
+output = Path(os.environ["SMOKE_OUTPUT"])
+port = int(os.environ["SMOKE_SERVER_PORT"])
+cfg = json.loads(template.read_text())
+for inbound in cfg.get("inbounds", []):
+    if "port" in inbound:
+        inbound["port"] = port
+    reality = inbound.get("streamSettings", {}).get("realitySettings")
+    if reality and os.environ["SMOKE_REALITY_DEST"]:
+        if "dest" in reality:
+            reality["dest"] = os.environ["SMOKE_REALITY_DEST"]
+        elif "target" in reality:
+            reality["target"] = os.environ["SMOKE_REALITY_DEST"]
+output.write_text(json.dumps(cfg, indent=2) + "\n")
+PY
+}
+
+smoke_start_reality_target() {
+  local mode="${1:-minimal}"
+  local target_port cert_path key_path args
+  smoke_stop_process "${SMOKE_REALITY_TARGET_PID:-}"
+  SMOKE_REALITY_TARGET_PID=""
+  target_port="$(smoke_pick_ephemeral_port)"
+  args=(--port "${target_port}" --mode "${mode}")
+  if [[ "${mode}" == "full" ]]; then
+    cert_path="${SMOKE_WORK_DIR}/reality-target-cert.pem"
+    key_path="${SMOKE_WORK_DIR}/reality-target-key.pem"
+    openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
+      -subj "/CN=www.microsoft.com" \
+      -keyout "${key_path}" -out "${cert_path}" >/dev/null 2>&1
+    args+=(--cert "${cert_path}" --key "${key_path}")
+  fi
+  SMOKE_REALITY_DEST="127.0.0.1:${target_port}"
+  export SMOKE_REALITY_DEST
+  python3 "${SMOKE_LIB_DIR}/reality-target-server.py" "${args[@]}" \
+    >>"${SMOKE_WORK_DIR}/reality-target.log" 2>&1 &
+  SMOKE_REALITY_TARGET_PID=$!
+  smoke_wait_port 127.0.0.1 "${target_port}" "REALITY target"
+}
+
 smoke_assert_port_available() {
   local host="$1"
   local port="$2"
@@ -178,10 +282,12 @@ smoke_verify_server_started() {
 
 smoke_start_server() {
   local server_config="$1"
+  local runtime_config="${SMOKE_WORK_DIR}/runtime-server-$$.json"
   smoke_stop_process "${SMOKE_SERVER_PID:-}"
+  smoke_materialize_server_config "${server_config}" "${runtime_config}"
   smoke_assert_port_available 127.0.0.1 "${SMOKE_SERVER_PORT}" "rust-xray server"
   : >>"${SMOKE_SERVER_LOG}"
-  RUST_LOG="${SMOKE_RUST_LOG:-info}" "${SMOKE_RUST_XRAY_BIN}" "${server_config}" >>"${SMOKE_SERVER_LOG}" 2>&1 &
+  RUST_LOG="${SMOKE_RUST_LOG:-info}" "${SMOKE_RUST_XRAY_BIN}" "${runtime_config}" >>"${SMOKE_SERVER_LOG}" 2>&1 &
   SMOKE_SERVER_PID=$!
   sleep 0.1
   smoke_verify_server_started &&
@@ -210,8 +316,10 @@ smoke_expect_server_reject() {
   local server_config="$2"
   local pattern="$3"
   local log="${SMOKE_WORK_DIR}/reject-${name}.log"
+  local runtime_config="${SMOKE_WORK_DIR}/reject-${name}.json"
   smoke_stop_stack
-  if RUST_LOG="${SMOKE_RUST_LOG:-info}" "${SMOKE_RUST_XRAY_BIN}" "${server_config}" >"${log}" 2>&1; then
+  smoke_materialize_server_config "${server_config}" "${runtime_config}"
+  if RUST_LOG="${SMOKE_RUST_LOG:-info}" "${SMOKE_RUST_XRAY_BIN}" "${runtime_config}" >"${log}" 2>&1; then
     echo "error: expected ${name} config to be rejected during startup" >&2
     cat "${log}" >&2
     return 1
@@ -243,6 +351,8 @@ smoke_write_client_config() {
     SMOKE_MLDSA65_VERIFY="${mldsa65_verify}" \
     SMOKE_MUX_ENABLED="${mux_enabled}" \
     SMOKE_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
+    SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT}" \
+    SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT}" \
     python3 - <<'PY'
 import json
 import os
@@ -274,6 +384,9 @@ if os.environ.get("SMOKE_MUX_ENABLED") == "1":
 elif "mux" in cfg["outbounds"][0]:
     del cfg["outbounds"][0]["mux"]
 
+cfg["inbounds"][0]["port"] = int(os.environ["SMOKE_SOCKS_PORT"])
+cfg["outbounds"][0]["settings"]["vnext"][0]["port"] = int(os.environ["SMOKE_SERVER_PORT"])
+
 output.write_text(json.dumps(cfg, indent=2) + "\n")
 PY
 }
@@ -291,6 +404,8 @@ smoke_write_negative_client_config() {
     SMOKE_MUX_ENABLED="${mux_enabled}" \
     SMOKE_PACKET_ENCODING="${packet_encoding}" \
     SMOKE_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
+    SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT}" \
+    SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT}" \
     python3 - <<'PY'
 import json
 import os
@@ -321,6 +436,9 @@ elif "mux" in cfg["outbounds"][0]:
 cfg["outbounds"][0]["streamSettings"]["realitySettings"]["publicKey"] = os.environ[
     "SMOKE_PUBLIC_KEY"
 ]
+
+cfg["inbounds"][0]["port"] = int(os.environ["SMOKE_SOCKS_PORT"])
+cfg["outbounds"][0]["settings"]["vnext"][0]["port"] = int(os.environ["SMOKE_SERVER_PORT"])
 
 output.write_text(json.dumps(cfg, indent=2) + "\n")
 PY

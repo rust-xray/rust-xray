@@ -27,7 +27,6 @@ use rust_xray::api::server::{serve_grpc_on, ApiService, ApiTransportMode};
 use rust_xray::routing::{vless_route_from_uuid, RouteSocketMeta, ROUTER_CONFIG_TYPE};
 use rust_xray::runtime::{encode_blackhole_outbound, encode_freedom_outbound, HandlerRuntime};
 use rust_xray::stats::StatsRegistry;
-use rust_xray::vless::config::VlessClient;
 use rust_xray::vless::handle_vless_tcp_inbound_with_socket_meta;
 use rust_xray::vless::user_manager::VlessUserManager;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

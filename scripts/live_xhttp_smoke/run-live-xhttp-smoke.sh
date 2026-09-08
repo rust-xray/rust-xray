@@ -4,17 +4,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# shellcheck source=scripts/live_reality_smoke/smoke-lib.sh
+source "${REPO_ROOT}/scripts/live_reality_smoke/smoke-lib.sh"
+
 TEST_PUBLIC_KEY="${TEST_PUBLIC_KEY:-oU1MbEgszawWQJa0S_DxLsNt9G2zyE4rF-CrqvJjTmg}"
-XHTTP_SERVER_PORT="${XHTTP_SERVER_PORT:-24443}"
-XHTTP_SOCKS_PORT="${XHTTP_SOCKS_PORT:-10808}"
-XHTTP_HTTP_PORT="${XHTTP_HTTP_PORT:-10809}"
+XHTTP_SERVER_PORT="${XHTTP_SERVER_PORT:-${SMOKE_SERVER_PORT:-}}"
+XHTTP_SOCKS_PORT="${XHTTP_SOCKS_PORT:-${SMOKE_SOCKS_PORT:-}}"
+XHTTP_HTTP_PORT="${XHTTP_HTTP_PORT:-}"
 XHTTP_TARGET_URL="${XHTTP_TARGET_URL:-https://example.com/}"
 XHTTP_WORK_DIR="${XHTTP_WORK_DIR:-${SMOKE_WORK_DIR:-/tmp/rust-xray-live-xhttp-smoke-$$}}"
 XHTTP_REPORT_PATH="${XHTTP_REPORT_PATH:-${XHTTP_WORK_DIR}/report.txt}"
 XHTTP_SKIP_BUILD="${XHTTP_SKIP_BUILD:-${SMOKE_SKIP_BUILD:-0}}"
 XHTTP_MODE_TIMEOUT="${XHTTP_MODE_TIMEOUT:-${SMOKE_TIMEOUT:-90}}"
 XHTTP_RUST_LOG="${XHTTP_RUST_LOG:-rust_xray::transport::xhttp=debug,rust_xray::xhttp::diagnostics=warn,rust_xray::xhttp::bridge=debug,rust_xray::app=debug,rust_xray::vless=debug,warn}"
-XHTTP_RUST_XRAY_BIN="${XHTTP_RUST_XRAY_BIN:-${SMOKE_RUST_XRAY_BIN:-${RUST_XRAY_BIN:-${REPO_ROOT}/target/debug/rust-xray}}}"
+XHTTP_RUST_XRAY_BIN="${XHTTP_RUST_XRAY_BIN:-${SMOKE_RUST_XRAY_BIN:-${RUST_XRAY_BIN:-${REPO_ROOT}/target/release/rust-xray}}}"
 XHTTP_XRAY_BIN="${XHTTP_XRAY_BIN:-${SMOKE_XRAY_BIN:-${XRAY_BIN:-xray}}}"
 
 SERVER_TEMPLATE="${SCRIPT_DIR}/rust-xray-server-xhttp.json"
@@ -67,6 +70,16 @@ require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "error: required command not found in PATH: $1" >&2
     exit 1
+  fi
+}
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    printf 'unavailable'
   fi
 }
 
@@ -169,7 +182,7 @@ build_rust_xray() {
   fi
   (
     cd "${REPO_ROOT}"
-    cargo build --bin rust-xray
+    cargo build --release --bin rust-xray --all-features
   )
 }
 
@@ -774,15 +787,33 @@ assert_acceptance() {
   return "${failures}"
 }
 
+init_xhttp_ports() {
+  SMOKE_SERVER_PORT="${XHTTP_SERVER_PORT}"
+  SMOKE_SOCKS_PORT="${XHTTP_SOCKS_PORT}"
+  smoke_init_standard_ports "live-xhttp-smoke"
+  XHTTP_SERVER_PORT="${SMOKE_SERVER_PORT}"
+  XHTTP_SOCKS_PORT="${SMOKE_SOCKS_PORT}"
+  smoke_resolve_listen_port XHTTP_HTTP_PORT "live-xhttp-smoke"
+  export XHTTP_SERVER_PORT XHTTP_SOCKS_PORT XHTTP_HTTP_PORT
+}
+
 main() {
   require_command cargo
   require_command "${XHTTP_XRAY_BIN}"
   require_command curl
   require_command python3
   mkdir -p "${XHTTP_WORK_DIR}"
+  init_xhttp_ports
   : >"${XHTTP_REPORT_PATH}"
 
   build_rust_xray
+  if [[ ! -x "${XHTTP_RUST_XRAY_BIN}" ]]; then
+    echo "error: rust-xray binary missing or not executable: ${XHTTP_RUST_XRAY_BIN}" >&2
+    exit 1
+  fi
+  XHTTP_RUST_XRAY_BIN="$(cd "$(dirname "${XHTTP_RUST_XRAY_BIN}")" && pwd)/$(basename "${XHTTP_RUST_XRAY_BIN}")"
+  echo "rust-xray binary: ${XHTTP_RUST_XRAY_BIN}"
+  echo "rust-xray sha256: $(sha256_file "${XHTTP_RUST_XRAY_BIN}")"
 
   {
     echo "rust-xray live XHTTP smoke report"

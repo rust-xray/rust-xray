@@ -38,8 +38,9 @@ use crate::vless::encryption::{
     build_encryption_server_from_decryption, SharedVlessEncryptionServer,
 };
 use crate::vless::{
-    build_fallback_context, fallback_match_kind_label, looks_like_http_request,
-    resolve_fallback_selection, VlessClient, VlessDecryption, VlessUserManager,
+    build_fallback_context, fallback_match_kind_label, is_vless_closed_before_request,
+    looks_like_http_request, resolve_fallback_selection, VlessClient, VlessDecryption,
+    VlessUserManager,
 };
 
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
@@ -550,7 +551,14 @@ async fn handle_tls_client(
             )
             .await
             {
-                warn!(?peer, error = %err, "REALITY accepted path failed");
+                if is_vless_closed_before_request(&err) {
+                    debug!(
+                        ?peer,
+                        "REALITY accepted connection closed before VLESS request"
+                    );
+                } else {
+                    warn!(?peer, error = %err, "REALITY accepted path failed");
+                }
                 return Err(err);
             }
             Ok(())
@@ -732,7 +740,7 @@ fn merge_vless_users(
         }
     }
     let mut users: Vec<_> = merged.into_values().collect();
-    users.sort_by(|left, right| left.id.cmp(&right.id));
+    users.sort_by_key(|left| left.id);
     Ok(users)
 }
 
@@ -807,7 +815,7 @@ fn merged_normalized_reality_inbounds(
                     .users
                     .clone()
                     .into_iter()
-                    .chain(inbound.users.clone().into_iter()),
+                    .chain(inbound.users.clone()),
             )?;
         } else {
             let tags = vec![tag.clone()];
@@ -1261,7 +1269,7 @@ async fn run_server(opts: RunOptions) -> std::io::Result<()> {
             .map_err(|err| {
                 stage_error(
                     "failed to register startup inbound",
-                    std::io::Error::new(std::io::ErrorKind::Other, err.to_string()),
+                    std::io::Error::other(err.to_string()),
                 )
             })?;
 

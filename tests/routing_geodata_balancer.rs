@@ -1,5 +1,6 @@
 //! GeoData, webhook, and balancer routing E2E tests.
 
+#[allow(dead_code)]
 #[path = "routing_e2e_harness.rs"]
 mod harness;
 

@@ -204,6 +204,37 @@ fn cache_overflow_at_1023_1024_1025() {
 }
 
 #[test]
+fn expired_sessions_do_not_leave_an_unbounded_ticket_index() {
+    let start = Instant::now();
+    let mock = Arc::new(RwLock::new(MockCacheTime {
+        instant: start,
+        unix_secs: 1_700_000_000,
+    }));
+    let cache = SessionCache::new_with_mock_time(
+        TicketLifetimeRange {
+            min_secs: 1,
+            max_secs: 3600,
+        },
+        Arc::clone(&mock),
+    );
+
+    for i in 0..=MAX_STORED_SESSIONS {
+        let mut ticket = [0u8; 16];
+        ticket[..2].copy_from_slice(&(i as u16).to_be_bytes());
+        cache.insert(ticket, sample_pfs(), 1);
+        let mut clock = mock.write().expect("mock clock");
+        clock.instant += Duration::from_secs(2);
+        clock.unix_secs += 2;
+    }
+
+    assert!(cache.len() <= 1, "expired sessions must be pruned");
+    assert!(
+        cache.ticket_index_len() <= MAX_STORED_SESSIONS,
+        "ticket index must stay bounded after per-entry expiry"
+    );
+}
+
+#[test]
 fn disabled_lifetime_no_server_state() {
     let secret = server_secret_for_tests();
     let mut config = server_config_with_ticket_lifetime(&secret, 0, 0);

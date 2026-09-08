@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::io::{Error, ErrorKind};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -431,7 +432,7 @@ pub fn xtls_filter_tls(data: &[u8], state: &mut TrafficState) {
         if data.starts_with(&TLS_SERVER_HANDSHAKE_START)
             && data[5] == TLS_HANDSHAKE_TYPE_SERVER_HELLO
         {
-            state.remaining_server_hello = i32::from(data[3]) << 8 | i32::from(data[4]) + 5;
+            state.remaining_server_hello = (i32::from(data[3]) << 8) | (i32::from(data[4]) + 5);
             state.is_tls12_or_above = true;
             state.is_tls = true;
             if data.len() >= 79 && state.remaining_server_hello >= 79 {
@@ -635,9 +636,39 @@ pub struct VisionRelayWriter<W> {
     inner: W,
     traffic: SharedTrafficState,
     write_once_uuid: Option<[u8; 16]>,
-    pending_write: Vec<u8>,
+    pending_write: Bytes,
     pending_original_len: Option<usize>,
     direct_relay: Option<crate::reality::tls13::ApplicationStreamDirectRelay>,
+}
+
+fn poll_pending_vision_write<W>(
+    inner: &mut W,
+    cx: &mut Context<'_>,
+    pending_write: &mut Bytes,
+) -> Poll<std::io::Result<bool>>
+where
+    W: AsyncWrite + Unpin,
+{
+    let pending = pending_write.clone();
+    match Pin::new(inner).poll_write(cx, &pending) {
+        Poll::Ready(Ok(0)) => Poll::Ready(Err(Error::new(
+            ErrorKind::WriteZero,
+            "vision relay underlying write zero",
+        ))),
+        Poll::Ready(Ok(n)) if n == pending_write.len() => {
+            pending_write.clear();
+            Poll::Ready(Ok(true))
+        }
+        Poll::Ready(Ok(n)) => {
+            *pending_write = pending_write.slice(n..);
+            Poll::Ready(Ok(false))
+        }
+        Poll::Ready(Err(err)) => {
+            pending_write.clear();
+            Poll::Ready(Err(err))
+        }
+        Poll::Pending => Poll::Pending,
+    }
 }
 
 impl<W> VisionRelayWriter<W> {
@@ -651,7 +682,7 @@ impl<W> VisionRelayWriter<W> {
             inner,
             traffic,
             write_once_uuid: Some(user_uuid),
-            pending_write: Vec::new(),
+            pending_write: Bytes::new(),
             pending_original_len: None,
             direct_relay,
         }
@@ -688,28 +719,20 @@ where
                 .pending_original_len
                 .expect("pending original length while pending write buffer is non-empty");
 
-            let pending = self.pending_write.clone();
-            match Pin::new(&mut self.inner).poll_write(cx, &pending) {
-                Poll::Ready(Ok(0)) => {
-                    return Poll::Ready(Err(Error::new(
-                        ErrorKind::WriteZero,
-                        "vision relay underlying write zero",
-                    )));
+            let result = {
+                let this = self.as_mut().get_mut();
+                poll_pending_vision_write(&mut this.inner, cx, &mut this.pending_write)
+            };
+            match result {
+                Poll::Ready(Ok(true)) => {
+                    self.pending_original_len = None;
+                    return Poll::Ready(Ok(original_len));
                 }
-                Poll::Ready(Ok(n)) => {
-                    let _ = self.pending_write.drain(..n);
-                    if self.pending_write.is_empty() {
-                        self.pending_original_len = None;
-                        return Poll::Ready(Ok(original_len));
-                    }
-                    return Poll::Pending;
-                }
+                Poll::Ready(Ok(false)) | Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(err)) => {
-                    self.pending_write.clear();
                     self.pending_original_len = None;
                     return Poll::Ready(Err(err));
                 }
-                Poll::Pending => return Poll::Pending,
             }
         }
 
@@ -733,39 +756,60 @@ where
             padded
         };
 
-        self.pending_write = padded;
+        self.pending_write = Bytes::from(padded);
         self.pending_original_len = Some(buf.len());
 
         let original_len = self.pending_original_len.expect("pending original len");
-        let pending = self.pending_write.clone();
-        match Pin::new(&mut self.inner).poll_write(cx, &pending) {
-            Poll::Ready(Ok(0)) => Poll::Ready(Err(Error::new(
-                ErrorKind::WriteZero,
-                "vision relay underlying write zero",
-            ))),
-            Poll::Ready(Ok(n)) => {
-                let _ = self.pending_write.drain(..n);
-                if self.pending_write.is_empty() {
-                    self.pending_original_len = None;
-                    Poll::Ready(Ok(original_len))
-                } else {
-                    Poll::Pending
-                }
+        let result = {
+            let this = self.as_mut().get_mut();
+            poll_pending_vision_write(&mut this.inner, cx, &mut this.pending_write)
+        };
+        match result {
+            Poll::Ready(Ok(true)) => {
+                self.pending_original_len = None;
+                Poll::Ready(Ok(original_len))
             }
+            Poll::Ready(Ok(false)) | Poll::Pending => Poll::Pending,
             Poll::Ready(Err(err)) => {
-                self.pending_write.clear();
                 self.pending_original_len = None;
                 Poll::Ready(Err(err))
             }
-            Poll::Pending => Poll::Pending,
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if !self.pending_write.is_empty() {
+            let result = {
+                let this = self.as_mut().get_mut();
+                poll_pending_vision_write(&mut this.inner, cx, &mut this.pending_write)
+            };
+            match result {
+                Poll::Ready(Ok(true)) => self.pending_original_len = None,
+                Poll::Ready(Ok(false)) | Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(err)) => {
+                    self.pending_original_len = None;
+                    return Poll::Ready(Err(err));
+                }
+            }
+        }
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if !self.pending_write.is_empty() {
+            let result = {
+                let this = self.as_mut().get_mut();
+                poll_pending_vision_write(&mut this.inner, cx, &mut this.pending_write)
+            };
+            match result {
+                Poll::Ready(Ok(true)) => self.pending_original_len = None,
+                Poll::Ready(Ok(false)) | Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(err)) => {
+                    self.pending_original_len = None;
+                    return Poll::Ready(Err(err));
+                }
+            }
+        }
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
@@ -788,7 +832,7 @@ pub struct VisionRelayStream<S> {
     traffic: SharedTrafficState,
     write_once_uuid: Option<[u8; 16]>,
     pending_read: Vec<u8>,
-    pending_write: Vec<u8>,
+    pending_write: Bytes,
     pending_original_len: Option<usize>,
     direct_relay: Option<crate::reality::tls13::ApplicationStreamDirectRelay>,
 }
@@ -805,7 +849,7 @@ impl<S> VisionRelayStream<S> {
             traffic,
             write_once_uuid: Some(user_uuid),
             pending_read: Vec::new(),
-            pending_write: Vec::new(),
+            pending_write: Bytes::new(),
             pending_original_len: None,
             direct_relay,
         }
@@ -913,28 +957,20 @@ where
                 .pending_original_len
                 .expect("pending original length while pending write buffer is non-empty");
 
-            let pending = self.pending_write.clone();
-            match Pin::new(&mut self.inner).poll_write(cx, &pending) {
-                Poll::Ready(Ok(0)) => {
-                    return Poll::Ready(Err(Error::new(
-                        ErrorKind::WriteZero,
-                        "vision relay underlying write zero",
-                    )));
+            let result = {
+                let this = self.as_mut().get_mut();
+                poll_pending_vision_write(&mut this.inner, cx, &mut this.pending_write)
+            };
+            match result {
+                Poll::Ready(Ok(true)) => {
+                    self.pending_original_len = None;
+                    return Poll::Ready(Ok(original_len));
                 }
-                Poll::Ready(Ok(n)) => {
-                    let _ = self.pending_write.drain(..n);
-                    if self.pending_write.is_empty() {
-                        self.pending_original_len = None;
-                        return Poll::Ready(Ok(original_len));
-                    }
-                    return Poll::Pending;
-                }
+                Poll::Ready(Ok(false)) | Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(err)) => {
-                    self.pending_write.clear();
                     self.pending_original_len = None;
                     return Poll::Ready(Err(err));
                 }
-                Poll::Pending => return Poll::Pending,
             }
         }
 
@@ -958,39 +994,60 @@ where
             padded
         };
 
-        self.pending_write = padded;
+        self.pending_write = Bytes::from(padded);
         self.pending_original_len = Some(buf.len());
 
         let original_len = self.pending_original_len.expect("pending original len");
-        let pending = self.pending_write.clone();
-        match Pin::new(&mut self.inner).poll_write(cx, &pending) {
-            Poll::Ready(Ok(0)) => Poll::Ready(Err(Error::new(
-                ErrorKind::WriteZero,
-                "vision relay underlying write zero",
-            ))),
-            Poll::Ready(Ok(n)) => {
-                let _ = self.pending_write.drain(..n);
-                if self.pending_write.is_empty() {
-                    self.pending_original_len = None;
-                    Poll::Ready(Ok(original_len))
-                } else {
-                    Poll::Pending
-                }
+        let result = {
+            let this = self.as_mut().get_mut();
+            poll_pending_vision_write(&mut this.inner, cx, &mut this.pending_write)
+        };
+        match result {
+            Poll::Ready(Ok(true)) => {
+                self.pending_original_len = None;
+                Poll::Ready(Ok(original_len))
             }
+            Poll::Ready(Ok(false)) | Poll::Pending => Poll::Pending,
             Poll::Ready(Err(err)) => {
-                self.pending_write.clear();
                 self.pending_original_len = None;
                 Poll::Ready(Err(err))
             }
-            Poll::Pending => Poll::Pending,
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if !self.pending_write.is_empty() {
+            let result = {
+                let this = self.as_mut().get_mut();
+                poll_pending_vision_write(&mut this.inner, cx, &mut this.pending_write)
+            };
+            match result {
+                Poll::Ready(Ok(true)) => self.pending_original_len = None,
+                Poll::Ready(Ok(false)) | Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(err)) => {
+                    self.pending_original_len = None;
+                    return Poll::Ready(Err(err));
+                }
+            }
+        }
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if !self.pending_write.is_empty() {
+            let result = {
+                let this = self.as_mut().get_mut();
+                poll_pending_vision_write(&mut this.inner, cx, &mut this.pending_write)
+            };
+            match result {
+                Poll::Ready(Ok(true)) => self.pending_original_len = None,
+                Poll::Ready(Ok(false)) | Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(err)) => {
+                    self.pending_original_len = None;
+                    return Poll::Ready(Err(err));
+                }
+            }
+        }
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }

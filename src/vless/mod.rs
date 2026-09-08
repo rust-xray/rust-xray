@@ -37,8 +37,8 @@ pub use inbound::{
     handle_vless_tcp_inbound, handle_vless_tcp_inbound_with_auth_context,
     handle_vless_tcp_inbound_with_response_hook, handle_vless_tcp_inbound_with_socket_meta,
     handle_vless_tcp_inbound_with_socket_meta_and_response_hook, is_supported_vless_flow,
-    prepare_vless_tcp_response, read_vless_request, write_vless_response_header,
-    VlessInboundRequest,
+    is_vless_closed_before_request, is_vless_truncated_request_header, prepare_vless_tcp_response,
+    read_vless_request, write_vless_response_header, VlessInboundRequest, VlessRequestRead,
 };
 pub use policy::VlessInboundPolicy;
 pub use protocol::encode_vless_response_header;

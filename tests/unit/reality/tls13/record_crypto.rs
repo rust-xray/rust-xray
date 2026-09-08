@@ -139,7 +139,7 @@ fn encrypt_handshake_message_aes128_works() {
         records[0].content_type,
         TlsRecordContentType::ApplicationData
     );
-    assert!(records[0].payload.len() > suite.aead_tag_len());
+    assert!(records[0].payload().len() > suite.aead_tag_len());
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn encrypt_handshake_message_aes256_works() {
         records[0].content_type,
         TlsRecordContentType::ApplicationData
     );
-    assert!(records[0].payload.len() > suite.aead_tag_len());
+    assert!(records[0].payload().len() > suite.aead_tag_len());
 }
 
 fn chacha20_keys() -> Tls13TrafficKeys {
@@ -180,7 +180,7 @@ fn encrypt_handshake_message_chacha20_works() {
         records[0].content_type,
         TlsRecordContentType::ApplicationData
     );
-    assert!(records[0].payload.len() > suite.aead_tag_len());
+    assert!(records[0].payload().len() > suite.aead_tag_len());
 }
 
 #[test]
@@ -380,7 +380,6 @@ fn decrypt_application_data_rejects_non_application_record() {
     let record = crate::tls::TlsRecord {
         content_type: TlsRecordContentType::Handshake,
         legacy_version: TLS_LEGACY_VERSION_1_2,
-        payload: vec![0x01, 0x02, 0x03],
         raw: vec![
             TLS_RECORD_HANDSHAKE,
             0x03,

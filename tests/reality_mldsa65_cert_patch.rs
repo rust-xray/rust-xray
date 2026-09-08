@@ -57,7 +57,7 @@ fn is_placeholder_fixture(fixture: &Mldsa65VectorFixture) -> bool {
 }
 
 fn decode_hex(value: &str) -> std::io::Result<Vec<u8>> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "hex string must have even length",

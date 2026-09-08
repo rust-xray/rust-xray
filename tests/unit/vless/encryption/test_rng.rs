@@ -23,7 +23,7 @@ impl HandshakeRng for TestHandshakeRng {
     }
 
     fn gen_u32(&mut self) -> u32 {
-        self.inner.draw_between(0, i32::MAX) as u32
+        self.inner.draw_between(0, i32::MAX)
     }
 }
 

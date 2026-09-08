@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::mux::encoder::encode_mux_end;
@@ -21,31 +23,35 @@ const TCP_DOWNLINK_QUEUE: usize = 32;
 /// Downlink event from a mux TCP child reader task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TcpDownlinkEvent {
-    Data(Vec<u8>),
+    Data(Bytes),
     Eof,
 }
 
 struct MuxTcpEntry {
     writer: OwnedWriteHalf,
+    generation: u64,
+    reader_task: JoinHandle<()>,
 }
 
 /// Parallel mux TCP substreams keyed by mux session id.
 pub struct MuxTcpSubstreams {
     streams: HashMap<u16, MuxTcpEntry>,
-    downlink_tx: mpsc::Sender<(u16, TcpDownlinkEvent)>,
+    downlink_tx: mpsc::Sender<(u16, u64, TcpDownlinkEvent)>,
+    next_generation: u64,
 }
 
 impl MuxTcpSubstreams {
-    pub fn new(downlink_tx: mpsc::Sender<(u16, TcpDownlinkEvent)>) -> Self {
+    pub fn new(downlink_tx: mpsc::Sender<(u16, u64, TcpDownlinkEvent)>) -> Self {
         Self {
             streams: HashMap::new(),
             downlink_tx,
+            next_generation: 1,
         }
     }
 
     pub fn downlink_channel() -> (
-        mpsc::Sender<(u16, TcpDownlinkEvent)>,
-        mpsc::Receiver<(u16, TcpDownlinkEvent)>,
+        mpsc::Sender<(u16, u64, TcpDownlinkEvent)>,
+        mpsc::Receiver<(u16, u64, TcpDownlinkEvent)>,
     ) {
         mpsc::channel(TCP_DOWNLINK_QUEUE)
     }
@@ -56,26 +62,68 @@ impl MuxTcpSubstreams {
     }
 
     pub fn remove(&mut self, mux_id: u16) {
-        self.streams.remove(&mux_id);
+        if let Some(entry) = self.streams.remove(&mux_id) {
+            entry.reader_task.abort();
+        }
+    }
+
+    fn next_generation(&mut self) -> u64 {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        if self.next_generation == 0 {
+            self.next_generation = 1;
+        }
+        generation
+    }
+
+    pub fn is_current(&self, mux_id: u16, generation: u64) -> bool {
+        self.streams
+            .get(&mux_id)
+            .is_some_and(|entry| entry.generation == generation)
+    }
+
+    pub fn remove_if_current(&mut self, mux_id: u16, generation: u64) -> bool {
+        if !self.is_current(mux_id, generation) {
+            return false;
+        }
+        self.remove(mux_id);
+        true
+    }
+}
+
+impl Drop for MuxTcpSubstreams {
+    fn drop(&mut self) {
+        for entry in self.streams.values() {
+            entry.reader_task.abort();
+        }
     }
 }
 
 fn spawn_tcp_downlink_reader(
     mux_id: u16,
+    generation: u64,
     mut reader: OwnedReadHalf,
-    downlink_tx: mpsc::Sender<(u16, TcpDownlinkEvent)>,
-) {
+    downlink_tx: mpsc::Sender<(u16, u64, TcpDownlinkEvent)>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut buf = [0u8; 8192];
+        let mut buf = BytesMut::with_capacity(8192);
         loop {
-            match reader.read(&mut buf).await {
-                Ok(0) => {
-                    let _ = downlink_tx.send((mux_id, TcpDownlinkEvent::Eof)).await;
+            buf.clear();
+            match reader.read_buf(&mut buf).await {
+                Ok(0) if buf.is_empty() => {
+                    let _ = downlink_tx
+                        .send((mux_id, generation, TcpDownlinkEvent::Eof))
+                        .await;
                     break;
                 }
-                Ok(n) => {
+                Ok(0) => continue,
+                Ok(_) => {
                     if downlink_tx
-                        .send((mux_id, TcpDownlinkEvent::Data(buf[..n].to_vec())))
+                        .send((
+                            mux_id,
+                            generation,
+                            TcpDownlinkEvent::Data(buf.split().freeze()),
+                        ))
                         .await
                         .is_err()
                     {
@@ -85,7 +133,7 @@ fn spawn_tcp_downlink_reader(
                 Err(_) => break,
             }
         }
-    });
+    })
 }
 
 pub(crate) async fn handle_mux_tcp_command(
@@ -107,7 +155,7 @@ pub(crate) async fn handle_mux_tcp_command(
             }
             if active.streams.contains_key(&id) {
                 debug!(mux_id = id, "replacing existing mux tcp substream");
-                active.streams.remove(&id);
+                active.remove(id);
             }
             let destination_label = format_vless_destination(&destination.destination);
             debug!(
@@ -164,8 +212,17 @@ pub(crate) async fn handle_mux_tcp_command(
             if !initial_payload.is_empty() {
                 writer.write_all(&initial_payload).await?;
             }
-            spawn_tcp_downlink_reader(id, reader, active.downlink_tx.clone());
-            active.streams.insert(id, MuxTcpEntry { writer });
+            let generation = active.next_generation();
+            let reader_task =
+                spawn_tcp_downlink_reader(id, generation, reader, active.downlink_tx.clone());
+            active.streams.insert(
+                id,
+                MuxTcpEntry {
+                    writer,
+                    generation,
+                    reader_task,
+                },
+            );
             debug!(mux_id = id, destination = %destination_label, "mux substream opened");
         }
         MuxCommand::Data { payload } => {
@@ -186,6 +243,7 @@ pub(crate) async fn handle_mux_tcp_command(
                 entry.writer.write_all(&payload).await?;
             }
             let _ = entry.writer.shutdown().await;
+            entry.reader_task.abort();
             debug!(mux_id = id, "mux substream close");
         }
         MuxCommand::KeepAlive => {

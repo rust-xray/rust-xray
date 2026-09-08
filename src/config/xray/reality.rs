@@ -566,9 +566,7 @@ pub fn reality_inbound_runtimes(
     if inbounds.is_empty() {
         let vless_reality_inbounds = find_vless_reality_inbounds(config);
         if let Some(inbound) = vless_reality_inbounds.first() {
-            if let Err(err) = validate_vless_reality_inbound_stream(inbound) {
-                return Err(err);
-            }
+            validate_vless_reality_inbound_stream(inbound)?;
         }
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

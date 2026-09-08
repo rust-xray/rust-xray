@@ -5,6 +5,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# shellcheck source=scripts/live_reality_smoke/smoke-lib.sh
+source "${REPO_ROOT}/scripts/live_reality_smoke/smoke-lib.sh"
+
 SMOKE_SKIP_BUILD="${SMOKE_SKIP_BUILD:-0}"
 SMOKE_KEEP_TMP="${SMOKE_KEEP_TMP:-0}"
 SMOKE_VERBOSE="${SMOKE_VERBOSE:-0}"
@@ -14,12 +17,15 @@ XRAY_BIN="${XRAY_BIN:-xray}"
 SMOKE_ROOT_DIR="${SMOKE_ROOT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/rust-xray-live-smoke.XXXXXX")}"
 SUMMARY_JSON="${SMOKE_SUMMARY_JSON:-${SMOKE_ROOT_DIR}/summary.json}"
 SMOKE_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT:-}"
+SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT:-}"
 
 SUITE_NAMES=()
 SUITE_RESULTS=()
 SUITE_REASONS=()
 OWNED_CHILD_PID=""
 SMOKE_ENVIRONMENT_READY=1
+SMOKE_SUITE_FAIL=0
 
 sha256() {
   if command -v shasum >/dev/null 2>&1; then
@@ -51,7 +57,9 @@ stop_owned_child() {
 cleanup() {
   stop_owned_child
   if [[ "${SMOKE_KEEP_TMP}" == "1" || "${SMOKE_VERBOSE}" == "1" ]]; then
-    echo "live-smoke artifacts preserved: ${SMOKE_ROOT_DIR}"
+    echo "live-smoke artifacts preserved: ${SMOKE_ROOT_DIR} (SMOKE_KEEP_TMP=${SMOKE_KEEP_TMP}, SMOKE_VERBOSE=${SMOKE_VERBOSE})"
+  elif [[ "${SMOKE_SUITE_FAIL}" != "0" ]]; then
+    echo "live-smoke artifacts preserved after suite failure: ${SMOKE_ROOT_DIR}"
   else
     rm -rf "${SMOKE_ROOT_DIR}"
   fi
@@ -103,6 +111,8 @@ run_suite() {
   local log_path="${work_dir}/suite.log"
   mkdir -p "${work_dir}"
   echo "=== suite: ${name} ==="
+  echo "suite ${name} rust-xray: ${RUST_XRAY_BIN}"
+  echo "suite ${name} rust-xray sha256: $(sha256 "${RUST_XRAY_BIN}")"
   SMOKE_SKIP_BUILD=1 \
   SMOKE_TIMEOUT="${SMOKE_TIMEOUT}" \
   SMOKE_WORK_DIR="${work_dir}" \
@@ -110,6 +120,10 @@ run_suite() {
   RUST_XRAY_BIN="${RUST_XRAY_BIN}" \
   SMOKE_XRAY_BIN="${XRAY_BIN}" \
   XRAY_BIN="${XRAY_BIN}" \
+  SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT}" \
+  SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT}" \
+  XHTTP_SERVER_PORT="${SMOKE_SERVER_PORT}" \
+  XHTTP_SOCKS_PORT="${SMOKE_SOCKS_PORT}" \
   bash "${command_path}" >"${log_path}" 2>&1 &
   OWNED_CHILD_PID=$!
   local rc=0
@@ -130,6 +144,7 @@ run_suite() {
   else
     SUITE_RESULTS+=("FAIL")
     SUITE_REASONS+=("log=${log_path}")
+    SMOKE_SUITE_FAIL=1
     echo "=== FAIL: ${name}; last log lines ===" >&2
     tail -n 40 "${log_path}" >&2 || true
   fi
@@ -177,6 +192,7 @@ PY
     echo "FINAL STATUS: READY"
     return 0
   fi
+  SMOKE_SUITE_FAIL=1
   echo "FINAL STATUS: FAILED" >&2
   return 1
 }
@@ -188,6 +204,8 @@ main() {
     *) echo "usage: $0 [all|reality|udp|vless-encryption|xhttp]" >&2; exit 2 ;;
   esac
   mkdir -p "${SMOKE_ROOT_DIR}"
+  smoke_init_standard_ports "live-smoke-canonical"
+  export SMOKE_SERVER_PORT SMOKE_SOCKS_PORT
   build_once
   if [[ "${SMOKE_ENVIRONMENT_READY}" != "1" ]]; then
     local suite

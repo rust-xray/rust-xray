@@ -518,6 +518,7 @@ fn inspect_reality_client_hello_fallbacks_when_max_client_ver_fails() {
 /// - `RealityDecision::Fallback` → VLESS fallback relay (same as smoke bad shortId/SNI).
 /// - `inspect_reality_client_hello` I/O error → fallback relay with reason `REALITY inspect error`.
 /// - TLS record present but ClientHello parse error → fallback relay without inspect (reason `ClientHello parse error`).
+///
 /// Accepted REALITY clients never take the fallback relay path.
 #[test]
 fn client_hello_policy_matrix_fallback_vs_inspect_error() {

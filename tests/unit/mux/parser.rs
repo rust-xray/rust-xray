@@ -349,7 +349,7 @@ fn parse_mux_payload_bytes_survives_after_parent_extra_dropped() {
     let payload = {
         let mut extra = BytesMut::with_capacity(62);
         extra.extend_from_slice(&60u16.to_be_bytes());
-        extra.extend_from_slice(&vec![0xCD; 60]);
+        extra.extend_from_slice(&[0xCD; 60]);
         let frozen = extra.freeze();
         let frame = parse_mux_frame_from_bytes(&metadata, &frozen).expect("parse keep");
         payload_from_data_command(frame)
@@ -416,7 +416,7 @@ fn read_mux_frame_fragmented_across_reads() {
 #[test]
 fn read_mux_frame_first_payload_valid_while_parsing_second() {
     block_on(async {
-        let mut data = destinationless_keep_frame(&vec![1u8; 60]);
+        let mut data = destinationless_keep_frame(&[1u8; 60]);
         data.extend(destinationless_keep_frame(b"tail"));
         let mut reader = ChunkedReader {
             data,

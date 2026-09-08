@@ -58,8 +58,7 @@ pub async fn connect_tcp_destination_with_resolver(
         VlessDestination::Domain(domain, port) => {
             if strategy.uses_dns_engine() {
                 let resolver = resolver.ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    std::io::Error::other(
                         "DNS engine resolver required for UseIP/UseIPv4/UseIPv6 outbound strategy",
                     )
                 })?;

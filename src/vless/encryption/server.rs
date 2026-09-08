@@ -376,7 +376,7 @@ impl VlessEncryptionServer {
 
         let mut write_lens = padding_lens;
         if !write_lens.is_empty() {
-            write_lens[0] = PFS_SERVER_EXCHANGE_LEN + ENCRYPTED_TICKET_LEN + write_lens[0];
+            write_lens[0] += PFS_SERVER_EXCHANGE_LEN + ENCRYPTED_TICKET_LEN;
         }
 
         write_fragmented(&mut io, &server_hello, &write_lens, &padding_gaps).await?;

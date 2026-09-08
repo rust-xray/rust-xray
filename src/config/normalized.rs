@@ -31,6 +31,7 @@ pub struct NormalizedConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum NormalizedInbound {
     VlessReality(VlessRealityInbound),
     Api(ApiInbound),
@@ -182,10 +183,8 @@ pub fn normalize_config(config: &XrayConfig) -> std::io::Result<NormalizedConfig
 
 fn resolve_api_dokodemo_inbound_tag(config: &XrayConfig) -> Option<String> {
     let api = config.api.as_ref()?;
-    if let Some((_, _, tag)) = resolve_api_listen(config).ok().flatten() {
-        if let Some(tag) = tag {
-            return Some(tag);
-        }
+    if let Some((_, _, Some(tag))) = resolve_api_listen(config).ok().flatten() {
+        return Some(tag);
     }
     if api
         .listen

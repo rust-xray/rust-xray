@@ -52,7 +52,44 @@ pub struct VlessInboundRequest {
     pub initial_payload: Vec<u8>,
 }
 
-pub async fn read_vless_request<S>(stream: &mut S) -> std::io::Result<VlessInboundRequest>
+/// Outcome of an incremental VLESS request read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VlessRequestRead {
+    Request(VlessInboundRequest),
+    ClosedBeforeRequest,
+}
+
+pub(crate) const VLESS_CLOSED_BEFORE_REQUEST: &str = "connection closed before vless request";
+const VLESS_TRUNCATED_REQUEST_HEADER: &str = "stream closed before complete vless request header";
+
+pub fn vless_closed_before_request_error() -> std::io::Error {
+    std::io::Error::new(ErrorKind::UnexpectedEof, VLESS_CLOSED_BEFORE_REQUEST)
+}
+
+pub fn is_vless_closed_before_request(err: &std::io::Error) -> bool {
+    err.to_string().contains(VLESS_CLOSED_BEFORE_REQUEST)
+}
+
+pub fn is_vless_truncated_request_header(err: &std::io::Error) -> bool {
+    err.kind() == ErrorKind::UnexpectedEof
+        && err.to_string().contains(VLESS_TRUNCATED_REQUEST_HEADER)
+}
+
+fn vless_truncated_request_header_error() -> std::io::Error {
+    std::io::Error::new(ErrorKind::UnexpectedEof, VLESS_TRUNCATED_REQUEST_HEADER)
+}
+
+fn swallow_vless_closed_before_request<T>(
+    result: std::io::Result<T>,
+) -> std::io::Result<Option<T>> {
+    match result {
+        Err(err) if is_vless_closed_before_request(&err) => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(err) => Err(err),
+    }
+}
+
+pub async fn read_vless_request<S>(stream: &mut S) -> std::io::Result<VlessRequestRead>
 where
     S: AsyncRead + Unpin,
 {
@@ -62,7 +99,7 @@ where
 pub async fn read_vless_request_with_policy<S>(
     stream: &mut S,
     policy: VlessInboundPolicy,
-) -> std::io::Result<VlessInboundRequest>
+) -> std::io::Result<VlessRequestRead>
 where
     S: AsyncRead + Unpin,
 {
@@ -83,7 +120,7 @@ where
 pub(crate) async fn read_vless_request_with_limit<S>(
     stream: &mut S,
     max_header_size: usize,
-) -> std::io::Result<VlessInboundRequest>
+) -> std::io::Result<VlessRequestRead>
 where
     S: AsyncRead + Unpin,
 {
@@ -94,10 +131,10 @@ where
         match parse_vless_request(&buffer) {
             Ok((request, consumed)) => {
                 let initial_payload = buffer.split_off(consumed);
-                return Ok(VlessInboundRequest {
+                return Ok(VlessRequestRead::Request(VlessInboundRequest {
                     request,
                     initial_payload,
-                });
+                }));
             }
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
                 if buffer.len() >= max_header_size {
@@ -121,10 +158,10 @@ where
         let to_read = remaining.min(chunk.len());
         let n = stream.read(&mut chunk[..to_read]).await?;
         if n == 0 {
-            return Err(std::io::Error::new(
-                ErrorKind::UnexpectedEof,
-                "stream closed before complete vless request header",
-            ));
+            if buffer.is_empty() {
+                return Ok(VlessRequestRead::ClosedBeforeRequest);
+            }
+            return Err(vless_truncated_request_header_error());
         }
 
         buffer.extend_from_slice(&chunk[..n]);
@@ -406,11 +443,15 @@ where
     Fut: Future<Output = std::io::Result<()>>,
 {
     let inbound = match read_vless_request_with_policy(&mut stream, auth_ctx.vless_policy()).await {
+        Ok(VlessRequestRead::ClosedBeforeRequest) => {
+            return Err(vless_closed_before_request_error());
+        }
+        Ok(VlessRequestRead::Request(inbound)) => inbound,
         Err(err) if useless_record_overflow_limit(&err).is_some() => {
             let _ = stream.send_useless_overflow_fatal_alert().await;
             return Err(stage_error(RealityAcceptedStage::Vless, err));
         }
-        other => other.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?,
+        Err(err) => return Err(stage_error(RealityAcceptedStage::Vless, err)),
     };
 
     prepare_vless_relay_from_inbound(
@@ -489,9 +530,13 @@ where
 {
     let mut stream = stream;
     let policy = auth_ctx.map(|ctx| ctx.vless_policy()).unwrap_or_default();
-    let inbound = read_vless_request_with_policy(&mut stream, policy)
-        .await
-        .map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?;
+    let inbound = match read_vless_request_with_policy(&mut stream, policy).await {
+        Ok(VlessRequestRead::ClosedBeforeRequest) => {
+            return Err(vless_closed_before_request_error());
+        }
+        Ok(VlessRequestRead::Request(inbound)) => inbound,
+        Err(err) => return Err(stage_error(RealityAcceptedStage::Vless, err)),
+    };
 
     prepare_vless_relay_from_inbound(
         stream,
@@ -1141,7 +1186,7 @@ pub async fn handle_vless_tcp_inbound_with_auth_context<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (prepared, stats) = prepare_vless_relay_with_hook_and_router(
+    let prepared_result = prepare_vless_relay_with_hook_and_router(
         stream,
         Some(auth_ctx),
         None,
@@ -1150,7 +1195,10 @@ where
         router,
         || async { Ok(()) },
     )
-    .await?;
+    .await;
+    let Some((prepared, stats)) = swallow_vless_closed_before_request(prepared_result)? else {
+        return Ok(());
+    };
 
     let prepared = match prepared {
         VlessRelayPrepared::Blackhole => return Ok(()),
@@ -1230,8 +1278,12 @@ pub async fn handle_vless_tcp_inbound_with_socket_meta<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (prepared, stats) =
-        prepare_vless_relay_with_router(stream, users, stats_state, socket_meta, router).await?;
+    let prepared_result = swallow_vless_closed_before_request(
+        prepare_vless_relay_with_router(stream, users, stats_state, socket_meta, router).await,
+    )?;
+    let Some((prepared, stats)) = prepared_result else {
+        return Ok(());
+    };
 
     let prepared = match prepared {
         VlessRelayPrepared::Blackhole => return Ok(()),
@@ -1337,7 +1389,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<()>>,
 {
-    let (prepared, stats) = prepare_vless_relay_with_hook(
+    let prepared_result = prepare_vless_relay_with_hook(
         stream,
         users,
         stats_state,
@@ -1345,7 +1397,10 @@ where
         router,
         on_ready_to_respond,
     )
-    .await?;
+    .await;
+    let Some((prepared, stats)) = swallow_vless_closed_before_request(prepared_result)? else {
+        return Ok(());
+    };
 
     let prepared = match prepared {
         VlessRelayPrepared::Blackhole => return Ok(()),
@@ -1426,11 +1481,15 @@ where
     let mut stream = stream;
     let inbound =
         match read_vless_request_with_policy(&mut stream, VlessInboundPolicy::default()).await {
+            Ok(VlessRequestRead::ClosedBeforeRequest) => {
+                return Err(vless_closed_before_request_error());
+            }
+            Ok(VlessRequestRead::Request(inbound)) => inbound,
             Err(err) if useless_record_overflow_limit(&err).is_some() => {
                 let _ = stream.send_useless_overflow_fatal_alert().await;
                 return Err(stage_error(RealityAcceptedStage::Vless, err));
             }
-            other => other.map_err(|err| stage_error(RealityAcceptedStage::Vless, err))?,
+            Err(err) => return Err(stage_error(RealityAcceptedStage::Vless, err)),
         };
     prepare_vless_relay_from_inbound(
         stream,
@@ -1477,22 +1536,34 @@ pub async fn handle_reality_vless_tcp_inbound_traced<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (prepared, stats) = if let Some(auth_ctx) = auth_ctx {
-        prepare_reality_vless_relay(stream, auth_ctx, socket_meta, router).await?
+    let prepared_result = if let Some(auth_ctx) = auth_ctx {
+        swallow_vless_closed_before_request(
+            prepare_reality_vless_relay(stream, auth_ctx, socket_meta, router).await,
+        )?
     } else {
-        prepare_reality_vless_relay_legacy(
-            stream,
-            users.ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "vless auth source missing",
-                )
-            })?,
-            stats_state,
-            socket_meta,
-            router,
-        )
-        .await?
+        swallow_vless_closed_before_request(
+            prepare_reality_vless_relay_legacy(
+                stream,
+                users.ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "vless auth source missing",
+                    )
+                })?,
+                stats_state,
+                socket_meta,
+                router,
+            )
+            .await,
+        )?
+    };
+    let Some((prepared, stats)) = prepared_result else {
+        debug!(
+            conn_id = mux_trace.map(|trace| trace.conn_id),
+            stage = stages::VLESS_START,
+            "REALITY accepted connection closed before VLESS request"
+        );
+        return Ok(());
     };
 
     let prepared = match prepared {
