@@ -237,6 +237,7 @@ pub struct VlessClientObject {
 pub struct StreamSettingsObject {
     pub network: Option<String>,
     pub security: Option<String>,
+    pub sockopt: Option<SocketOptionsObject>,
     #[serde(rename = "realitySettings")]
     pub reality_settings: Option<RealitySettingsObject>,
     #[serde(rename = "xhttpSettings")]
@@ -246,6 +247,27 @@ pub struct StreamSettingsObject {
 
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// Serde-compatible subset of Xray's `streamSettings.sockopt` object.
+///
+/// TFO is kept typed even while it is unsupported by this no-unsafe build so enabled
+/// configurations can emit an explicit warning instead of being silently ignored.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SocketOptionsObject {
+    #[serde(rename = "tcpFastOpen")]
+    pub tcp_fast_open: Option<TcpFastOpenValue>,
+
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Xray accepts a Boolean or JSON number for `tcpFastOpen`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum TcpFastOpenValue {
+    Boolean(bool),
+    Number(f64),
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]

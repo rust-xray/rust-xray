@@ -1,4 +1,4 @@
-//! ML-KEM-768 server-side encapsulation primitive (Stage 3).
+//! ML-KEM-768 server-side encapsulation primitive (hybrid-key-exchange work).
 //!
 //! Used by `reality/tls13/key_share.rs` hybrid KEX generation.
 

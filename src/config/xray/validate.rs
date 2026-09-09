@@ -1,6 +1,8 @@
 use tracing::warn;
 
-use super::raw::{InboundObject, InboundPortValue, RealitySettingsObject, StreamSettingsObject};
+use super::raw::{
+    InboundObject, InboundPortValue, RealitySettingsObject, StreamSettingsObject, TcpFastOpenValue,
+};
 use super::transport::{validate_reality_transport_network, TransportNetwork};
 use crate::reality::parse_reality_client_version;
 use crate::vless::encryption::VlessDecryption;
@@ -51,7 +53,6 @@ const REALITY_CLIENT_ONLY_INBOUND_FIELDS: &[&str] = &[
 
 /// `streamSettings` sub-objects that are not implemented for REALITY inbound (misconfiguration risk).
 ///
-/// `sockopt` is intentionally allowed so Xray-compatible smoke fixtures keep validating.
 const REALITY_UNSUPPORTED_STREAM_SUBOBJECTS: &[&str] = &[
     "tlsSettings",
     "rawSettings",
@@ -89,6 +90,8 @@ pub fn validate_reality_inbound_config_policy(
         }
     }
 
+    validate_tcp_fast_open(stream)?;
+
     match TransportNetwork::parse(stream.network.as_deref())? {
         TransportNetwork::RawTcp => {
             if stream.xhttp_settings.is_some() || stream.splithttp_settings.is_some() {
@@ -111,6 +114,28 @@ pub fn validate_reality_inbound_config_policy(
 
     validate_reality_client_version_settings(settings)?;
 
+    Ok(())
+}
+
+fn validate_tcp_fast_open(stream: &StreamSettingsObject) -> std::io::Result<()> {
+    let Some(value) = stream
+        .sockopt
+        .as_ref()
+        .and_then(|sockopt| sockopt.tcp_fast_open.as_ref())
+    else {
+        return Ok(());
+    };
+
+    let enabled = match value {
+        TcpFastOpenValue::Boolean(value) => *value,
+        TcpFastOpenValue::Number(value) => *value > 0.0,
+    };
+    if enabled {
+        warn!(
+            tcp_fast_open = ?value,
+            "streamSettings.sockopt.tcpFastOpen is unsupported by this no-unsafe build; using normal TCP"
+        );
+    }
     Ok(())
 }
 

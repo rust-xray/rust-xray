@@ -21,7 +21,7 @@ const TLS13_CERTIFICATE_VERIFY_CONTEXT: &[u8] = b"TLS 1.3, server CertificateVer
 
 /// Ephemeral Ed25519 certificate material for the REALITY accepted TLS 1.3 path.
 ///
-/// REALITY-specific DER patching lives in [`crate::reality::certificate`] and is not applied
+/// REALITY-specific DER patching lives in the private `reality::certificate` module and is not applied
 /// here until the exact signature offset is ported from upstream XTLS/REALITY.
 /// TODO: mldsa65 extra signature is not implemented yet.
 /// TODO: This certificate builder is a protocol scaffold, not final REALITY-compatible

@@ -570,7 +570,7 @@ fn client_finished_read_error(kind: ErrorKind, message: impl Into<String>) -> Er
     )
 }
 
-/// Error from [`read_client_finished_tls_record_from_stream`].
+/// Error from the internal `read_client_finished_tls_record_from_stream` helper.
 #[derive(Debug)]
 pub enum ClientFinishedReadError {
     Io(Error),
@@ -1317,6 +1317,9 @@ where
     ) -> Poll<io::Result<usize>> {
         let this = self.as_mut().get_mut();
         if this.direct_relay.load(Ordering::SeqCst) {
+            // DIRECT writes are raw socket bytes. A TLS record already accepted from a
+            // caller must drain first, or a partial encrypted record can be overtaken
+            // on the wire by raw application data.
             if !this.write.ciphertext_write_buf.is_empty() {
                 let pending = this
                     .write

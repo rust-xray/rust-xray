@@ -287,6 +287,7 @@ fn stream_settings_from_proto(
         return Ok(StreamSettingsObject {
             network: Some(network),
             security: None,
+            sockopt: None,
             reality_settings: None,
             xhttp_settings,
             splithttp_settings: None,
@@ -329,6 +330,7 @@ fn stream_settings_from_proto(
     Ok(StreamSettingsObject {
         network: Some(network),
         security: Some("reality".to_string()),
+        sockopt: None,
         reality_settings: Some(reality_settings_from_proto(&reality)?),
         xhttp_settings,
         splithttp_settings: None,

@@ -1,4 +1,4 @@
-//! TLS record framing and alert observation for REALITY dest probes (Stage 5B/5C).
+//! TLS record framing and alert observation for REALITY dest probes (post-handshake camouflage emission/5C).
 //!
 //! Outgoing: incremental record assembly so a single `write_tls` chunk may contain
 //! multiple records (e.g. rustls coalesces compatibility CCS + encrypted Finished).

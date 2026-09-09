@@ -1,4 +1,4 @@
-//! Standard and Burst Xray Observatory runtimes (Stage 8E4).
+//! Standard and Burst Xray Observatory runtimes (Observatory runtime).
 
 mod active;
 mod burst;

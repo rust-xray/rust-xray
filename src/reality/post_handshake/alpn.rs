@@ -34,7 +34,7 @@ impl RealityAlpnProfile {
         }
     }
 
-    /// Wire names for probe TLS client configuration (Stage 5B+ probing).
+    /// Wire names for probe TLS client configuration (post-handshake camouflage emission+ probing).
     pub fn probe_next_protocols(self) -> Option<Vec<&'static str>> {
         match self {
             Self::None => None,

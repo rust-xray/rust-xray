@@ -1,6 +1,6 @@
 //! rustls TLS 1.3 client configuration for proactive REALITY post-handshake probes.
 //!
-//! Uses the project's existing rustls stack (audit Stage 5B). ClientHello fingerprint parity
+//! Uses the project's existing rustls stack (audit post-handshake camouflage emission). ClientHello fingerprint parity
 //! with upstream uTLS (`HelloGolang` / `HelloChrome`) is **partial** — rustls emits its own
 //! default ClientHello; this stage targets post-handshake record-length detection only.
 

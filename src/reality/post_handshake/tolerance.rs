@@ -1,4 +1,4 @@
-//! Target useless-record tolerance model (Stage 5C).
+//! Target useless-record tolerance model (extra-CCS tolerance probing).
 
 /// How many consecutive non-advancing TLS records a REALITY dest tolerates.
 ///

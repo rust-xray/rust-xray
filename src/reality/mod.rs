@@ -1,3 +1,9 @@
+//! REALITY admission and the accepted TLS 1.3 application path.
+//!
+//! The pre-auth branch can relay ordinary traffic to the configured target; after
+//! admission succeeds, every TLS and VLESS failure closes the connection. See
+//! `docs/development/reality.md` for the state and sequence ownership rules.
+
 mod auth;
 mod certificate;
 mod decision;

@@ -45,10 +45,10 @@ Rough sequence:
 9. **Read client Finished** — `readClientFinished`; validate client handshake
    completion. Permitted non-advancing records (compatibility CCS, warning alerts,
    empty ApplicationData) are ignored up to a **target-probed tolerance**
-   (Stage 5C; default `Finite(32)`).
-10. **Emit post-handshake camouflage records (Stage 5B)** — after verified client
+   (extra-CCS tolerance probing; default `Finite(32)`).
+10. **Emit post-handshake camouflage records (post-handshake camouflage emission)** — after verified client
     Finished, emit cached dummy TLS ApplicationData records observed from proactive
-    `dest` probes (separate from optional Stage 5A position-6 record).
+    `dest` probes (separate from optional position-6 camouflage position-6 record).
 11. **Hand off `Conn`** — application-data read/write (decrypted stream) goes to
     the upper protocol layer (VLESS, Vision, etc.).
 
@@ -71,17 +71,17 @@ When comparing with upstream Go/XTLS REALITY server handshake code:
 | TLS record framing + encryption | `src/tls/records.rs`, `tls13/record_crypto.rs` | **Working** |
 | Dest observation → state setup | `fetch_dest_handshake`, `prepare_reality_tls13_state` (`handshake.rs`) | **Working** |
 | Application stream handoff | `RealityTls13ApplicationStream` → `run_inbound_transport` | **Working** |
-| Post-handshake probe cache + emission (Stage 5B) | `post_handshake/`, `post_handshake_probe.rs` | **Working** |
-| Extra-CCS tolerance probe cache + runtime policy (Stage 5C) | `post_handshake/ccs_*`, `tls13/useless_records.rs` | **Working** |
-| Position-6 camouflage record (Stage 5A) | `build_position6_camouflage_record` | **Working** |
+| Post-handshake probe cache + emission (post-handshake camouflage emission) | `post_handshake/`, `post_handshake_probe.rs` | **Working** |
+| Extra-CCS tolerance probe cache + runtime policy (extra-CCS tolerance probing) | `post_handshake/ccs_*`, `tls13/useless_records.rs` | **Working** |
+| Position-6 camouflage record (position-6 camouflage) | `build_position6_camouflage_record` | **Working** |
 
-## Stage 5: post-handshake record mirroring
+## Post-handshake record mirroring
 
 Upstream REALITY mirrors target post-handshake TLS record **lengths** so the
 accepted server flight looks like the real destination. rust-xray splits this
 into two independent mechanisms:
 
-### Stage 5A — position-6 record (target initial server-flight shape)
+### position-6 camouflage — position-6 record (target initial server-flight shape)
 
 - Observed from dest ServerHello flight as `next_encrypted_record_wire_len`
 - Emitted **immediately after server Finished** inside
@@ -91,7 +91,7 @@ into two independent mechanisms:
 - **Does not** update handshake transcript after server Finished plaintext is
   already committed
 
-### Stage 5B — cached post-handshake records (proactive detector)
+### post-handshake camouflage emission — cached post-handshake records (proactive detector)
 
 - Background probes at startup: **`dest × serverName × 3 ALPN profiles`**
   - `None` — ClientHello without ALPN
@@ -104,16 +104,16 @@ into two independent mechanisms:
 - Cache key: `PostHandshakeProbeKey { dest_addr, server_name, alpn_profile }`
 - Runtime: after **verified client Finished**, bounded wait (5s) on cache;
   timeout → emit nothing (not a handshake failure)
-- Emission uses the same padded empty ApplicationData encryptor API as Stage 5A
+- Emission uses the same padded empty ApplicationData encryptor API as position-6 camouflage
 - Continues the **current** server application write sequence (seq 0 if no
   position-6, seq 1 if position-6 was sent)
 - **Does not** update transcript or re-derive application secrets
 
-### Stage 5C — extra-CCS tolerance probing + dynamic ignored-record limit
+### extra-CCS tolerance probing — extra-CCS tolerance probing + dynamic ignored-record limit
 
 **Supported (runtime):**
 
-- Background probes at startup share the **same cache key** as Stage 5B:
+- Background probes at startup share the **same cache key** as post-handshake camouflage emission:
   `PostHandshakeProbeKey { dest_addr, server_name, alpn_profile }` via
   `post_handshake_probe_key()` / `RealityAlpnProfile::classify_client_hello()`.
 - **One TCP connection per probe.** On the first outgoing rustls compatibility
@@ -134,10 +134,10 @@ into two independent mechanisms:
   increment a counter; `counter > effective_limit` closes the TLS connection
   (**no fallback** after REALITY accept). On overflow the server emits one
   encrypted TLS 1.3 fatal `unexpected_message` alert (best-effort) before
-  returning `too many ignored records` (Stage 7). Malformed CCS is an immediate
+  returning `too many ignored records` (overflow-alert handling). Malformed CCS is an immediate
   error and does not consume tolerance budget. The same tolerance applies to outer
   useless records on the post-handshake application stream reader.
-- **Stage 7 alert routing (Rust vs upstream):** upstream keeps reader/writer on one
+- **overflow-alert handling alert routing (Rust vs upstream):** upstream keeps reader/writer on one
   TLS connection object; rust-xray splits the accepted socket for bidirectional relay.
   Useless-record overflow is detected on the reader; one encrypted fatal
   `unexpected_message` is emitted through the sole writer half before the terminal
@@ -151,7 +151,7 @@ into two independent mechanisms:
   framing (`OutgoingTlsRecordBuffer`, `InboundAlertObserver`) — no bare
   `buf[0] == 0x15` scans.
 
-**Not yet (Stage 5C extras):**
+**Not yet (extra-CCS tolerance probing extras):**
 
 - `GlobalMaxCSSMsgCount` useless-record probing
 - Alert-driven probe completion paths beyond the cumulative CCS tier probe
@@ -164,7 +164,7 @@ stack with profile-appropriate ALPN only. Post-handshake **record-length** and
 **extra-CCS tolerance** detection are supported; ClientHello fingerprint is not
 matched to uTLS. Do **not** claim full camouflage parity.
 
-### Not yet (Stage 5D+)
+### Not yet (future post-handshake work)
 
 - Real TLS session resumption on the accepted path
 
@@ -199,9 +199,9 @@ Live matrix remains `scripts/live_reality_smoke/run-live-smoke.sh` unchanged.
 | TLS 1.3 cipher suite model | `src/reality/tls13/cipher_suite.rs` | Done |
 | Handshake message builders | `src/reality/tls13/messages.rs`, `certificate.rs` | Done on accepted path |
 | TLS 1.3 handshake driver | `complete_reality_tls13_handshake` | Done (live smoke) |
-| Post-handshake probe cache + Stage 5B emission | `src/reality/post_handshake/`, `post_handshake_probe.rs` | Done (unit + integration tests) |
-| CCS tolerance probe cache + Stage 5C runtime policy | `src/reality/post_handshake/ccs_*`, `tls13/useless_records.rs` | Done (unit + mock-target integration tests) |
-| Position-6 Stage 5A camouflage record | `RealityTls13ServerState::build_position6_camouflage_record` | Done |
+| Post-handshake probe cache + post-handshake camouflage emission emission | `src/reality/post_handshake/`, `post_handshake_probe.rs` | Done (unit + integration tests) |
+| CCS tolerance probe cache + extra-CCS tolerance probing runtime policy | `src/reality/post_handshake/ccs_*`, `tls13/useless_records.rs` | Done (unit + mock-target integration tests) |
+| Position-6 position-6 camouflage camouflage record | `RealityTls13ServerState::build_position6_camouflage_record` | Done |
 | Accepted entry | `handle_accepted_reality_client` in `server.rs` | Done |
 | VLESS + transport handoff | `run_inbound_transport` after TLS app stream | Done |
 | VLESS config users | `build_vless_clients`, `VlessClientObject` | Done |
@@ -354,7 +354,7 @@ Use this as a checklist. Items are ordered roughly by dependency.
 ```
 src/reality/decision.rs   — inspect_reality_client_hello → Accepted | Fallback
 src/reality/server.rs     — handle_accepted_reality_client (observation + full handshake)
-src/reality/post_handshake/   — ALPN profiles, probe cache, rustls probe, raw parser, Stage 5B emission
+src/reality/post_handshake/   — ALPN profiles, probe cache, rustls probe, raw parser, post-handshake camouflage emission emission
 src/reality/post_handshake_probe.rs — startup scheduling (`dest × SNI × ALPN`)
 src/reality/dest_dial.rs      — shared TCP/Unix dest dial + PROXY v1/v2
 src/reality/handshake.rs  — fetch_dest_handshake, extract_observed_server_hello, prepare_reality_tls13_state

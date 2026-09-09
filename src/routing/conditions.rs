@@ -18,7 +18,8 @@ impl<'a> RouteMatchState<'a> {
     }
 
     /// Returns the lowercase target domain, computing and caching it on first use.
-    /// Original `ctx.target_domain` is preserved for outbound/SNI semantics.
+    /// Original `ctx.target_domain` is preserved for outbound/SNI semantics; this
+    /// cache lasts only for the current route decision and is not DNS-derived state.
     pub fn normalized_target_domain(&mut self) -> &str {
         if self.ctx.match_domain_lower.is_none() && !self.ctx.target_domain.is_empty() {
             self.ctx.match_domain_lower = Some(self.ctx.target_domain.to_ascii_lowercase());

@@ -9,7 +9,7 @@ use crate::dns::DnsEngine;
 use crate::mux::encoder::encode_mux_end;
 use crate::mux::frame::{is_xudp_global_id, MuxCommand, MuxFrame, MuxSessionTrace, MuxStatus};
 use crate::mux::packet_udp::MuxUdpSessionManager;
-use crate::mux::parser::read_mux_frame;
+use crate::mux::parser::MuxFrameReader;
 use crate::mux::route_env::MuxRouteEnv;
 use crate::mux::state::{
     mux_actions, mux_response_channel, write_mux_out_frames, MuxFrameActions, MuxOutTx,
@@ -77,11 +77,12 @@ where
     let (udp_tx, mut udp_rx) = mux_response_channel();
     let xudp_sessions = Arc::new(XudpMuxSessions::new());
     let packet_sessions = Arc::new(MuxUdpSessionManager::new());
+    let mut frame_reader = MuxFrameReader::default();
 
     let relay_result = async {
         loop {
             tokio::select! {
-                frame = read_mux_frame(&mut stream) => {
+                frame = frame_reader.read_frame(&mut stream) => {
                     match frame {
                         Ok(frame) => {
                             debug!(

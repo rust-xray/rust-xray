@@ -1,4 +1,4 @@
-//! Cache for proactive REALITY extra-CCS tolerance probes (Stage 5C).
+//! Cache for proactive REALITY extra-CCS tolerance probes (extra-CCS tolerance probing).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};

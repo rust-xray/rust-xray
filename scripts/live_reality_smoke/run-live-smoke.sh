@@ -1058,6 +1058,9 @@ run_smoke_case() {
     vision-parallel-50)
       run_phase "vision 50 parallel requests" phase_vision_parallel_50
       ;;
+    regression-download-10mb)
+      run_phase "regression 10MB download" phase_regression_10mb_download
+      ;;
     *)
       echo "error: unknown SMOKE_CASE=${SMOKE_CASE}" >&2
       return 2

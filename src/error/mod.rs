@@ -84,9 +84,7 @@ pub enum Error {
     /// or too large.
     BadMaxFragmentSize,
 
-    /// Specific failure cases from [`keys_match`].
-    ///
-    /// [`keys_match`]: crate::crypto::signer::CertifiedKey::keys_match
+    /// Specific failure cases from the certificate/key `keys_match` check.
     InconsistentKeys,
 
     /// Any other error.

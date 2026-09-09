@@ -19,6 +19,7 @@ status is in [compatibility-status.md](compatibility-status.md).
 | XHTTP | Experimental supported modes only; see compatibility matrix |
 | REALITY gRPC/WebSocket | Explicit startup rejection |
 | `realitySettings` | Current server policy, min/max versions, short IDs, fallback limits, and `mldsa65Seed` are normalized and consumed |
+| `streamSettings.sockopt.tcpFastOpen` | Boolean and numeric forms parse with Xray-compatible values; this no-unsafe build logs an explicit warning and uses normal TCP because it has no safe API for the required socket option |
 
 Configuration that uses a VLESS Encryption key must follow the parser grammar;
 the valid smoke fixtures under `scripts/live_vless_encryption_smoke/` are the

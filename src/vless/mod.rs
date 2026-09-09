@@ -1,3 +1,8 @@
+//! VLESS inbound parsing, authentication, relay modes, and optional encryption.
+//!
+//! Protocol and lifecycle notes live in `docs/development/vless.md` and
+//! `docs/development/vless-encryption.md`.
+
 pub mod config;
 pub mod encryption;
 pub mod fallback;

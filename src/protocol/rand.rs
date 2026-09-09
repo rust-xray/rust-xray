@@ -14,7 +14,7 @@ pub trait SecureRandom: Send + Sync {
     ///
     /// This is used for all randomness required by rustls, but not necessarily
     /// randomness required by the underlying cryptography library.  For example:
-    /// [`SupportedKxGroup::start()`] requires random material to generate
+    /// `SupportedKxGroup::start()` requires random material to generate
     /// an ephemeral key exchange key, but this is not included in the interface with
     /// rustls: it is assumed that the cryptography library provides for this itself.
     fn fill(&self, buf: &mut [u8]) -> Result<(), GetRandomFailed>;

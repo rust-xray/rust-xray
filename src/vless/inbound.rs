@@ -53,6 +53,10 @@ pub struct VlessInboundRequest {
 }
 
 /// Outcome of an incremental VLESS request read.
+///
+/// A clean EOF before any request byte is normal peer shutdown. Once a byte has
+/// been observed, EOF before a complete header is wire truncation and remains an
+/// error so callers cannot authenticate or route a partial request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VlessRequestRead {
     Request(VlessInboundRequest),
@@ -158,6 +162,8 @@ where
         let to_read = remaining.min(chunk.len());
         let n = stream.read(&mut chunk[..to_read]).await?;
         if n == 0 {
+            // EOF has no single VLESS meaning: distinguish a peer that never sent
+            // a request from a peer that cut a request header short.
             if buffer.is_empty() {
                 return Ok(VlessRequestRead::ClosedBeforeRequest);
             }

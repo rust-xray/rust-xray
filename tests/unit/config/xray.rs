@@ -490,10 +490,9 @@ fn parse_preserves_unknown_fields_in_extra() {
     assert!(config.inbounds[0].extra.contains_key("sniffing"));
 
     let stream = config.inbounds[0].stream_settings.as_ref().unwrap();
-    assert!(stream.extra.contains_key("sockopt"));
     assert_eq!(
-        stream.extra["sockopt"]["tcpFastOpen"],
-        serde_json::json!(true)
+        stream.sockopt.as_ref().unwrap().tcp_fast_open,
+        Some(TcpFastOpenValue::Boolean(true))
     );
 }
 
@@ -545,8 +544,9 @@ fn parses_realistic_xray_vless_tcp_reality_server_config() {
         .stream_settings
         .as_ref()
         .unwrap()
-        .extra
-        .contains_key("sockopt"));
+        .sockopt
+        .as_ref()
+        .is_some());
 }
 
 #[test]
@@ -728,6 +728,7 @@ fn validate_reality_stream_settings_skips_non_reality_security() {
     let stream = StreamSettingsObject {
         network: Some("ws".to_string()),
         security: Some("tls".to_string()),
+        sockopt: None,
         reality_settings: None,
         xhttp_settings: None,
         splithttp_settings: None,
@@ -742,6 +743,7 @@ fn validate_reality_stream_settings_accepts_xhttp_with_reality_security() {
     let stream = StreamSettingsObject {
         network: Some("xhttp".to_string()),
         security: Some("reality".to_string()),
+        sockopt: None,
         reality_settings: None,
         xhttp_settings: Some(XHttpSettings {
             path: "/xhttp".to_string(),
@@ -761,6 +763,7 @@ fn validate_reality_stream_settings_accepts_unimplemented_xhttp_modes() {
         let stream = StreamSettingsObject {
             network: Some("xhttp".to_string()),
             security: Some("reality".to_string()),
+            sockopt: None,
             reality_settings: None,
             xhttp_settings: Some(XHttpSettings {
                 path: "/xhttp".to_string(),
@@ -781,6 +784,7 @@ fn validate_reality_stream_settings_accepts_raw_with_reality_security() {
     let stream = StreamSettingsObject {
         network: Some("raw".to_string()),
         security: Some("reality".to_string()),
+        sockopt: None,
         reality_settings: None,
         xhttp_settings: None,
         splithttp_settings: None,
@@ -1699,7 +1703,7 @@ fn rejects_stream_settings_ws_settings_on_reality_inbound() {
 }
 
 #[test]
-fn sockopt_in_stream_settings_extra_remains_valid() {
+fn enabled_tcp_fast_open_is_typed_and_uses_normal_tcp_without_safe_socket_support() {
     let config = vless_reality_config_from_stream_settings(serde_json::json!({
         "network": "tcp",
         "security": "reality",
@@ -1713,8 +1717,30 @@ fn sockopt_in_stream_settings_extra_remains_valid() {
             "tcpFastOpen": true
         }
     }));
-    let runtime = first_reality_inbound_runtime(&config).expect("sockopt allowed");
+    let runtime = first_reality_inbound_runtime(&config).expect("normal TCP fallback");
     assert_eq!(runtime.dest_addr, "example.com:443");
+}
+
+#[test]
+fn disabled_tcp_fast_open_forms_remain_valid_without_socket_configuration() {
+    for value in [
+        serde_json::json!(false),
+        serde_json::json!(0),
+        serde_json::json!(-1),
+    ] {
+        let config = vless_reality_config_from_stream_settings(serde_json::json!({
+            "network": "tcp",
+            "security": "reality",
+            "realitySettings": {
+                "dest": "example.com:443",
+                "serverNames": ["example.com"],
+                "privateKey": TEST_REALITY_PRIVATE_KEY,
+                "shortIds": [""]
+            },
+            "sockopt": {"tcpFastOpen": value}
+        }));
+        assert!(first_reality_inbound_runtime(&config).is_ok());
+    }
 }
 
 #[test]
@@ -1737,6 +1763,7 @@ fn reality_type_and_xver_remain_valid_at_startup() {
     inbound.stream_settings = Some(StreamSettingsObject {
         network: Some("tcp".to_string()),
         security: Some("reality".to_string()),
+        sockopt: None,
         reality_settings: Some(settings),
         xhttp_settings: None,
         splithttp_settings: None,

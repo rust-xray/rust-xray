@@ -54,7 +54,7 @@ impl RouteSocketMeta {
     }
 }
 
-/// Upstream: VLESS UUID bytes[6]<<8 | bytes[7].
+/// Upstream: VLESS UUID `bytes[6] << 8 | bytes[7]`.
 pub fn vless_route_from_uuid(id: &uuid::Uuid) -> u16 {
     let bytes = id.as_bytes();
     u16::from_be_bytes([bytes[6], bytes[7]])

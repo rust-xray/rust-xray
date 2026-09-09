@@ -1,6 +1,6 @@
-//! Active target extra-CCS tolerance probe (Stage 5C).
+//! Active target extra-CCS tolerance probe (extra-CCS tolerance probing).
 //!
-//! Injection boundary (Stage 5C audit): intercept the first outgoing rustls TLS 1.3
+//! Injection boundary (extra-CCS tolerance probing audit): intercept the first outgoing rustls TLS 1.3
 //! middlebox compatibility CCS (`14 03 03 00 01 01`) before forwarding it to the target,
 //! inject cumulative extra CCS on the same connection, then forward the original client flight.
 //!

@@ -1,3 +1,8 @@
+//! Mux.Cool parent-session dispatch, TCP children, generic UDP, and XUDP.
+//!
+//! `docs/development/mux-xudp.md` describes the parent/child and cross-parent
+//! ownership rules that these modules enforce.
+
 mod encoder;
 mod frame;
 mod packet_udp;

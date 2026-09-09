@@ -28,6 +28,10 @@ impl NetworkKind {
 }
 
 /// Routing evaluation input shared by data-plane dispatch and RoutingService TestRoute.
+///
+/// The lowercase fields are per-decision matcher caches. They must never replace
+/// the original destination (used by outbound/SNI handling), and DNS results are
+/// kept in `target_ips` rather than being folded into matcher input caches.
 #[derive(Debug, Clone, Default)]
 pub struct RouteContext {
     pub inbound_tag: String,

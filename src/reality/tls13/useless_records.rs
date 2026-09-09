@@ -1,4 +1,4 @@
-//! Consecutive useless/non-advancing TLS record tolerance (Stage 5C runtime policy).
+//! Consecutive useless/non-advancing TLS record tolerance (extra-CCS tolerance probing runtime policy).
 //!
 //! Mirrors upstream REALITY/TLS `retryReadRecord` / `MaxUselessRecords` semantics on the
 //! accepted REALITY server read path.

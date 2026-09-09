@@ -81,6 +81,9 @@ impl TrafficAead {
         let plaintext_len = buffer.len();
         buffer.resize(plaintext_len + AEAD_TAG_LEN, 0);
         let rotate = is_max_nonce(self.nonce.as_bytes());
+        // Xray increments before Seal/Open. The stored counter therefore denotes the
+        // previous record; moving this increment after encryption changes every nonce
+        // and breaks the CommonConn wire stream.
         increase_nonce(self.nonce.as_mut_bytes());
         let nonce_bytes = *self.nonce.as_bytes();
         let total = match self.kind {
@@ -145,6 +148,8 @@ impl TrafficAead {
             ));
         }
         let rotate = is_max_nonce(self.nonce.as_bytes());
+        // Keep Open in lockstep with Seal: both directions consume the incremented
+        // nonce, including the record that triggers post-MaxNonce key rotation.
         increase_nonce(self.nonce.as_mut_bytes());
         let nonce_bytes = *self.nonce.as_bytes();
         match self.kind {

@@ -64,6 +64,9 @@ impl Default for XudpManagerConfig {
     }
 }
 
+/// Cross-parent XUDP association manager, keyed by `GlobalID` rather than a
+/// parent-local `mux_id`. Its sweeper owns detached-session expiry; attachment
+/// changes must preserve workers until expiry or explicit removal.
 pub struct XudpManager {
     inner: Mutex<HashMap<MuxGlobalId, Arc<XudpAssociation>>>,
     config: XudpManagerConfig,

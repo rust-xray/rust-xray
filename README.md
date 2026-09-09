@@ -6,6 +6,7 @@ for Xray-core, and does not claim full Xray-core parity.
 
 The code, tests, and smoke harnesses are the source of truth. The detailed,
 authoritative status matrix is [docs/compatibility-status.md](docs/compatibility-status.md).
+Developers should begin with the [developer guide](docs/development/README.md).
 
 ## Current status
 

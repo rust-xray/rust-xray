@@ -24,7 +24,7 @@ pub struct OutboundHealthObservation {
 }
 
 /// Snapshot source consumed by Observatory-aware balancer algorithms.
-/// Stage 8E4 supplies the production implementation; Stage 8E2 owns selection semantics.
+/// Observatory runtime supplies the production implementation; selection semantics owns selection semantics.
 pub trait OutboundHealthProvider: Send + Sync {
     fn observations(&self) -> Result<Vec<OutboundHealthObservation>, String>;
 }
@@ -35,7 +35,7 @@ pub struct NoOutboundHealthProvider;
 impl OutboundHealthProvider for NoOutboundHealthProvider {
     fn observations(&self) -> Result<Vec<OutboundHealthObservation>, String> {
         Err(
-            "outbound health observations are unavailable until ObservatoryService (Stage 8E4)"
+            "outbound health observations are unavailable until ObservatoryService (Observatory runtime)"
                 .to_string(),
         )
     }

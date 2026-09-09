@@ -27,6 +27,11 @@ pub enum TcpDownlinkEvent {
     Eof,
 }
 
+/// Live TCP child plus the identity of its reader task generation.
+///
+/// Replacing a `mux_id` aborts its previous task, but already queued events can
+/// still arrive. The generation makes those events unambiguously stale instead
+/// of letting generation N affect a replacement at generation N+1.
 struct MuxTcpEntry {
     writer: OwnedWriteHalf,
     generation: u64,

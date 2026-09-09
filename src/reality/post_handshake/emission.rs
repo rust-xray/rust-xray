@@ -1,4 +1,4 @@
-//! Production emission of cached post-handshake camouflage TLS records (Stage 5B).
+//! Production emission of cached post-handshake camouflage TLS records (post-handshake camouflage emission).
 
 use std::time::Duration;
 
@@ -39,7 +39,7 @@ pub fn post_handshake_probe_key(
 ///
 /// **Upstream timing (REALITY @9234c77 tls.go):** `readClientFinished` runs with default
 /// `maxUselessRecords` (32). Probed `GlobalMaxCSSMsgCount` is loaded only after verified
-/// client Finished in the post-handshake loop (alongside Stage 5B record emission).
+/// client Finished in the post-handshake loop (alongside post-handshake camouflage emission record emission).
 pub async fn resolve_ccs_tolerance(key: &PostHandshakeProbeKey) -> UselessRecordTolerance {
     ccs_tolerance_probe_cache()
         .wait_for_ready_tolerance(key, POST_HANDSHAKE_CACHE_WAIT_TIMEOUT)
@@ -53,7 +53,7 @@ pub async fn resolve_post_handshake_wire_lengths(key: &PostHandshakeProbeKey) ->
         .await
 }
 
-/// Emits Stage 5B camouflage ApplicationData records after verified client Finished.
+/// Emits post-handshake camouflage emission camouflage ApplicationData records after verified client Finished.
 ///
 /// Uses the current server application traffic encryptor and advances its sequence once per record.
 /// Does not modify the handshake transcript.

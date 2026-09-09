@@ -398,6 +398,28 @@ fn read_mux_frame_two_frames_coalesced_in_one_read() {
 }
 
 #[test]
+fn session_frame_reader_reuses_metadata_and_preserves_prior_payload() {
+    block_on(async {
+        let mut data = destinationless_keep_frame(&[0xA1; 32]);
+        data.extend(destinationless_keep_frame(b"next"));
+        let mut input = ChunkedReader {
+            data,
+            pos: 0,
+            chunk: 7,
+        };
+        let mut parser = MuxFrameReader::default();
+
+        let first = payload_from_data_command(parser.read_frame(&mut input).await.unwrap());
+        let metadata_capacity = parser.metadata.capacity();
+        let second = payload_from_data_command(parser.read_frame(&mut input).await.unwrap());
+
+        assert_eq!(metadata_capacity, parser.metadata.capacity());
+        assert_eq!(first.as_ref(), &[0xA1; 32]);
+        assert_eq!(second.as_ref(), b"next");
+    });
+}
+
+#[test]
 fn read_mux_frame_fragmented_across_reads() {
     block_on(async {
         let frame_bytes = destinationless_keep_frame(b"fragment-me");

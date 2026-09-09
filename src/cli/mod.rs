@@ -70,7 +70,7 @@ impl std::fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
-/// Parse process arguments (including argv[0] program name).
+/// Parse process arguments (including `argv[0]` program name).
 pub fn parse_args<I, S>(args: I) -> Result<Command, CliError>
 where
     I: IntoIterator<Item = S>,

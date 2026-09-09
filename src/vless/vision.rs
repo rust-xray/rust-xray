@@ -1,3 +1,9 @@
+//! Vision framing and the controlled transition to REALITY DIRECT relay.
+//!
+//! The reader and writer change mode independently; DIRECT is allowed only when
+//! its enclosing transport can safely expose raw bytes. See
+//! `docs/development/vision.md`.
+
 use bytes::Bytes;
 use std::io::{Error, ErrorKind};
 use std::pin::Pin;
@@ -249,9 +255,9 @@ pub fn xtls_padding(
     out.extend_from_slice(&(padding_len as u16).to_be_bytes());
     out.extend_from_slice(content);
     if padding_len > 0 {
-        let mut pad = vec![0u8; padding_len];
-        let _ = getrandom::getrandom(&mut pad);
-        out.extend_from_slice(&pad);
+        let padding_start = out.len();
+        out.resize(padding_start + padding_len, 0);
+        let _ = getrandom::getrandom(&mut out[padding_start..]);
     }
 
     trace!(
@@ -283,8 +289,9 @@ pub fn xtls_unpadding(
         return Ok(input.to_vec());
     }
 
-    let mut data = direction.pending.clone();
-    direction.pending.clear();
+    // Pending bytes are parser-owned until this call. Move their allocation into the
+    // parse buffer instead of cloning them; any returned payload gets its own Vec.
+    let mut data = std::mem::take(&mut direction.pending);
     data.extend_from_slice(input);
 
     if direction.remaining_command == -1
@@ -694,6 +701,9 @@ impl<W> VisionRelayWriter<W> {
             traffic.take_downlink_writer_direct_pending()
         };
         if pending {
+            // The reader requested DIRECT, but the writer changes mode only after
+            // its framed pending buffer has drained in poll_write/poll_flush. This
+            // keeps raw downlink bytes from overtaking a partial Vision/TLS record.
             if let Some(direct_relay) = self.direct_relay.as_ref() {
                 direct_relay.enable_writer();
             }

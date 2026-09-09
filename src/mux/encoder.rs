@@ -67,19 +67,17 @@ fn encode_mux_frame_with_destination(
         ));
     }
 
-    let mut metadata = Vec::with_capacity(20);
-    metadata.extend_from_slice(&id.to_be_bytes());
-    metadata.push(status);
-    metadata.push(MUX_OPT_DATA);
-    metadata.push(match network {
+    let metadata_len = 5 + mux_destination_metadata_len(destination)?;
+    let mut frame = Vec::with_capacity(2 + metadata_len + 2 + data.len());
+    frame.extend_from_slice(&(metadata_len as u16).to_be_bytes());
+    frame.extend_from_slice(&id.to_be_bytes());
+    frame.push(status);
+    frame.push(MUX_OPT_DATA);
+    frame.push(match network {
         MuxNetwork::Tcp => MUX_NETWORK_TCP,
         MuxNetwork::Udp => MUX_NETWORK_UDP,
     });
-    write_mux_destination_metadata(&mut metadata, destination)?;
-
-    let mut frame = Vec::with_capacity(2 + metadata.len() + 2 + data.len());
-    frame.extend_from_slice(&(metadata.len() as u16).to_be_bytes());
-    frame.extend_from_slice(&metadata);
+    write_mux_destination_metadata(&mut frame, destination)?;
     frame.extend_from_slice(&(data.len() as u16).to_be_bytes());
     frame.extend_from_slice(data);
     Ok(frame)
@@ -135,6 +133,20 @@ pub(crate) fn write_mux_destination_metadata(
     Ok(())
 }
 
+fn mux_destination_metadata_len(destination: &VlessDestination) -> std::io::Result<usize> {
+    match destination {
+        VlessDestination::Ip(IpAddr::V4(_), _) => Ok(7),
+        VlessDestination::Ip(IpAddr::V6(_), _) => Ok(19),
+        VlessDestination::Domain(domain, _) if domain.len() <= u8::MAX as usize => {
+            Ok(4 + domain.len())
+        }
+        VlessDestination::Domain(_, _) => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "mux domain destination is too long",
+        )),
+    }
+}
+
 pub fn encode_mux_new_tcp(id: u16, destination: &VlessDestination, data: &[u8]) -> Vec<u8> {
     encode_mux_new(MuxNetwork::Tcp, id, destination, data)
 }
@@ -145,21 +157,20 @@ pub fn encode_mux_new_udp_xudp(
     global_id: &[u8; 8],
     data: &[u8],
 ) -> Vec<u8> {
-    let mut metadata = Vec::new();
-    metadata.extend_from_slice(&id.to_be_bytes());
-    metadata.push(MuxStatus::New.as_wire());
-    metadata.push(
+    let metadata_len = 5 + mux_destination_metadata_len(destination).unwrap() + global_id.len();
+    let mut frame = Vec::with_capacity(2 + metadata_len + 2 + data.len());
+    frame.extend_from_slice(&(metadata_len as u16).to_be_bytes());
+    frame.extend_from_slice(&id.to_be_bytes());
+    frame.push(MuxStatus::New.as_wire());
+    frame.push(
         MuxOption {
             has_data: !data.is_empty(),
         }
         .as_wire(),
     );
-    metadata.push(MUX_NETWORK_UDP);
-    write_mux_destination_metadata(&mut metadata, destination).unwrap();
-    metadata.extend_from_slice(global_id);
-    let mut frame = Vec::new();
-    frame.extend_from_slice(&(metadata.len() as u16).to_be_bytes());
-    frame.extend_from_slice(&metadata);
+    frame.push(MUX_NETWORK_UDP);
+    write_mux_destination_metadata(&mut frame, destination).unwrap();
+    frame.extend_from_slice(global_id);
     if !data.is_empty() {
         frame.extend_from_slice(&(data.len() as u16).to_be_bytes());
         frame.extend_from_slice(data);
@@ -175,22 +186,24 @@ pub(crate) fn encode_mux_new_udp_xudp_with_trailing(
     extra_trailing: &[u8],
     data: &[u8],
 ) -> Vec<u8> {
-    let mut metadata = Vec::new();
-    metadata.extend_from_slice(&id.to_be_bytes());
-    metadata.push(MuxStatus::New.as_wire());
-    metadata.push(
+    let metadata_len = 5
+        + mux_destination_metadata_len(destination).unwrap()
+        + global_id.len()
+        + extra_trailing.len();
+    let mut frame = Vec::with_capacity(2 + metadata_len + 2 + data.len());
+    frame.extend_from_slice(&(metadata_len as u16).to_be_bytes());
+    frame.extend_from_slice(&id.to_be_bytes());
+    frame.push(MuxStatus::New.as_wire());
+    frame.push(
         MuxOption {
             has_data: !data.is_empty(),
         }
         .as_wire(),
     );
-    metadata.push(MUX_NETWORK_UDP);
-    write_mux_destination_metadata(&mut metadata, destination).unwrap();
-    metadata.extend_from_slice(global_id);
-    metadata.extend_from_slice(extra_trailing);
-    let mut frame = Vec::new();
-    frame.extend_from_slice(&(metadata.len() as u16).to_be_bytes());
-    frame.extend_from_slice(&metadata);
+    frame.push(MUX_NETWORK_UDP);
+    write_mux_destination_metadata(&mut frame, destination).unwrap();
+    frame.extend_from_slice(global_id);
+    frame.extend_from_slice(extra_trailing);
     if !data.is_empty() {
         frame.extend_from_slice(&(data.len() as u16).to_be_bytes());
         frame.extend_from_slice(data);
@@ -212,23 +225,22 @@ fn encode_mux_new(
     destination: &VlessDestination,
     data: &[u8],
 ) -> Vec<u8> {
-    let mut metadata = Vec::new();
-    metadata.extend_from_slice(&id.to_be_bytes());
-    metadata.push(MuxStatus::New.as_wire());
-    metadata.push(
+    let metadata_len = 5 + mux_destination_metadata_len(destination).unwrap();
+    let mut frame = Vec::with_capacity(2 + metadata_len + 2 + data.len());
+    frame.extend_from_slice(&(metadata_len as u16).to_be_bytes());
+    frame.extend_from_slice(&id.to_be_bytes());
+    frame.push(MuxStatus::New.as_wire());
+    frame.push(
         MuxOption {
             has_data: !data.is_empty(),
         }
         .as_wire(),
     );
-    metadata.push(match network {
+    frame.push(match network {
         MuxNetwork::Tcp => MUX_NETWORK_TCP,
         MuxNetwork::Udp => MUX_NETWORK_UDP,
     });
-    write_mux_destination_metadata(&mut metadata, destination).unwrap();
-    let mut frame = Vec::new();
-    frame.extend_from_slice(&(metadata.len() as u16).to_be_bytes());
-    frame.extend_from_slice(&metadata);
+    write_mux_destination_metadata(&mut frame, destination).unwrap();
     if !data.is_empty() {
         frame.extend_from_slice(&(data.len() as u16).to_be_bytes());
         frame.extend_from_slice(data);

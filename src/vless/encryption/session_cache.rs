@@ -146,6 +146,9 @@ impl SessionCache {
         let now_unix = self.time.unix_secs();
         Self::prune_expired_locked(&mut guard, now_instant);
         Self::maybe_prune_minute_buckets_locked(&mut guard, now_unix);
+        // Tickets are a second attacker-influenced index into the same sessions. Bound
+        // both structures together: capping only the map would still allow the order
+        // index to grow without limit under repeated ticket issuance.
         if guard.sessions.len() >= MAX_STORED_SESSIONS || guard.tickets.len() >= MAX_STORED_SESSIONS
         {
             Self::clear_locked(&mut guard);

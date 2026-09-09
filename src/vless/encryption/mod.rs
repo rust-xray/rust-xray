@@ -1,3 +1,8 @@
+//! Inbound VLESS `mlkem768x25519plus` handshake and CommonConn traffic layer.
+//!
+//! This module owns key derivation, 0-RTT state, replay protection, and the
+//! wire-compatible AEAD stream. See `docs/development/vless-encryption.md`.
+
 mod aead;
 #[cfg(test)]
 mod client_session;

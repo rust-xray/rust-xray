@@ -102,6 +102,9 @@ struct InflightLeaderGuard {
 
 impl Drop for InflightLeaderGuard {
     fn drop(&mut self) {
+        // A canceled leader must wake waiters. They remove this exact stale entry
+        // before failing so a later query can become the new leader instead of
+        // waiting indefinitely behind work that will never publish a result.
         self.entry.leader_active.store(false, Ordering::Release);
         self.entry.notify.notify_waiters();
     }

@@ -108,7 +108,7 @@ async fn execute_post_handshake_probe_with_client_config(
         )
     })??;
 
-    // Stage 5B captures post-handshake records after the full rustls client handshake. Stage 5C
+    // post-handshake camouflage emission captures post-handshake records after the full rustls client handshake. extra-CCS tolerance probing
     // CCS tolerance probing uses a separate connection (see `ccs_probe_exec`).
     let captured = timeout(
         POST_HANDSHAKE_PROBE_CAPTURE_TIMEOUT,

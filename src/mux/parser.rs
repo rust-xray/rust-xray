@@ -24,6 +24,58 @@ pub fn parse_mux_frame(metadata: &[u8], extra: &[u8]) -> std::io::Result<MuxFram
     build_mux_frame(metadata, data, payload_len)
 }
 
+/// Per-parent Mux parser scratch. Metadata is consumed while constructing a frame, so its
+/// bounded buffer can be retained across frames. Payloads deliberately remain separately owned:
+/// they may outlive the next parse in TCP, UDP, or XUDP child tasks.
+#[derive(Debug, Default)]
+pub(crate) struct MuxFrameReader {
+    metadata: Vec<u8>,
+}
+
+impl MuxFrameReader {
+    pub(crate) async fn read_frame<R>(&mut self, reader: &mut R) -> std::io::Result<MuxFrame>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut len_bytes = [0u8; 2];
+        reader.read_exact(&mut len_bytes).await?;
+        let metadata_len = u16::from_be_bytes(len_bytes) as usize;
+        if metadata_len == 0 || metadata_len > MAX_MUX_METADATA_LEN {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("invalid mux metadata length: {metadata_len}"),
+            ));
+        }
+        self.metadata.clear();
+        self.metadata.resize(metadata_len, 0);
+        reader.read_exact(&mut self.metadata).await?;
+
+        let has_data = self
+            .metadata
+            .get(3)
+            .is_some_and(|opt| opt & MUX_OPT_DATA != 0);
+        let extra = if has_data {
+            let mut data_len = [0u8; 2];
+            reader.read_exact(&mut data_len).await?;
+            let data_len = u16::from_be_bytes(data_len) as usize;
+            if data_len == 0 || data_len > MAX_MUX_DATA_LEN {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("invalid mux data length: {data_len}"),
+                ));
+            }
+            let mut extra = BytesMut::with_capacity(data_len + 2);
+            extra.extend_from_slice(&(data_len as u16).to_be_bytes());
+            extra.resize(data_len + 2, 0);
+            reader.read_exact(&mut extra[2..]).await?;
+            extra.freeze()
+        } else {
+            Bytes::new()
+        };
+        parse_mux_frame_from_bytes(&self.metadata, &extra)
+    }
+}
+
 fn build_mux_frame(metadata: &[u8], data: Bytes, payload_len: usize) -> std::io::Result<MuxFrame> {
     if metadata.len() < 4 {
         return Err(Error::new(
@@ -96,37 +148,7 @@ pub async fn read_mux_frame<R>(reader: &mut R) -> std::io::Result<MuxFrame>
 where
     R: AsyncRead + Unpin,
 {
-    let mut len_bytes = [0u8; 2];
-    reader.read_exact(&mut len_bytes).await?;
-    let metadata_len = u16::from_be_bytes(len_bytes) as usize;
-    if metadata_len == 0 || metadata_len > MAX_MUX_METADATA_LEN {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("invalid mux metadata length: {metadata_len}"),
-        ));
-    }
-    let mut metadata = vec![0u8; metadata_len];
-    reader.read_exact(&mut metadata).await?;
-    let has_data = metadata.get(3).is_some_and(|opt| opt & MUX_OPT_DATA != 0);
-    let extra = if has_data {
-        let mut data_len = [0u8; 2];
-        reader.read_exact(&mut data_len).await?;
-        let data_len = u16::from_be_bytes(data_len) as usize;
-        if data_len == 0 || data_len > MAX_MUX_DATA_LEN {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("invalid mux data length: {data_len}"),
-            ));
-        }
-        let mut extra = BytesMut::with_capacity(data_len + 2);
-        extra.extend_from_slice(&(data_len as u16).to_be_bytes());
-        extra.resize(data_len + 2, 0);
-        reader.read_exact(&mut extra[2..]).await?;
-        extra.freeze()
-    } else {
-        Bytes::new()
-    };
-    parse_mux_frame_from_bytes(&metadata, &extra)
+    MuxFrameReader::default().read_frame(reader).await
 }
 
 fn parse_mux_frame_from_bytes(metadata: &[u8], extra: &Bytes) -> std::io::Result<MuxFrame> {

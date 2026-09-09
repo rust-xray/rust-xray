@@ -1,4 +1,4 @@
-//! Pure cumulative extra-CCS tolerance probe state machine (Stage 5C).
+//! Pure cumulative extra-CCS tolerance probe state machine (extra-CCS tolerance probing).
 //!
 //! Network I/O is injected by the caller; this module only tracks probe progression.
 
