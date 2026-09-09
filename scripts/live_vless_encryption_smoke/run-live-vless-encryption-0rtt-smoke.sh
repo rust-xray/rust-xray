@@ -10,13 +10,12 @@ source "${REPO_ROOT}/scripts/live_reality_smoke/smoke-lib.sh"
 XRAY_COMPAT_BASELINE="${XRAY_COMPAT_BASELINE:-cd4ce973e9f6ef3a7acf9a7030927b4143f9ea47}"
 TEST_PUBLIC_KEY="${TEST_PUBLIC_KEY:-oU1MbEgszawWQJa0S_DxLsNt9G2zyE4rF-CrqvJjTmg}"
 
-SMOKE_SERVER_PORT="${SMOKE_ENC_0RTT_SERVER_PORT:-25443}"
-SMOKE_SOCKS_PORT="${SMOKE_ENC_0RTT_SOCKS_PORT:-10818}"
+SMOKE_SERVER_PORT="${SMOKE_ENC_0RTT_SERVER_PORT:-${SMOKE_SERVER_PORT:-25443}}"
+SMOKE_SOCKS_PORT="${SMOKE_ENC_0RTT_SOCKS_PORT:-${SMOKE_SOCKS_PORT:-10818}}"
 SMOKE_WORK_DIR="${SMOKE_ENC_0RTT_WORK_DIR:-${SMOKE_WORK_DIR:-/tmp/rust-xray-vless-enc-0rtt-smoke-$$}}"
 SMOKE_RUST_XRAY_BIN="${SMOKE_RUST_XRAY_BIN:-${RUST_XRAY_BIN:-${REPO_ROOT}/target/release/rust-xray}}"
 SMOKE_SKIP_BUILD="${SMOKE_SKIP_BUILD:-0}"
 SMOKE_XRAY_BIN="${SMOKE_XRAY_BIN:-${XRAY_BIN:-xray}}"
-SMOKE_LOCAL_HTTP_PORT="${SMOKE_ENC_0RTT_HTTP_PORT:-28080}"
 
 SERVER_LOG="${SMOKE_WORK_DIR}/server.log"
 CLIENT_LOG="${SMOKE_WORK_DIR}/client.log"
@@ -46,20 +45,37 @@ fi
 smoke_print_binary_identity
 echo "xray-core compatibility baseline: ${XRAY_COMPAT_BASELINE}"
 
+if [[ -n "${SMOKE_ENC_0RTT_HTTP_PORT:-}" ]]; then
+  SMOKE_LOCAL_HTTP_PORT="${SMOKE_ENC_0RTT_HTTP_PORT}"
+else
+  SMOKE_LOCAL_HTTP_PORT="$(smoke_pick_ephemeral_port)"
+fi
+echo "local application HTTP target: 127.0.0.1:${SMOKE_LOCAL_HTTP_PORT}"
+smoke_assert_port_available 127.0.0.1 "${SMOKE_LOCAL_HTTP_PORT}" "vless-encryption-0rtt http"
 python3 -m http.server "${SMOKE_LOCAL_HTTP_PORT}" --bind 127.0.0.1 >"${HTTP_LOG}" 2>&1 &
 HTTP_PID=$!
+sleep 0.2
+if ! kill -0 "${HTTP_PID}" 2>/dev/null; then
+  echo "error: local http server exited during startup (see ${HTTP_LOG})" >&2
+  cat "${HTTP_LOG}" >&2 || true
+  exit 1
+fi
 smoke_wait_port 127.0.0.1 "${SMOKE_LOCAL_HTTP_PORT}" "local http echo" 20
 
 CLIENT_CFG="${SMOKE_WORK_DIR}/xray-client-0rtt.json"
 SMOKE_TEMPLATE="${SCRIPT_DIR}/xray-client-encryption.fixture.json" \
   SMOKE_OUTPUT="${CLIENT_CFG}" \
   SMOKE_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
+  SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT}" \
+  SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT}" \
   python3 - <<'PY'
 import json
 import os
 from pathlib import Path
 
 cfg = json.loads(Path(os.environ["SMOKE_TEMPLATE"]).read_text())
+cfg["inbounds"][0]["port"] = int(os.environ["SMOKE_SOCKS_PORT"])
+cfg["outbounds"][0]["settings"]["vnext"][0]["port"] = int(os.environ["SMOKE_SERVER_PORT"])
 cfg["outbounds"][0]["streamSettings"]["realitySettings"]["publicKey"] = os.environ["SMOKE_PUBLIC_KEY"]
 enc = cfg["outbounds"][0]["settings"]["vnext"][0]["users"][0]["encryption"]
 cfg["outbounds"][0]["settings"]["vnext"][0]["users"][0]["encryption"] = enc.replace(".1rtt.", ".0rtt.", 1)

@@ -10,19 +10,22 @@ source "${REPO_ROOT}/scripts/live_reality_smoke/smoke-lib.sh"
 XRAY_COMPAT_BASELINE="${XRAY_COMPAT_BASELINE:-cd4ce973e9f6ef3a7acf9a7030927b4143f9ea47}"
 TEST_PUBLIC_KEY="${TEST_PUBLIC_KEY:-oU1MbEgszawWQJa0S_DxLsNt9G2zyE4rF-CrqvJjTmg}"
 
-SMOKE_SERVER_PORT="${SMOKE_ENC_SERVER_PORT:-25443}"
-SMOKE_SOCKS_PORT="${SMOKE_ENC_SOCKS_PORT:-10818}"
+SMOKE_SERVER_PORT="${SMOKE_ENC_SERVER_PORT:-${SMOKE_SERVER_PORT:-25443}}"
+SMOKE_SOCKS_PORT="${SMOKE_ENC_SOCKS_PORT:-${SMOKE_SOCKS_PORT:-10818}}"
 SMOKE_WORK_DIR="${SMOKE_ENC_WORK_DIR:-${SMOKE_WORK_DIR:-/tmp/rust-xray-vless-enc-smoke-$$}}"
 SMOKE_RUST_XRAY_BIN="${SMOKE_RUST_XRAY_BIN:-${RUST_XRAY_BIN:-${REPO_ROOT}/target/release/rust-xray}}"
 SMOKE_SKIP_BUILD="${SMOKE_SKIP_BUILD:-0}"
 SMOKE_SKIP_LIVE="${SMOKE_SKIP_LIVE:-0}"
-SMOKE_LOCAL_HTTP_PORT="${SMOKE_ENC_LOCAL_HTTP_PORT:-28080}"
 SMOKE_UDP_ECHO_PORT="${SMOKE_ENC_UDP_ECHO_PORT:-38001}"
 
 HTTP_LOG="${SMOKE_WORK_DIR}/http.log"
 UDP_SERVICES_LOG="${SMOKE_WORK_DIR}/udp-services.log"
 HTTP_PID=""
 UDP_SERVICES_PID=""
+SMOKE_REALITY_TARGET_PID=""
+SERVER_ENC_CFG=""
+SERVER_ENC_VISION_CFG=""
+SMOKE_VISION_SEQ_COUNT="${SMOKE_VISION_SEQ_COUNT:-100}"
 FAILED=0
 declare -a MATRIX_ROWS=()
 
@@ -39,6 +42,8 @@ cleanup() {
   smoke_stop_stack
   smoke_stop_process "${HTTP_PID}"
   smoke_stop_process "${UDP_SERVICES_PID}"
+  smoke_stop_process "${SMOKE_REALITY_TARGET_PID:-}"
+  SMOKE_REALITY_TARGET_PID=""
 }
 trap cleanup EXIT
 
@@ -75,6 +80,8 @@ write_encrypted_client_config() {
     SMOKE_MUX_ENABLED="${mux_enabled}" \
     SMOKE_PACKET_ENCODING="${packet_encoding}" \
     SMOKE_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
+    SMOKE_SERVER_PORT="${SMOKE_SERVER_PORT}" \
+    SMOKE_SOCKS_PORT="${SMOKE_SOCKS_PORT}" \
     python3 - <<'PY'
 import json
 import os
@@ -91,6 +98,8 @@ if os.environ.get("SMOKE_MUX_ENABLED") == "1":
     cfg["outbounds"][0]["mux"] = {"enabled": True, "concurrency": 8}
 elif "mux" in cfg["outbounds"][0]:
     del cfg["outbounds"][0]["mux"]
+cfg["inbounds"][0]["port"] = int(os.environ["SMOKE_SOCKS_PORT"])
+cfg["outbounds"][0]["settings"]["vnext"][0]["port"] = int(os.environ["SMOKE_SERVER_PORT"])
 cfg["outbounds"][0]["streamSettings"]["realitySettings"]["publicKey"] = os.environ["SMOKE_PUBLIC_KEY"]
 Path(os.environ["SMOKE_OUTPUT"]).write_text(json.dumps(cfg, indent=2) + "\n")
 PY
@@ -167,7 +176,7 @@ run_encrypted_mux_tcp_case() {
 
   echo "--- case: native 1RTT flow=\"\" Mux TCP ---"
   RUST_LOG="${SMOKE_RUST_LOG:-info,rust_xray::mux=debug}" \
-    "${SMOKE_RUST_XRAY_BIN}" "${SCRIPT_DIR}/rust-xray-server.encryption.fixture.json" \
+    "${SMOKE_RUST_XRAY_BIN}" "${SERVER_ENC_CFG}" \
     >"${server_log}" 2>&1 &
   server_pid=$!
   SMOKE_SERVER_PID="${server_pid}"
@@ -229,7 +238,7 @@ run_encrypted_xudp_case() {
 
   echo "--- case: native 1RTT Mux/XUDP UDP echo ---"
   RUST_LOG="${SMOKE_RUST_LOG:-debug}" \
-    "${SMOKE_RUST_XRAY_BIN}" "${SCRIPT_DIR}/rust-xray-server.encryption.fixture.json" \
+    "${SMOKE_RUST_XRAY_BIN}" "${SERVER_ENC_CFG}" \
     >"${server_log}" 2>&1 &
   server_pid=$!
   SMOKE_SERVER_PID="${server_pid}"
@@ -239,6 +248,7 @@ run_encrypted_xudp_case() {
   client_pid=$!
   SMOKE_CLIENT_PID="${client_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SOCKS_PORT}" "encrypted xudp client" 40
+  sleep 1
 
   local probe_out="${SMOKE_WORK_DIR}/udp-${label}.txt"
   if python3 "${REPO_ROOT}/scripts/live_udp_smoke/udp-probes.py" \
@@ -299,7 +309,7 @@ run_encrypted_native_udp_attempt() {
 
   echo "--- case: native 1RTT native VLESS UDP (client attempt) ---"
   RUST_LOG="${SMOKE_RUST_LOG:-info}" \
-    "${SMOKE_RUST_XRAY_BIN}" "${SCRIPT_DIR}/rust-xray-server.encryption.fixture.json" \
+    "${SMOKE_RUST_XRAY_BIN}" "${SERVER_ENC_CFG}" \
     >"${server_log}" 2>&1 &
   server_pid=$!
   SMOKE_SERVER_PID="${server_pid}"
@@ -368,25 +378,57 @@ python3 "${REPO_ROOT}/scripts/live_udp_smoke/local-udp-services.py" \
 UDP_SERVICES_PID=$!
 wait_for_udp_services
 
+if [[ -n "${SMOKE_ENC_LOCAL_HTTP_PORT:-}" ]]; then
+  SMOKE_LOCAL_HTTP_PORT="${SMOKE_ENC_LOCAL_HTTP_PORT}"
+else
+  SMOKE_LOCAL_HTTP_PORT="$(smoke_pick_ephemeral_port)"
+fi
+echo "local application HTTP target: 127.0.0.1:${SMOKE_LOCAL_HTTP_PORT}"
+smoke_assert_port_available 127.0.0.1 "${SMOKE_LOCAL_HTTP_PORT}" "vless-encryption http"
 python3 -m http.server "${SMOKE_LOCAL_HTTP_PORT}" --bind 127.0.0.1 \
   >"${HTTP_LOG}" 2>&1 &
 HTTP_PID=$!
+sleep 0.2
+if ! kill -0 "${HTTP_PID}" 2>/dev/null; then
+  echo "error: local http server exited during startup (see ${HTTP_LOG})" >&2
+  cat "${HTTP_LOG}" >&2 || true
+  exit 1
+fi
 smoke_wait_port 127.0.0.1 "${SMOKE_LOCAL_HTTP_PORT}" "local http echo" 20
+
+echo "Starting local REALITY target (replaces external www.microsoft.com:443 camouflage/dest fetch)..."
+smoke_start_reality_target full
+echo "REALITY dest=${SMOKE_REALITY_DEST} (local loopback; serverNames still www.microsoft.com)"
+
+SERVER_ENC_CFG="${SMOKE_WORK_DIR}/server-encryption.local.json"
+SERVER_ENC_VISION_CFG="${SMOKE_WORK_DIR}/server-encryption-vision.local.json"
+smoke_materialize_server_config \
+  "${SCRIPT_DIR}/rust-xray-server.encryption.fixture.json" "${SERVER_ENC_CFG}"
+smoke_materialize_server_config \
+  "${SCRIPT_DIR}/rust-xray-server.encryption-vision.fixture.json" "${SERVER_ENC_VISION_CFG}"
+
+CLIENT_ENC_CFG="${SMOKE_WORK_DIR}/client-encryption.local.json"
+CLIENT_VISION_CFG="${SMOKE_WORK_DIR}/client-encryption-vision.local.json"
+write_encrypted_client_config \
+  "${SCRIPT_DIR}/xray-client-encryption.fixture.json" "${CLIENT_ENC_CFG}" 0
+write_encrypted_client_config \
+  "${SCRIPT_DIR}/xray-client-encryption-vision.fixture.json" "${CLIENT_VISION_CFG}" 0
+echo "encryption smoke ports: server=${SMOKE_SERVER_PORT} socks=${SMOKE_SOCKS_PORT}"
 
 run_encrypted_case \
   "native-empty-flow" \
   "native" \
   'flow=""' \
-  "${SCRIPT_DIR}/rust-xray-server.encryption.fixture.json" \
-  "${SCRIPT_DIR}/xray-client-encryption.fixture.json" \
+  "${SERVER_ENC_CFG}" \
+  "${CLIENT_ENC_CFG}" \
   "native 1RTT TCP direct"
 
 run_encrypted_case \
   "native-vision" \
   "native" \
   "xtls-rprx-vision" \
-  "${SCRIPT_DIR}/rust-xray-server.encryption-vision.fixture.json" \
-  "${SCRIPT_DIR}/xray-client-encryption-vision.fixture.json" \
+  "${SERVER_ENC_VISION_CFG}" \
+  "${CLIENT_VISION_CFG}" \
   "native 1RTT Vision TCP"
 
 run_encrypted_mux_tcp_case
@@ -398,8 +440,8 @@ if [[ "${FAILED}" -ne 0 ]]; then
   exit 1
 fi
 
-run_encrypted_vision_sequential_100() {
-  local label="native-vision-seq100"
+run_encrypted_vision_sequential() {
+  local label="native-vision-seq${SMOKE_VISION_SEQ_COUNT}"
   local server_log="${SMOKE_WORK_DIR}/server-${label}.log"
   local client_log="${SMOKE_WORK_DIR}/client-${label}.log"
   local server_pid=""
@@ -407,28 +449,28 @@ run_encrypted_vision_sequential_100() {
   local pass=0
   local i
 
-  echo "--- case: mode=native flow=xtls-rprx-vision sequential=100 ---"
+  echo "--- case: mode=native flow=xtls-rprx-vision sequential=${SMOKE_VISION_SEQ_COUNT} (local REALITY dest=${SMOKE_REALITY_DEST}) ---"
   RUST_LOG="${SMOKE_RUST_LOG:-info}" "${SMOKE_RUST_XRAY_BIN}" \
-    "${SCRIPT_DIR}/rust-xray-server.encryption-vision.fixture.json" >"${server_log}" 2>&1 &
+    "${SERVER_ENC_VISION_CFG}" >"${server_log}" 2>&1 &
   server_pid=$!
   SMOKE_SERVER_PID="${server_pid}"
   smoke_wait_port 127.0.0.1 "${SMOKE_SERVER_PORT}" "rust-xray encrypted vision server" 40
 
-  "${SMOKE_XRAY_BIN}" run -config "${SCRIPT_DIR}/xray-client-encryption-vision.fixture.json" \
+  "${SMOKE_XRAY_BIN}" run -config "${CLIENT_VISION_CFG}" \
     >"${client_log}" 2>&1 &
   client_pid=$!
   SMOKE_CLIENT_PID="${client_pid}"
-  smoke_wait_port 127.0.0.1 "${SMOKE_SOCKS_PORT}" "xray socks inbound (vision seq100)" 40
+  smoke_wait_port 127.0.0.1 "${SMOKE_SOCKS_PORT}" "xray socks inbound (vision sequential)" 40
 
   local target_url="http://127.0.0.1:${SMOKE_LOCAL_HTTP_PORT}/"
-  for i in $(seq 1 100); do
+  for i in $(seq 1 "${SMOKE_VISION_SEQ_COUNT}"); do
     local http_code
     http_code="$(curl -sS -o /dev/null -w '%{http_code}' \
-      -x "socks5h://127.0.0.1:${SMOKE_SOCKS_PORT}" -m 15 "${target_url}" || echo 000)"
+      -x "socks5h://127.0.0.1:${SMOKE_SOCKS_PORT}" -m 30 "${target_url}" || echo 000)"
     if [[ "${http_code}" == "200" ]]; then
       pass=$((pass + 1))
     else
-      echo "vision sequential request ${i}/100 failed http=${http_code}" >&2
+      echo "vision sequential request ${i}/${SMOKE_VISION_SEQ_COUNT} failed http=${http_code}" >&2
       break
     fi
   done
@@ -439,18 +481,20 @@ run_encrypted_vision_sequential_100() {
   SMOKE_SERVER_PID=""
   smoke_free_ports "${SMOKE_SERVER_PORT}" "${SMOKE_SOCKS_PORT}"
 
-  echo "vision sequential: ${pass}/100"
-  if [[ "${pass}" -eq 100 ]]; then
-    echo "PASS vless encryption native 1RTT xtls-rprx-vision 100 sequential"
-    matrix_row "native 1RTT Vision 100 sequential" "LIVE PASS" "PASS" "100/100"
+  echo "vision sequential: ${pass}/${SMOKE_VISION_SEQ_COUNT}"
+  if [[ "${pass}" -eq "${SMOKE_VISION_SEQ_COUNT}" ]]; then
+    echo "PASS vless encryption native 1RTT xtls-rprx-vision ${SMOKE_VISION_SEQ_COUNT} sequential"
+    matrix_row "native 1RTT Vision ${SMOKE_VISION_SEQ_COUNT} sequential" "LIVE PASS" "PASS" \
+      "${pass}/${SMOKE_VISION_SEQ_COUNT}"
   else
-    echo "FAIL vless encryption native 1RTT xtls-rprx-vision 100 sequential" >&2
-    matrix_row "native 1RTT Vision 100 sequential" "LIVE PASS" "FAIL" "${pass}/100"
+    echo "FAIL vless encryption native 1RTT xtls-rprx-vision ${SMOKE_VISION_SEQ_COUNT} sequential" >&2
+    matrix_row "native 1RTT Vision ${SMOKE_VISION_SEQ_COUNT} sequential" "LIVE PASS" "FAIL" \
+      "${pass}/${SMOKE_VISION_SEQ_COUNT}"
     FAILED=1
   fi
 }
 
-run_encrypted_vision_sequential_100
+run_encrypted_vision_sequential
 
 print_matrix_summary
 

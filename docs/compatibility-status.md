@@ -1,9 +1,11 @@
 # Compatibility status
 
 **Branch:** `experiment`<br>
-**rust-xray baseline:** `f054aa83bd0d09a6e3fddca624e8b2f9b71cc44b`<br>
+**rust-xray baseline:** `22123cb1faaf79d70c37a07f19d7f998fb31b43a`<br>
 **Xray-core reference:** [XTLS/Xray-core](https://github.com/XTLS/Xray-core)
-`main` at `cd4ce973e9f6ef3a7acf9a7030927b4143f9ea47`
+`main` at `52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120` (v26.9.9)<br>
+**REALITY reference:** [XTLS/REALITY](https://github.com/XTLS/REALITY)
+at `8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8`
 
 This is the authoritative, current feature-status document. It records observed
 code and test/harness behavior, not an assertion of production readiness, full

@@ -24,12 +24,19 @@ canonical runner currently recognizes one narrow environment classification:
 external REALITY target DNS resolution failure. All other nonzero suite results
 remain failures until evidence demonstrates an external-only cause.
 
+VLESS Encryption and UDP live smokes start a local REALITY loopback target
+(`smoke_start_reality_target`) and materialize server configs with that `dest`,
+so camouflage/dest fetch does not depend on reaching `www.microsoft.com:443`.
+Fixture JSON still lists `www.microsoft.com` for `serverNames` and as the
+template `dest`; the harness rewrites `dest` at runtime only. Encryption smokes
+also pick an ephemeral local HTTP application port (unless
+`SMOKE_ENC_LOCAL_HTTP_PORT` is set) and materialize client/server listener
+ports from the canonical runner's `SMOKE_SERVER_PORT` / `SMOKE_SOCKS_PORT`.
+
 The REALITY 10 MiB Vision regression downloads its payload from
-`speed.cloudflare.com`. Its REALITY camouflage target may still be local for
-that fixture. A CDN stall is therefore evidence about the external download,
-not automatically about rust-xray; conversely, do not label every Vision
-failure environmental. Preserve logs and inspect the local server/client phases
-before classifying the result.
+`speed.cloudflare.com`. A CDN stall is evidence about the external download,
+not automatically about rust-xray. Preserve logs and inspect the local
+server/client phases before classifying a result.
 
 For diagnosis, use `RUST_LOG` with normal tracing filters. The source also
 provides `RUST_XRAY_DEBUG_TLS13_PLAINTEXT`,

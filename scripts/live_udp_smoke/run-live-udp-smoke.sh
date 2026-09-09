@@ -26,6 +26,7 @@ SMOKE_SERVER_LOG="${SMOKE_WORK_DIR}/server.log"
 SMOKE_CLIENT_LOG="${SMOKE_WORK_DIR}/client.log"
 SMOKE_RUST_XRAY_BIN="${SMOKE_RUST_XRAY_BIN:-${RUST_XRAY_BIN:-${REPO_ROOT}/target/release/rust-xray}}"
 SMOKE_UDP_SERVICES_PID=""
+SMOKE_REALITY_TARGET_PID=""
 SMOKE_FAILED=0
 declare -a MATRIX_ROWS=()
 
@@ -161,6 +162,8 @@ cleanup() {
   smoke_stop_stack
   smoke_stop_process "${SMOKE_UDP_SERVICES_PID:-}"
   SMOKE_UDP_SERVICES_PID=""
+  smoke_stop_process "${SMOKE_REALITY_TARGET_PID:-}"
+  SMOKE_REALITY_TARGET_PID=""
 }
 trap cleanup EXIT
 
@@ -169,6 +172,9 @@ prepare_workspace() {
   : >"${SMOKE_SERVER_LOG}"
   : >"${SMOKE_CLIENT_LOG}"
   smoke_init_standard_ports "live-udp-smoke"
+  echo "Starting local REALITY target (replaces external www.microsoft.com:443 camouflage/dest fetch)..."
+  smoke_start_reality_target full
+  echo "REALITY dest=${SMOKE_REALITY_DEST} (local loopback; serverNames still www.microsoft.com)"
 }
 
 build_rust_xray() {
@@ -500,7 +506,11 @@ write_report() {
   {
     echo "STATUS: $([[ "${SMOKE_FAILED}" == "0" ]] && echo READY || echo BLOCKED)"
     echo "CURRENT HEAD: $(git -C "${REPO_ROOT}" rev-parse HEAD)"
-    echo "WORKING TREE: uncommitted UDP changes present"
+    if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain)" ]]; then
+      echo "WORKING TREE: uncommitted changes present"
+    else
+      echo "WORKING TREE: clean"
+    fi
     echo "XRAY CLIENT: $(xray version 2>/dev/null | head -1 || echo unknown)"
     echo "XRAY UPSTREAM MAIN: 5e245b082e6be8c8899c34410f488e8ab001aaba"
     echo "TEST ENVIRONMENT: darwin loopback + local UDP services + Xray 26.3.27 client"

@@ -2,7 +2,7 @@
 
 Xray-core is authoritative for wire semantics, protocol semantics, security
 semantics, and externally observable behavior. This pass uses
-[Xray-core @ `5ca6f4b7d4dc20a881d4330e498892697627ec0c`](https://github.com/XTLS/Xray-core/commit/5ca6f4b7d4dc20a881d4330e498892697627ec0c)
+[Xray-core @ `52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120`](https://github.com/XTLS/Xray-core/commit/52a412d9e2f5c2a5142b1b4e2ab3771dacb8b120)
 and [REALITY @ `8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8`](https://github.com/XTLS/REALITY/commit/8cdf7bf9c7f09cb9814bf08c3eb877f68b85fba8)
 as reviewable references. Say “Xray-compatible”, “upstream-compatible”, or
 “wire-compatible with Xray-core @ SHA” only for the behavior and evidence in
