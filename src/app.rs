@@ -526,7 +526,9 @@ async fn handle_tls_client(
 
     match inspect_reality_client_hello(&ch, &record.handshake_message, inspect_cfg) {
         Ok(RealityDecision::Accepted(accepted)) => {
-            // Accepted REALITY clients must not be sent to fallback relay.
+            // Before admission, ordinary or malformed traffic may still use the configured
+            // fallback. This decision commits the connection to the REALITY TLS/VLESS path:
+            // every later protocol failure closes it instead of attempting fallback again.
             let mldsa65_seed = config
                 .inbound
                 .reality

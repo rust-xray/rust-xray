@@ -195,6 +195,8 @@ impl SessionCache {
             return Err(SessionLookupError::ExpiredSession);
         }
         let replay_key = ReplayKey::from_nfs_key(nfs_key);
+        // Lookup and insertion share this lock. Splitting them would let concurrent copies of
+        // the same 0-RTT hello both pass the replay check before either records its fresh NFS.
         if !session.replay_keys.insert(replay_key) {
             return Err(SessionLookupError::ReplayDetected);
         }

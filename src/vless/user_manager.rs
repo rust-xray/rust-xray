@@ -239,6 +239,9 @@ impl VlessUserManager {
             ));
         }
 
+        // A relay owns this copied authentication result after the request is accepted. Dynamic
+        // user removal changes later lookups, but must not leave an in-flight connection holding
+        // a borrow into the registry or revoke its already-authenticated identity mid-relay.
         Ok(VlessAuthenticatedClient {
             id: wire_id,
             email: if client.email.is_empty() {

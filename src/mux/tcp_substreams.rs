@@ -68,6 +68,8 @@ impl MuxTcpSubstreams {
 
     pub fn remove(&mut self, mux_id: u16) {
         if let Some(entry) = self.streams.remove(&mux_id) {
+            // The map entry owns its reader task. Abort on retirement so a disconnected child
+            // cannot retain its socket or keep producing events after its mux_id is reused.
             entry.reader_task.abort();
         }
     }
@@ -160,6 +162,9 @@ pub(crate) async fn handle_mux_tcp_command(
             }
             if active.streams.contains_key(&id) {
                 debug!(mux_id = id, "replacing existing mux tcp substream");
+                // Retire the old generation before allocating the replacement. Its queued
+                // events carry the old generation token and therefore cannot affect the new
+                // child that reuses this parent-local mux_id.
                 active.remove(id);
             }
             let destination_label = format_vless_destination(&destination.destination);

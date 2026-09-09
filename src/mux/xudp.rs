@@ -139,6 +139,9 @@ impl XudpManager {
                     return Ok(mux_actions(Vec::new()));
                 }
                 *existing.status.lock().await = XudpStatus::Initializing;
+                // A New with the same GlobalID reattaches the association to a replacement
+                // parent. Keep the association object so its workers and UDP socket survive;
+                // later cleanup uses pointer identity and cannot remove a newer replacement.
                 existing.expire_at.lock().await.take();
                 Arc::clone(existing)
             } else {
@@ -235,6 +238,9 @@ impl XudpManager {
             .as_ref()
             .is_some_and(|attached| attached.mux_id == mux_id)
         {
+            // Keep may omit the destination once New established the association. The routed
+            // UDP socket remains owned by GlobalID, while an explicit destination still acts as
+            // the protocol's per-packet override.
             debug!(
                 path = "xudp",
                 mux_id,
@@ -297,6 +303,8 @@ impl XudpManager {
             ids
         };
         for global_id in expired {
+            // Revalidate status and deadline when removing: an association can be reattached
+            // after this scan, and an old sweep must not tear down that live attachment.
             self.remove_association_if_expired(global_id, now).await;
         }
     }

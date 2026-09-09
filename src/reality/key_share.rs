@@ -87,7 +87,10 @@ pub fn find_reality_auth_x25519_public_key(
     None
 }
 
-/// Builds a client hybrid key_share payload: opaque ML-KEM prefix + trailing X25519 public key.
+/// Builds a client hybrid key_share payload: `ML-KEM encapsulation key || X25519 public key`.
+///
+/// The fixed-width components have no wire delimiter, so their order is part of
+/// the Xray-compatible handshake encoding.
 pub fn build_x25519mlkem768_client_key_share(
     x25519_public_key: [u8; X25519_PUBLIC_KEY_LEN],
 ) -> Vec<u8> {

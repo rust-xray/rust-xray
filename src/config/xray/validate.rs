@@ -131,6 +131,9 @@ fn validate_tcp_fast_open(stream: &StreamSettingsObject) -> std::io::Result<()> 
         TcpFastOpenValue::Number(value) => *value > 0.0,
     };
     if enabled {
+        // Accept Xray's boolean and numeric forms for configuration compatibility, but this
+        // runtime has no socket layer that enables SYN-data. Keep normal TCP rather than
+        // silently claiming that tcpFastOpen took effect.
         warn!(
             tcp_fast_open = ?value,
             "streamSettings.sockopt.tcpFastOpen is unsupported by this no-unsafe build; using normal TCP"
@@ -249,6 +252,9 @@ pub(crate) fn validate_vless_decryption(
     decryption: Option<&str>,
     fallbacks: &[FallbackConfig],
 ) -> std::io::Result<VlessDecryption> {
+    // Preserve the distinction between omitted, empty, and unsupported decryption settings at
+    // normalization time. Encrypted VLESS and fallback combinations are wire-policy choices;
+    // accepting an ambiguous value would defer an incompatible decision into the live path.
     validate_inbound_decryption_with_fallbacks(decryption, !fallbacks.is_empty()).map_err(|err| {
         std::io::Error::new(
             if err.to_string().contains("unsupported") {

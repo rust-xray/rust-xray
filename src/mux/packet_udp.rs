@@ -72,6 +72,9 @@ impl MuxUdpSessionManager {
         }
 
         if let Some(replaced) = self.sessions.lock().await.remove(&mux_id) {
+            // Extract while holding the map lock, then stop workers after releasing it. Task
+            // shutdown can await, and keeping the shared session map locked across that work
+            // would stall unrelated UDP associations.
             Self::shutdown_session(&replaced).await;
             debug!(mux_id, "replaced existing generic mux udp session");
         }

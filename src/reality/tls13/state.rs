@@ -177,6 +177,9 @@ impl RealityTls13ServerState {
         client_hello: &ClientHelloPayload,
     ) -> std::io::Result<&[u8]> {
         let selected_group = self.observed_server_hello.selected_key_share_group;
+        // Mirror the target ServerHello's KEX group for TLS wire camouflage. Once REALITY was
+        // accepted there is no cross-group retry: substituting another client share would make
+        // the visible ServerHello disagree with the target behavior being imitated.
         let server_key_share =
             generate_server_key_share_for_observed_group(selected_group, client_hello)?;
         let key_share_extension_body = encode_key_share_extension_body(&server_key_share)?;
@@ -386,6 +389,9 @@ impl RealityTls13ServerState {
         let mut encryptor = Tls13RecordEncryptor::new(self.suite, traffic_keys)?;
         let record = encryptor
             .encrypt_camouflage_position6_record_with_desired_wire_len(desired_wire_len)?;
+        // Position-6 is an ordinary server application-traffic record for nonce purposes.
+        // Carry its advanced state forward: cloning or resetting it here would either reuse a
+        // nonce or make subsequent application records diverge from the peer's record order.
         self.server_application_write_sequence = encryptor.sequence;
         Ok(Some(record))
     }
@@ -412,6 +418,9 @@ impl RealityTls13ServerState {
             traffic_keys,
             server_application_traffic_secret,
         )?;
+        // Normal application data, position-6 camouflage, and a fatal overflow alert share
+        // this one server write sequence. The alert must start exactly after every record the
+        // client could have observed.
         encryptor.sequence = self.server_application_write_sequence;
         Ok(encryptor)
     }

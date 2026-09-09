@@ -268,6 +268,9 @@ impl DnsEngine {
         }
 
         let (leader, _leader_guard) = {
+            // Hold this lock only to elect one leader or clone an existing entry. Upstream DNS
+            // I/O happens after it is released, and the guard wakes waiters if that leader is
+            // canceled before publishing a result.
             let mut guard = self.inflight.lock().await;
             if let Some(existing) = guard.get(&inflight_key).cloned() {
                 self.record_inflight_dedup_hit();

@@ -21,6 +21,10 @@ pub(crate) const XUDP_MAX_PACKET_LEN: usize = 8192;
 pub(crate) const XUDP_UPSTREAM_CLIENT_MAX_PAYLOAD: usize = XUDP_MAX_PACKET_LEN - 666;
 pub(crate) const XUDP_GLOBAL_ID_LEN: usize = 8;
 
+/// XUDP association identifier that survives parent Mux reconnects.
+///
+/// A `mux_id` is only unique inside one parent Mux session; this eight-byte ID
+/// selects the cross-parent XUDP association.
 pub type MuxGlobalId = [u8; XUDP_GLOBAL_ID_LEN];
 
 pub fn is_xudp_global_id(id: &MuxGlobalId) -> bool {

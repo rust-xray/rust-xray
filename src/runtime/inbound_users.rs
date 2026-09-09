@@ -19,6 +19,9 @@ impl std::fmt::Display for InboundUsersError {
 impl std::error::Error for InboundUsersError {}
 
 /// Registry of per-inbound-tag VLESS user managers.
+///
+/// Authentication takes an `Arc` snapshot from this registry. Unregistering a tag therefore
+/// affects future lookups without invalidating user state already owned by a live connection.
 #[derive(Debug, Default)]
 pub struct InboundUserManagers {
     managers: RwLock<HashMap<String, Arc<VlessUserManager>>>,

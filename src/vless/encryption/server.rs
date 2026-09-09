@@ -254,6 +254,9 @@ impl VlessEncryptionServer {
         };
 
         let xor_conn = if self.nfs_chain.xor_mode() == XorMode::Random {
+            // In 0-RTT, server-to-client traffic is seeded from the server random prefix while
+            // client-to-server traffic uses the client IV. Reversing them changes the stream
+            // before CommonConn can authenticate its first record.
             Some(XorConnState {
                 outbound_ctr: CtrStream::new(united_key.as_bytes(), &server_random),
                 inbound_ctr: CtrStream::new(united_key.as_bytes(), &iv),
@@ -398,6 +401,9 @@ impl VlessEncryptionServer {
         let prefix_stream = io.into_prefix_stream();
 
         let xor_conn = if self.nfs_chain.xor_mode() == XorMode::Random {
+            // The 1-RTT downlink seed is the issued ticket; uplink remains keyed by the client
+            // IV. `random` is a handshake/traffic wrapper mode, not permission to add a raw
+            // post-handshake bypass.
             Some(XorConnState {
                 outbound_ctr: CtrStream::new(united_key.as_bytes(), &ticket),
                 inbound_ctr: CtrStream::new(united_key.as_bytes(), &iv),

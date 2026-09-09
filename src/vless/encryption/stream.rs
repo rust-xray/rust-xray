@@ -18,6 +18,9 @@ const TRAFFIC_HEADER_LEN: usize = 5;
 const AEAD_TAG_LEN: usize = 16;
 
 /// Encrypted VLESS traffic adapter (upstream `CommonConn`) over any AsyncRead+AsyncWrite transport.
+///
+/// `pending_frame` owns already-encrypted wire bytes. Once a write is accepted, retries drain
+/// that frame rather than encrypting the caller's buffer again under a later AEAD nonce.
 pub struct VlessEncryptedStream<S> {
     inner: S,
     reader: EncryptedReader,
@@ -134,6 +137,10 @@ enum ReadPhase {
     NeedBody { payload_len: usize },
 }
 
+/// Fragmented CommonConn record reader.
+///
+/// The five-byte header and ciphertext body may arrive separately. Plaintext becomes visible
+/// only after the complete body authenticates with the header as AEAD associated data.
 pub(crate) struct EncryptedReader {
     aead: TrafficAead,
     context_label: Vec<u8>,
@@ -510,6 +517,9 @@ where
 
         match state.phase {
             ReadPhase::NeedHeader => {
+                // Retain partial header bytes across polls. An empty EOF is clean only before a
+                // new header begins; any retained header/body means authenticated framing ended
+                // mid-record and must be reported as truncation.
                 if state.header_filled < TRAFFIC_HEADER_LEN {
                     let mut tmp = [0u8; TRAFFIC_HEADER_LEN];
                     let mut read_buf = ReadBuf::new(&mut tmp[state.header_filled..]);
@@ -618,6 +628,8 @@ where
         }
         Poll::Ready(Ok(n)) if n >= frame.len() => Poll::Ready(Ok(true)),
         Poll::Ready(Ok(n)) => {
+            // Freeze the unsent suffix before returning. The frame's backing storage is now
+            // owned by this async writer and can outlive the caller's next poll.
             *pending_frame = Some(frame.clone().split_off(n).freeze());
             Poll::Ready(Ok(false))
         }
@@ -709,6 +721,9 @@ where
     W: AsyncWrite,
 {
     if !buf.is_empty() {
+        // Copying into the logical plaintext queue accepts this caller write. If the socket
+        // later reports Pending, future polls must drain the queued encrypted frame instead of
+        // treating `buf` as a new record and advancing the AEAD a second time.
         let accept = buf.len();
         state.plaintext_buf.extend_from_slice(buf);
         let mut coop = PARTIAL_WRITE_COOP_BUDGET;

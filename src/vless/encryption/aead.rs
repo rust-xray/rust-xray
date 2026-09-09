@@ -185,6 +185,9 @@ impl TrafficAead {
 
     /// Rotate AEAD using post-max-nonce context (upstream `NewAEAD` after MaxNonce).
     pub fn rotate_from_context(&mut self, rotation_context: &[u8]) {
+        // The MaxNonce record used the incremented terminal nonce. Rotation derives a fresh
+        // traffic key from that authenticated record, then resets only the nonce for the new
+        // key epoch; resetting without rekeying would eventually repeat an AEAD nonce.
         derive_blake3_key(&mut self.key, rotation_context, &self.united_key);
         *self.nonce.as_mut_bytes() = [0u8; AEAD_NONCE_LEN];
     }

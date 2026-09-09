@@ -37,7 +37,10 @@ impl fmt::Debug for TrafficDirectionKeys {
     }
 }
 
-/// Optional XOR wrapping state for `random` mode (Stage VLESS-4D).
+/// Optional directional XOR wrapping state for `random` mode.
+///
+/// It wraps CommonConn traffic after the handshake; each direction owns a
+/// separate CTR state because its seed and skipped prefix differ.
 pub struct XorConnState {
     pub outbound_ctr: CtrStream,
     pub inbound_ctr: CtrStream,

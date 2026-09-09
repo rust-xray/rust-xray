@@ -108,6 +108,8 @@ impl RuntimeRouter {
     }
 
     pub async fn pick_route(&self, mut ctx: RouteContext) -> Result<RouteDecision, RouteError> {
+        // Clone the immutable table snapshot before any DNS await. Concurrent configuration
+        // updates publish a later snapshot, while this decision remains internally consistent.
         let table = Arc::clone(&*self.table.read().expect("router table lock"));
         self.pick_route_with_table(&table, &mut ctx).await
     }
@@ -251,6 +253,8 @@ impl RuntimeRouter {
             && !ctx.skip_dns_resolve
             && self.resolve_target_ips(ctx).await
         {
+            // DNS added matcher input after the first pass. Re-evaluate every rule instead of
+            // caching a prior result that may have depended on the absence of target IPs.
             if let Some(decision) = self.match_rules(table, ctx, false).await? {
                 return Ok(decision);
             }

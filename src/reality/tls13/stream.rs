@@ -499,6 +499,8 @@ fn parse_application_stream_tls_alert(
                 close_notify = alert_description == TLS_ALERT_CLOSE_NOTIFY,
                 "TLS warning alert on application stream"
             );
+            // TLS close_notify is authenticated application-stream termination, so expose it
+            // as clean EOF. A transport EOF in a partial TLS record is still truncation.
             Ok(ApplicationStreamRecord::PeerClosed)
         }
         TLS_ALERT_LEVEL_FATAL => Err(Error::new(
@@ -611,6 +613,10 @@ impl From<Error> for ClientFinishedReadError {
 }
 
 /// Writes at most one encrypted fatal `unexpected_message` alert (best-effort).
+///
+/// It uses the current application traffic state. Alert-write failure is logged but never
+/// replaces the triggering overflow error, which remains the reason the accepted connection
+/// terminates and must not re-enter REALITY fallback.
 pub(crate) async fn write_fatal_useless_overflow_alert<W>(
     stream: &mut W,
     encryptor: &mut Tls13RecordEncryptor,
@@ -847,6 +853,8 @@ impl Tls13ClientReadState {
             let mut chunk = [0u8; 4096];
             let read = inner.read(&mut chunk).await?;
             if read == 0 {
+                // EOF between complete records is a clean stream end; buffered TLS header or
+                // body bytes prove that the peer truncated a record and must remain an error.
                 return match classify_tls_ciphertext_eof(&self.ciphertext_read_buf) {
                     TlsCiphertextEofKind::CleanBetweenRecords => {
                         self.read_eof = true;
@@ -1231,6 +1239,9 @@ where
         let direct_reader_enabled = this.direct_relay.load(Ordering::SeqCst);
         if direct_reader_enabled {
             if !this.direct_mode_active {
+                // The TLS parser may already own bytes read ahead of COMMAND_DIRECT. Hand them
+                // to the caller before the raw reader takes over, or direct relay would skip
+                // and reorder application payload.
                 if !this.read.ciphertext_read_buf.is_empty() {
                     this.read
                         .plaintext_read_buf
@@ -1779,6 +1790,8 @@ where
     W: Tls13OverflowAlertWriter,
 {
     if useless_record_overflow_limit(&err).is_some() {
+        // The alert is best effort; preserve the reader's protocol error even if the peer has
+        // already gone away while we try to send it.
         let _ = writer.send_useless_overflow_fatal_alert().await;
     }
     Err(err)
